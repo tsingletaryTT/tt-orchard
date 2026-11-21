@@ -136,6 +136,30 @@ def _number(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) != float("inf") else None
 
 
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+
+
+def _shown(value) -> str:
+    """`value` as it may appear in a stub reason: a short plain name or a small number as its repr, anything else as a word that names its type. A reason
+    goes into the docstring of the stub and into the ledger; a quote, a backslash or a newline in a config value would end the docstring and leave a
+    port that does not parse (a `sliding_window` of `'\"\"\"` did), so a config value is never echoed as it came."""
+    if isinstance(value, str):
+        return repr(value) if _PLAIN_NAME.fullmatch(value) else "<a string that is not a plain name>"
+    if value is None or isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, int) and abs(value) < 10 ** 12:
+        return repr(value)
+    if isinstance(value, float) and value == value and abs(value) < 1e12:
+        return repr(value)
+    return f"<a {type(value).__name__}>"
+
+
+def _float_of(x):
+    """`x` as a float when it is a finite number that a float can hold, else None. An int of 400 digits passes `_number` and raises OverflowError in
+    `float(...)`; this answers None for it (issue 461's rule, `safeio.fits_float`)."""
+    return float(x) if safeio.fits_float(x) else None          # finite: ok fits_float has checked that the value is a finite number a float holds
+
+
 # ---- the construction: which class is at which module path -------------------------------------------------------------------------------
 
 def _group_size_fits(attrs: dict, width: int) -> bool:
@@ -1707,6 +1731,23 @@ def _rope_dict(section: dict) -> dict:
     return rope if isinstance(rope, dict) else {}
 
 
+def rope_keyed_by_layer_type(section: dict) -> bool:
+    """True when `rope_parameters` holds one rope block per layer type (`{"full_attention": {...}, "sliding_attention": {...}}`, the transformers 5
+    form that `microsoft/Aion-1.0-Instruct-2.3B` uses) and not one flat block. A flat block has plain values (`rope_type`, `rope_theta`, `factor`);
+    a layer-type-keyed one has only dict values. Read as a flat block it has no `rope_type` and no `rope_theta`, so the generator wrote the default
+    type with theta 10000.0 (issue 790)."""
+    rope = section.get("rope_parameters") if isinstance(section, dict) else None
+    return isinstance(rope, dict) and bool(rope) and all(isinstance(k, str) and isinstance(v, dict) for k, v in rope.items())
+
+
+def sliding_window_of(section: dict) -> int | None:
+    """The sliding window of the layers marked `sliding_attention`, or None when no layer is marked or the window is not a positive whole number. A
+    `sliding_window` in a config whose `layer_types` marks no layer as sliding does not limit any layer."""
+    layer_types = section.get("layer_types") if isinstance(section, dict) else None
+    window = _whole(section, "sliding_window")
+    return window if isinstance(layer_types, list) and "sliding_attention" in layer_types and window else None
+
+
 def _rotary_plan(section: dict, hidden: int):
     """({head_dim, rot, theta}, None) when the config gives the settings of the default rotary embedding, else (None, why). `rot` is the number of
     columns of each head that rotate: int(head_dim * partial_rotary_factor), the way the reference computes it. The factor is read from
@@ -1716,9 +1757,11 @@ def _rotary_plan(section: dict, hidden: int):
     if not head_dim:
         return None, "the config gives neither head_dim nor num_attention_heads"
     rope = _rope_dict(section)
+    if rope_keyed_by_layer_type(section):
+        return None, f"rope_parameters is keyed by layer type ({', '.join(_shown(k) for k in sorted(rope))}); one rotary table for every layer would be wrong"
     rope_type = rope.get("rope_type", rope.get("type", "default")) if rope else "default"
     if rope_type != "default":
-        return None, f"rope_type is {rope_type!r}, not the default"
+        return None, f"rope_type is {_shown(rope_type)}, not the default"
     factor = _number(rope.get("partial_rotary_factor", section.get("partial_rotary_factor", 1.0)))
     if factor is None or not 0 < factor <= 1:
         return None, "partial_rotary_factor is not a number above 0 and at most 1"
@@ -1727,6 +1770,50 @@ def _rotary_plan(section: dict, hidden: int):
         return None, f"the rotary width int({head_dim} * {factor}) is {rot}, which is not an even number of at least 2"
     theta = _number(rope.get("rope_theta")) or _number(section.get("rope_theta")) or 10000.0
     return {"head_dim": head_dim, "rot": rot, "theta": float(theta)}, None
+
+
+def _layer_rope_plan(section: dict, kcls: str):
+    """({"layer_types": [...], "rope": {layer type: block}}, None) for a config whose `rope_parameters` is keyed by layer type, else (None, why).
+    A block is {"kind": "default", "theta"} or {"kind": "yarn", "theta", "factor", "original_max", and the optional beta_fast, beta_slow,
+    attention_factor, mscale, mscale_all_dim}. Everything in a block is a finite number; a block the tables do not follow (another rope type, a missing
+    setting, a partial rotary factor) gives the reason, which names the layer type and the setting (issue 790)."""
+    n = _whole(section, "num_hidden_layers")
+    layer_types = section.get("layer_types")
+    if not isinstance(layer_types, list) or not n or len(layer_types) != n or not all(isinstance(t, str) and t for t in layer_types):
+        return None, (f"{kcls}: rope_parameters is keyed by layer type, and layer_types is not a list of {n} layer type names, so the rotary table of "
+                      "each layer is not known")
+    out = {}
+    for t in sorted(set(layer_types)):
+        block = section["rope_parameters"].get(t)
+        if not isinstance(block, dict):
+            return None, f"{kcls}: rope_parameters has no block for layer type {_shown(t)}"
+        kind = block.get("rope_type", block.get("type"))
+        theta = _float_of(block.get("rope_theta"))
+        if theta is None or theta <= 0:
+            return None, f"{kcls}: rope_theta of layer type {_shown(t)} is missing or not a positive number"
+        if block.get("partial_rotary_factor") is not None and _float_of(block.get("partial_rotary_factor")) != 1.0:
+            return None, f"{kcls}: partial_rotary_factor of layer type {_shown(t)} is not 1; the generated rotary rotates the whole head"
+        if kind == "default":
+            out[t] = {"kind": "default", "theta": theta}
+        elif kind == "yarn":
+            factor = _float_of(block.get("factor"))
+            original = _whole(block, "original_max_position_embeddings")
+            if factor is None or factor <= 0:
+                return None, f"{kcls}: the yarn block of layer type {_shown(t)} has no positive number as factor"
+            if not original:
+                return None, f"{kcls}: the yarn block of layer type {_shown(t)} has no whole number as original_max_position_embeddings"
+            spec = {"kind": "yarn", "theta": theta, "factor": factor, "original_max": original}
+            for key in ("beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim"):
+                if block.get(key) is None:
+                    continue
+                value = _float_of(block.get(key))
+                if value is None or value <= 0:
+                    return None, f"{kcls}: {key} of the yarn block of layer type {_shown(t)} is not a positive number"
+                spec[key] = value
+            out[t] = spec
+        else:
+            return None, f"{kcls}: the rope_type of layer type {_shown(t)} is {_shown(kind)}; the generated tables write the default type and yarn"
+    return {"layer_types": list(layer_types), "rope": out}, None
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -1750,11 +1837,27 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     if factor is not None and factor != 1:
         return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
-    rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
-    if rope_type != "default":
-        return None, f"{kcls}: rope_type is not default"
-    theta = _number((rope or {}).get("rope_theta")) if isinstance(rope, dict) else None
-    theta = theta or _number(section.get("rope_theta")) or 10000.0
+    layer_rope = None
+    if rope_keyed_by_layer_type(section):
+        layer_rope, why = _layer_rope_plan(section, kcls)
+        if layer_rope is None:
+            return None, why
+    window = sliding_window_of(section)
+    marked = isinstance(section.get("layer_types"), list) and "sliding_attention" in section["layer_types"]
+    if marked and section.get("sliding_window") is not None and not window:
+        return None, (f"{kcls}: layer_types lists sliding_attention and sliding_window is {_shown(section.get('sliding_window'))}, which is not a positive "
+                      "whole number, so the window of the sliding layers is not known")
+    if window and layer_rope is None:
+        n_layers = _whole(section, "num_hidden_layers")
+        layer_types = section["layer_types"]
+        if not n_layers or len(layer_types) != n_layers or not all(isinstance(t, str) and t for t in layer_types):
+            return None, f"{kcls}: layer_types is not a list of {n_layers} layer type names, so the sliding layers are not known"
+    if layer_rope is None:
+        rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
+        if rope_type != "default":
+            return None, f"{kcls}: rope_type is not default"
+        theta = _number((rope or {}).get("rope_theta")) if isinstance(rope, dict) else None
+        theta = theta or _number(section.get("rope_theta")) or 10000.0
     for n in ("q_norm", "k_norm"):
         if n in kkids:
             ncls, nattrs = con.resolve(f"{kp}.{n}")
@@ -1762,9 +1865,14 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
             if not _is_rms_norm(ncls, nattrs) or w is None or w.shape != (head_dim,):
                 return None, f"{kcls}: {n} is not a plain RMSNorm over head_dim"
     scaling = _number(kattrs.get("scaling"))
-    return {"heads": heads, "kv_heads": kv, "head_dim": head_dim, "theta": float(theta), "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
-            "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
-            "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}, None
+    rope_part = {"theta": float(theta)} if layer_rope is None else layer_rope          # one theta, or the layer types and one block each
+    settings = {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
+                "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
+                "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}
+    if window:                          # the sliding layers attend over the last `window` positions only (the layer types name them)
+        settings["layer_types"] = list(section["layer_types"])
+        settings["window"] = window
+    return settings, None
 
 
 # ---- rendering -------------------------------------------------------------------------------------------------------------------------
@@ -1782,6 +1890,75 @@ def _stub_function(name: str, args: str, stub: Stub, extra: list | None = None) 
         lines.append(f"    # {e}")
     lines.append(f"    raise NotImplementedError({_lit(f'{name}: {stub.cls} at {stub.path} is not written yet')})")
     return lines + ["", ""]
+
+
+_LAYER_ROPE_TEXT = '''def _rope_inv_freq(spec, hd):
+    """Inverse frequencies [hd // 2] and the attention scaling of one rope block (a value of ATTENTION["rope"]), computed the way transformers computes
+    them. The default type is 1 / theta ** (2i / hd). Yarn mixes the interpolated and the original frequencies over a ramp between the beta_fast and beta_slow
+    rotation counts, and scales cos and sin by 0.1 * ln(factor) + 1 unless the block gives attention_factor. The ramp bounds are always truncated: the
+    reference reads `truncate` from the top-level rope_parameters, which holds no such key when the config is keyed by layer type."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    import math
+    base = spec["theta"]
+    pos_freqs = base ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd)
+    if spec["kind"] == "default":
+        return 1.0 / pos_freqs, 1.0
+    factor, original = spec["factor"], spec["original_max"]
+    scaling = spec.get("attention_factor")
+    if scaling is None:
+        mscale, mscale_all = spec.get("mscale"), spec.get("mscale_all_dim")
+
+        def get_mscale(scale, m=1.0):
+            return 1.0 if scale <= 1 else 0.1 * m * math.log(scale) + 1.0
+        scaling = float(get_mscale(factor, mscale) / get_mscale(factor, mscale_all)) if mscale and mscale_all else get_mscale(factor)
+
+    def correction_dim(rotations):
+        return (hd * math.log(original / (rotations * 2 * math.pi))) / (2 * math.log(base))
+    low = max(math.floor(correction_dim(spec.get("beta_fast") or 32)), 0)
+    high = min(math.ceil(correction_dim(spec.get("beta_slow") or 1)), hd - 1)
+    if low == high:
+        high += 0.001
+    ramp = torch.clamp((torch.arange(hd // 2, dtype=torch.float32) - low) / (high - low), 0, 1)
+    extrapolation = 1 - ramp
+    return (1.0 / (factor * pos_freqs)) * (1 - extrapolation) + (1.0 / pos_freqs) * extrapolation, scaling
+
+
+def _rope_tables(model, n):
+    """cos and sin for positions 0..n-1 of every layer type, as two dicts {layer type: [1, 1, n, head_dim] TILE bf16 on the device} in the HF layout (freqs
+    repeated twice). `_attention` takes the pair of its own layer type from them."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    hd = ATTENTION["head_dim"]
+    cos, sin = {}, {}
+    for layer_type in sorted(set(ATTENTION["layer_types"])):
+        inv_freq, scaling = _rope_inv_freq(ATTENTION["rope"][layer_type], hd)
+        freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]
+        emb = torch.cat([freqs, freqs], dim=-1)
+        cos[layer_type] = _upload(model, (emb.cos() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+        sin[layer_type] = _upload(model, (emb.sin() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    return cos, sin
+
+
+'''
+
+_WINDOW_MASK_TEXT = '''def _window_mask(model, n):
+    """The additive attention mask [1, 1, n, n] (bf16, TILE) of the sliding layers: 0 where a query may attend (itself and the ATTENTION["window"] - 1
+    positions before it, the reference's `kv_idx > q_idx - sliding_window`), -30000 elsewhere. It is built once per padded length and kept in
+    model["window_mask"]; a new length frees the old mask, and close frees the last one."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.get("window_mask")
+    if held is not None and held[0] == n:
+        return held[1]
+    if held is not None:
+        ttnn.deallocate(held[1])
+    rows = torch.arange(n)[:, None]
+    cols = torch.arange(n)[None, :]
+    allowed = (cols <= rows) & (cols > rows - ATTENTION["window"])
+    mask = _upload(model, torch.where(allowed, 0.0, -30000.0).reshape(1, 1, n, n).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    model["window_mask"] = (n, mask)
+    return mask
+
+
+'''
 
 
 def render(p: Plan) -> str:
@@ -1946,20 +2123,29 @@ def render(p: Plan) -> str:
               "    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))", "", ""]
     if p.attention:
         a = p.attention
-        L += [f"ATTENTION = {_lit(a)}", "", "",
-              "def _rope_tables(model, n):",
-              '    """cos and sin for positions 0..n-1 in the HF layout (freqs repeated twice), [1, 1, n, head_dim] TILE bf16 on the device."""',
-              '    hd = ATTENTION["head_dim"]',
-              '    inv_freq = 1.0 / (ATTENTION["theta"] ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))',
-              "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]",
-              "    emb = torch.cat([freqs, freqs], dim=-1)",
-              "    cos = _upload(model, emb.cos().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
-              "    sin = _upload(model, emb.sin().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
-              "    return cos, sin", "", "",
-              "def _attention(model, prefix, x, cos, sin):",
+        L += [f"ATTENTION = {_lit(a)}", "", ""]
+        if "rope" in a:
+            L += _LAYER_ROPE_TEXT.split("\n")
+        else:
+            L += ["def _rope_tables(model, n):",
+                  '    """cos and sin for positions 0..n-1 in the HF layout (freqs repeated twice), [1, 1, n, head_dim] TILE bf16 on the device."""',
+                  '    hd = ATTENTION["head_dim"]',
+                  '    inv_freq = 1.0 / (ATTENTION["theta"] ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))',
+                  "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]",
+                  "    emb = torch.cat([freqs, freqs], dim=-1)",
+                  "    cos = _upload(model, emb.cos().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+                  "    sin = _upload(model, emb.sin().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+                  "    return cos, sin", "", ""]
+        if "window" in a:
+            L += _WINDOW_MASK_TEXT.split("\n")
+        L += ["def _attention(model, prefix, x, cos, sin):",
               '    """Ordinary causal attention for the block at `prefix`: q, k, v projections, the head split, per-head RMSNorm on q and k when the',
-              '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""',
-              '    q = _linear(model, prefix + ".q_proj", x)',
+              '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""']
+        if "layer_types" in a:
+            L += ['    layer_type = ATTENTION["layer_types"][int(prefix.rsplit(".", 2)[-2])]          # the prefix is "<layers path>.<i>.<attention name>"']
+        if "rope" in a:
+            L += ["    cos, sin = cos[layer_type], sin[layer_type]"]
+        L += ['    q = _linear(model, prefix + ".q_proj", x)',
               '    k = _linear(model, prefix + ".k_proj", x)',
               '    v = _linear(model, prefix + ".v_proj", x)',
               "    xqkv = ttnn.concat([q, k, v], dim=-1)",
@@ -1970,9 +2156,16 @@ def render(p: Plan) -> str:
         if a["k_norm"]:
             L.append('    k = ttnn.rms_norm(k, epsilon=ATTENTION["norm_eps"], weight=model["dev"][prefix + ".k_norm.weight"])')
         L += ["    q = ttnn.experimental.rotary_embedding_hf(q, cos, sin, is_decode_mode=False)",
-              "    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)",
-              '    o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])',
-              "    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+              "    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)"]
+        if "window" in a:
+            L += ["    seq = q.shape[2]",
+                  '    if layer_type == "sliding_attention" and seq > ATTENTION["window"]:          # inside the window a sliding layer is plain causal attention',
+                  '        o = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=_window_mask(model, seq), is_causal=False, scale=ATTENTION["scale"])',
+                  "    else:",
+                  '        o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])']
+        else:
+            L += ['    o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])']
+        L += ["    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
               '    return _linear(model, prefix + ".o_proj", o)', "", ""]
     stubs = {s.function: s for s in p.stubs}
     used = [name for name in BLOCK_FAMILIES
@@ -2098,7 +2291,15 @@ def render(p: Plan) -> str:
           "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
           "            pass",
           '    model["dev"].clear()',
-          '    model["host"].clear()', ""]
+          '    model["host"].clear()']
+    if p.attention and "window" in p.attention:
+        L += ['    held = model.pop("window_mask", None)',
+              "    if held is not None:",
+              "        try:",
+              "            ttnn.deallocate(held[1])",
+              "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "            pass"]
+    L.append("")
     return "\n".join(L)
 
 
