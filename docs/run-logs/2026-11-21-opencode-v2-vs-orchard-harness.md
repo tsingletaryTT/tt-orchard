@@ -241,6 +241,37 @@ does not stop the call from running, and neither tool can do anything in an atte
 tools; OpenCode's has six working ones plus those two that only return errors. This replaces the "ten tools, four switched off" statement under Differences. The
 discovery test used its own setting (`skill` tool on); its tool counts include a few calls to tools that are not offered, which return errors.
 
+## Skill discovery (capability test, 2026-11-21 19:50Z to 19:57Z)
+
+Question 2. `scripts/oc_skill_discovery.py`: copies (not links) of three skills in each layout, OpenCode in the sandbox with the `skill` tool on, four
+questions, one fresh run per cell (20 runs, 425 s of wall time in all; no wall time is compared). The skills: the installed tt-lang skill (`ttm-tt-lang`) and
+two tenstorrent/skills (`tt-device-usage`, `functional-decoder`). The answer check is a substring match on the facts listed in the script. Layouts: `.claude/skills`,
+`.opencode/skills`, `.opencode/skill`, a folder named in the config's `skills` list, and none (the control).
+
+| layout | list: names found | tt-lang fact | tt-device-usage facts | functional-decoder path | `skill` tool calls over the 3 fact questions |
+|---|---|---|---|---|---|
+| `.claude/skills` | 3 of 3 | found, 1 skill call | 2 of 2, 1 skill call | 2 of 2, 1 skill call | 3 |
+| `.opencode/skills` | 3 of 3 | found, 1 skill call | 2 of 2, 1 skill call | 1 of 2, no skill call, 11 steps | 2 |
+| `.opencode/skill` | 3 of 3 | found, 1 skill call | 2 of 2, 1 skill call | 2 of 2, 1 skill call | 3 |
+| config `skills` folder | 3 of 3 | found, 1 skill call | 0 of 2, no skill call, 1 step | 1 of 2, no skill call, 1 step | 1 |
+| none (control) | 0 of 3 | not found (1 skill call, nothing to load, 6 steps) | 0 of 2 (1 skill call) | 0 of 2 (1 skill call, 12 steps) | 3 (all returned an error) |
+
+Counts. OpenCode v2 found the skills in all four layouts without being told where they are (the list answer named all three each time; the control named none).
+Of the 12 fact questions in the four layouts with skills, the model called the `skill` tool in 9, and all 9 answers held every expected fact. The other 3 had no
+skill call, and each of them missed at least one fact. For the tt-lang skill the fact (`buffer_factor`, the installed skill's older keyword) was found in 4 of 4
+layouts and in 0 of 1 in the control, so the answer came from the skill. For the two tenstorrent/skills, the facts were found in 5 of 8 runs (control: 0 of 4). In the config-folder
+layout the model answered the two tenstorrent/skills questions in one step with no skill call. The `device` answer opened "According to the tt-device-usage skill ..." and
+gave general statements with none of the skill's own facts, which is a wrong attribution a reader would trust. The `decoder` answer said it was working from the
+skill's description and guessed a path pattern.
+
+What this does not show: one run per cell at temperature 0.7, so a 9 of 12 against 3 of 12 split between "called the skill" and "did not" says only that the choice
+varies. The questions look up one fact each and none needs a skill's procedure. No bring-up stage was run through OpenCode.
+
+How orchard hands skills over today (read from `orchard/stages.py` and `orchard/supervisor.py`): a stage names its skill and its reference skills; the supervisor
+finds `<dir>/<name>.md` or `<dir>/<name>/SKILL.md` in the configured `skills_dirs`, reads the files, and builds the stage's messages from them
+(`build_messages(spec, phase, ..., skill_path, refs)`). The model gets the text and makes no choice. OpenCode puts each skill's name and description in the `skill`
+tool's description and leaves loading to the model; the runs above show it loads the skill most of the time and sometimes answers from the description alone.
+
 ## Batch
 
 (to be written)
