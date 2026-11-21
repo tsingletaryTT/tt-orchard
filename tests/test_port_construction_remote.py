@@ -135,6 +135,7 @@ def test_the_scratch_home_and_the_audit_are_not_written_beside_the_shipped_templ
 
 
 def test_another_value_error_from_the_config_load_is_not_taken_for_a_refusal(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)    # an earlier test in the same worker may have left it set
     snap = snapshot_with_code(tmp_path)
     calls = []
     install_fakes(monkeypatch, refuse=False, calls=calls, config_error=ValueError("some other problem"))
