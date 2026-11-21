@@ -1,0 +1,3 @@
+target = "0.9.188"
+summary = "Thin repair requests carry what earlier rounds changed, and a function changed in two rounds in a row with a changed error goes to the agent loop with a note naming its callers (issue 783)."
+kind = "fix"

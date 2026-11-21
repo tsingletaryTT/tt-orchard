@@ -909,6 +909,7 @@ class Supervisor:
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
         self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
+        self._thin_handover = ""                       # the note for the agent's repair step when the thin repair's history stopped a function (issue 783)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
         self.stack_pins, self._run_resumed = stack_pins, False
@@ -3020,6 +3021,9 @@ class Supervisor:
                         return stop, [f"the thin repair round {k} ended: {stop}"], None
                     if thin_ok:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the thin repair settled
+                    elif self._thin_handover:
+                        # The history stopped the thin repair of a function (issue 783): the agent's step is told which function and its callers.
+                        friend_note = (friend_note + "\n\n" if friend_note else "") + self._thin_handover
                 if not driven_ok and not thin_ok:
                     if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
                         ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
@@ -4696,6 +4700,7 @@ class Supervisor:
         ends). Anything the thin repair cannot place or settle (a numerics failure, a line outside a function, two refused replies, an endpoint
         that fails, a round past the cap) is recorded as `thin repair handed to the coder` and the agent's repair step runs as without the option."""
         n = spec.number
+        self._thin_handover = ""
         if n != 2 or not thin_port(self.ledger.read()):
             return False, None
         if stop := self._driven_stop(spec):
@@ -4710,10 +4715,12 @@ class Supervisor:
         fields = dict(round=k, function=result.function, error_type=result.etype, hint=result.hint, requests=result.requests,
                       prompt_chars=result.prompt_chars, completion_tokens=result.completion_tokens, seconds=round(self.clock() - started, 3))
         if result.status == "spliced":
-            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, **fields)
+            # The hash ties the history file's diff for this round to the ledger (the diff is the coder's reply, so it is evidence).
+            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, diff_sha256=result.diff_sha256, **fields)
             return True, self._driven_stop(spec)
         self.ledger.append("decision", n, decision="thin repair handed to the coder", reason=result.reason or result.status, outcome=result.status,
                            tier=used, **fields)
+        self._thin_handover = result.note                  # empty unless the history stopped the function: the agent's step reads it
         return False, None
 
     def _draft(self, spec, stage_dir: Path) -> None:
