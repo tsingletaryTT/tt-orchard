@@ -974,7 +974,7 @@ def worker(read_fd: int, write_fd: int) -> int:
                 else:
                     logits = [0.0] * int(req["vocab"])
                     logits[int(req["planted"])] = VOCAB_PLANTED
-                    reply({"ok": True, "id": int(fn(model, logits, float(req["temperature"]), int(req["top_k"])))})
+                    reply({"ok": True, "id": int(fn(model, logits, float(req["temperature"]), int(req["top_k"])))})  # finite: ok temperature is a VOCAB_MODES constant
             elif op == "close":
                 if mod is not None and model is not None:
                     mod.close(model)
