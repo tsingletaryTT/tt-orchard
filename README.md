@@ -2297,6 +2297,13 @@ Flags:
 - `--library`: one of `all`, `others`, `none`. The worked kernels (`orchard/skills/kernel-loop-templates/library/`) copied into each attempt's
   `reference/` as `library_<op>.py`. `all` is the default; `others` leaves out the kernel for the op under test, so a pass is not
   a copy of a worked solution; `none` is the earlier behaviour. The report records the mode and says when the op's own kernel was offered.
+- `--cheat-sheet-recipes`: `on` or `off` (default `off`). `on` adds recipes by kind of op after the TT-Lang cheat sheet in each attempt's
+  directory (`orchard/skills/kernel-loop-templates/ttlang_recipes.json`): a plan and a skeleton for a row-wise reduction, a column
+  reduction with an accumulator, an elementwise chain with a constant and a reused row operand, and a value carried down the rows. Each
+  skeleton passed the unedited simulator check on a worked op that is not a probe op, every wrong variant failed it, and the chip form's
+  calls were found in the installed chip package (`python3 scripts/verify_ttlang_recipes.py` writes the records). No recipe has been
+  compiled on a chip. `off` leaves the sheet byte for byte as it was. The report and each attempt's provenance record the setting.
+  A recipe whose record does not match its skeleton stops the run before any attempt. Not with `--staged`.
 - `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
