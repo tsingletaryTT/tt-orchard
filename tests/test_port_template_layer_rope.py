@@ -125,13 +125,24 @@ def test_a_layer_type_keyed_rope_block_is_generated_with_one_block_per_layer_typ
     assert "10000.0" not in text
 
 
-def test_a_sliding_window_leaves_the_attention_as_a_named_stub():
+def test_a_sliding_window_with_a_flat_rope_block_is_generated_with_the_window_and_one_table_pair():
+    """The window does not need a block per layer type: a flat rope block keeps one table pair, and the layer types only choose the mask."""
     cfg = tiny_aion_config()
-    cfg["rope_parameters"] = {"rope_type": "default", "rope_theta": 32000}      # flat, so only the window is under test
+    cfg["rope_parameters"] = {"rope_type": "default", "rope_theta": 32000}
     text, p = generate(cfg)
-    assert p.attention is None
-    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
-    assert reasons and all("sliding_window 8" in r for r in reasons), reasons
+    assert p.stubs == [] and p.attention is not None
+    assert p.attention["window"] == 8 and p.attention["theta"] == 32000.0 and "rope" not in p.attention
+    assert "cos, sin = cos[layer_type], sin[layer_type]" not in text
+
+
+def test_a_flat_rope_model_with_a_sliding_window_matches_a_banded_torch_forward(monkeypatch, tmp_path):
+    cfg = window_config(8)
+    cfg["rope_parameters"] = {"rope_type": "default", "rope_theta": 32000}
+    ids = [(5 * i + 1) % 50 for i in range(40)]
+    mod, model, weights, got = run_port(monkeypatch, tmp_path, cfg, ids)
+    keyed = dict(cfg, rope_parameters={t: dict(cfg["rope_parameters"]) for t in set(cfg["layer_types"])})      # the reference looks a block up by layer type
+    want = torch_forward(weights, keyed, ids)
+    assert torch.allclose(got, want, atol=2e-3, rtol=2e-3), (got - want).abs().max()
 
 
 # ---- step 2: one rotary table pair per layer type ---------------------------------------------------------------------------------------------
@@ -331,3 +342,149 @@ def test_the_one_table_the_old_generator_wrote_would_have_failed_that_comparison
     flat["layer_types"] = ["sliding_attention"] * 3
     right, wrong = torch_forward(weights, cfg, ids), torch_forward(weights, flat, ids)
     assert not torch.allclose(right, wrong, atol=2e-3, rtol=2e-3), (right - wrong).abs().max()
+
+
+# ---- step 3: the sliding window ---------------------------------------------------------------------------------------------------------------
+
+def window_config(window=8):
+    return aion_rope_config(hd=16, original=16, window=window)
+
+
+def test_a_sliding_window_is_generated_and_recorded():
+    text, p = generate(window_config(8))
+    assert p.stubs == [] and p.attention is not None and p.attention["window"] == 8
+    assert "_window_mask" in text and "attn_mask=_window_mask(model, seq)" in text
+    assert "_window_mask" in pt.FIXED_HELPERS                          # a failure inside the mask helper is never a repair target
+    flat, _ = generate(aion_rope_config(hd=16, original=16, window=None))
+    assert "_window_mask" not in flat and "window" not in generate(aion_rope_config(hd=16, original=16, window=None))[1].attention
+
+
+@pytest.mark.parametrize("n_devices", [1, 2])
+def test_the_port_matches_a_banded_torch_forward_above_the_window_and_above_the_yarn_length(monkeypatch, tmp_path, n_devices):
+    """48 tokens against a window of 8 and a yarn original length of 16: the first two layers (sliding) see only the last 8 positions, the third (full) sees
+    all of them, and each type has its own rotary table. Before this change the generator refused the window (a stub)."""
+    cfg = window_config(8)
+    ids = [(7 * i + 3) % 50 for i in range(48)]
+    mod, model, weights, got = run_port(monkeypatch, tmp_path, cfg, ids, n_devices=n_devices)
+    want = torch_forward(weights, cfg, ids)
+    assert torch.allclose(got, want, atol=2e-3, rtol=2e-3), (got - want).abs().max()
+    assert int(got.argmax()) == int(want.argmax())
+    for step in range(2):                                              # decode runs the whole sequence again: the window must hold at every length
+        tok = int(got.argmax())
+        got = mod.decode_step(model, tok, len(ids))
+        ids = ids + [tok]
+        want = torch_forward(weights, cfg, ids)
+        assert torch.allclose(got, want, atol=2e-3, rtol=2e-3), (step, (got - want).abs().max())
+
+
+def test_the_comparison_can_tell_a_window_from_none():
+    cfg = window_config(8)
+    ids = [(7 * i + 3) % 50 for i in range(48)]
+    weights = _weights(cfg)
+    open_cfg = dict(cfg, sliding_window=None)
+    assert not torch.allclose(torch_forward(weights, cfg, ids), torch_forward(weights, open_cfg, ids), atol=2e-3, rtol=2e-3)
+
+
+def test_each_sliding_layer_gets_the_mask_and_each_full_layer_the_causal_flag(monkeypatch, tmp_path):
+    cfg = window_config(8)
+    text, p, weights = generate_with_weights(cfg)
+    mod = import_port(monkeypatch, text, tmp_path)
+    import sys
+    ttnn = sys.modules["ttnn"]
+    seen = []
+    real = ttnn.transformer.scaled_dot_product_attention
+
+    def spy(q, k, v, **kw):
+        seen.append((kw.get("attn_mask") is not None, kw.get("is_causal", True)))
+        return real(q, k, v, **kw)
+
+    monkeypatch.setattr(ttnn.transformer, "scaled_dot_product_attention", spy)
+    model = mod.load(str(write_checkpoint(tmp_path, weights)), fake.MeshDevice(1))
+    mod.prefill(model, list(range(1, 41)))                              # 40 tokens pad to 64, above the window of 8
+    assert seen == [(True, False), (True, False), (False, True)]        # layers: sliding, sliding, full
+    seen.clear()
+    mod.prefill(model, [1, 2, 3, 4, 5])                                 # padded to 32: still above the window of 8
+    assert seen == [(True, False), (True, False), (False, True)]
+
+
+def test_a_sequence_inside_the_window_keeps_the_causal_call(monkeypatch, tmp_path):
+    cfg = window_config(64)
+    text, p, weights = generate_with_weights(cfg)
+    mod = import_port(monkeypatch, text, tmp_path)
+    import sys
+    ttnn = sys.modules["ttnn"]
+    seen = []
+    real = ttnn.transformer.scaled_dot_product_attention
+    monkeypatch.setattr(ttnn.transformer, "scaled_dot_product_attention", lambda q, k, v, **kw: (seen.append((kw.get("attn_mask") is not None, kw.get("is_causal", True))), real(q, k, v, **kw))[1])
+    model = mod.load(str(write_checkpoint(tmp_path, weights)), fake.MeshDevice(1))
+    mod.prefill(model, list(range(1, 41)))                              # 40 tokens pad to 64, which the window of 64 covers
+    assert seen == [(False, True)] * 3
+
+
+def test_the_window_mask_allows_a_query_and_the_window_minus_one_positions_before_it(monkeypatch, tmp_path):
+    text, p = generate(window_config(8))
+    mod = import_port(monkeypatch, text, tmp_path)
+    model = model_object()
+    mask = mod._window_mask(model, 32).t.float().reshape(32, 32)
+    for i in (0, 5, 7, 8, 20, 31):
+        allowed = {j for j in range(32) if float(mask[i, j]) == 0.0}
+        assert allowed == set(range(max(0, i - 7), i + 1)), (i, sorted(allowed))
+    assert float(mask.min()) == float(torch.tensor(-30000.0).to(torch.bfloat16))          # bf16 holds -30000 as -29952, as the other generated masks do
+    assert set(mask.unique().tolist()) == {0.0, float(torch.tensor(-30000.0).to(torch.bfloat16))}
+    assert mod._window_mask(model, 32) is model["window_mask"][1]       # the same length reuses the mask
+    again = mod._window_mask(model, 64)
+    assert model["window_mask"][0] == 64 and again is model["window_mask"][1]
+
+
+def test_close_frees_the_window_mask(monkeypatch, tmp_path):
+    cfg = window_config(8)
+    mod, model, weights, _ = run_port(monkeypatch, tmp_path, cfg, list(range(1, 41)))
+    assert model.get("window_mask") is not None
+    mod.close(model)
+    assert model.get("window_mask") is None and model["dev"] == {}
+
+
+@pytest.mark.parametrize("window", ["8", 8.5, True, -3, 0])
+def test_a_sliding_window_that_is_not_a_positive_whole_number_leaves_a_named_stub(window):
+    """A layer marked sliding with a window the generator cannot read must not turn into full attention without a word."""
+    cfg = window_config(8)
+    cfg["sliding_window"] = window
+    text, p = generate(cfg)
+    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
+    assert p.attention is None and reasons and all("sliding_window" in r for r in reasons), (window, reasons)
+
+
+def test_a_missing_or_null_sliding_window_means_full_attention_as_in_the_reference():
+    cfg = window_config(8)
+    cfg["sliding_window"] = None
+    assert generate(cfg)[1].attention is not None
+    cfg.pop("sliding_window")
+    assert generate(cfg)[1].attention is not None
+
+
+def test_a_new_padded_length_frees_the_previous_window_mask(monkeypatch, tmp_path):
+    text, p = generate(window_config(8))
+    mod = import_port(monkeypatch, text, tmp_path)
+    import sys
+    ttnn = sys.modules["ttnn"]
+    freed = []
+    real = ttnn.deallocate
+    monkeypatch.setattr(ttnn, "deallocate", lambda t: (freed.append(t), real(t))[1])
+    model = model_object()
+    first = mod._window_mask(model, 32)
+    assert freed == []
+    mod._window_mask(model, 32)
+    assert freed == []                                                  # the same length keeps its mask
+    mod._window_mask(model, 64)
+    assert freed == [first]                                             # a new length frees the old one
+
+
+@pytest.mark.parametrize("layer_types", [["sliding_attention", "full_attention"], ["sliding_attention", 3, "full_attention"]])
+def test_a_sliding_window_with_layer_types_that_do_not_cover_the_layers_leaves_a_named_stub(layer_types):
+    cfg = window_config(8)
+    cfg["rope_parameters"] = {"rope_type": "default", "rope_theta": 32000}
+    cfg["layer_types"] = layer_types
+    text, p = generate(cfg)
+    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
+    assert p.attention is None, layer_types
+    assert reasons and all("sliding" in r or "layer_types" in r for r in reasons), (layer_types, reasons)

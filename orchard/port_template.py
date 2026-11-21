@@ -1819,9 +1819,15 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
         if layer_rope is None:
             return None, why
     window = sliding_window_of(section)
-    if window:
-        return None, (f"{kcls}: layer_types lists sliding_attention with sliding_window {window}; the generated attention is causal over the whole "
-                      "prefix in every layer")
+    marked = isinstance(section.get("layer_types"), list) and "sliding_attention" in section["layer_types"]
+    if marked and section.get("sliding_window") is not None and not window:
+        return None, (f"{kcls}: layer_types lists sliding_attention and sliding_window is {section.get('sliding_window')!r}, which is not a positive "
+                      "whole number, so the window of the sliding layers is not known")
+    if window and layer_rope is None:
+        n_layers = _whole(section, "num_hidden_layers")
+        layer_types = section["layer_types"]
+        if not n_layers or len(layer_types) != n_layers or not all(isinstance(t, str) and t for t in layer_types):
+            return None, f"{kcls}: layer_types is not a list of {n_layers} layer type names, so the sliding layers are not known"
     if layer_rope is None:
         rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
         if rope_type != "default":
@@ -1836,9 +1842,13 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
                 return None, f"{kcls}: {n} is not a plain RMSNorm over head_dim"
     scaling = _number(kattrs.get("scaling"))
     rope_part = {"theta": float(theta)} if layer_rope is None else layer_rope          # one theta, or the layer types and one block each
-    return {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
-            "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
-            "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}, None
+    settings = {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
+                "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
+                "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}
+    if window:                          # the sliding layers attend over the last `window` positions only (the layer types name them)
+        settings["layer_types"] = list(section["layer_types"])
+        settings["window"] = window
+    return settings, None
 
 
 # ---- rendering -------------------------------------------------------------------------------------------------------------------------
@@ -1900,6 +1910,25 @@ def _rope_tables(model, n):
         cos[layer_type] = _upload(model, (emb.cos() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
         sin[layer_type] = _upload(model, (emb.sin() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
     return cos, sin
+
+
+'''
+
+_WINDOW_MASK_TEXT = '''def _window_mask(model, n):
+    """The additive attention mask [1, 1, n, n] (bf16, TILE) of the sliding layers: 0 where a query may attend (itself and the ATTENTION["window"] - 1
+    positions before it, the reference's `kv_idx > q_idx - sliding_window`), -30000 elsewhere. It is built once per padded length and kept in
+    model["window_mask"]; a new length frees the old mask, and close frees the last one."""
+    held = model.get("window_mask")
+    if held is not None and held[0] == n:
+        return held[1]
+    if held is not None:
+        ttnn.deallocate(held[1])
+    rows = torch.arange(n)[:, None]
+    cols = torch.arange(n)[None, :]
+    allowed = (cols <= rows) & (cols > rows - ATTENTION["window"])
+    mask = _upload(model, torch.where(allowed, 0.0, -30000.0).reshape(1, 1, n, n).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    model["window_mask"] = (n, mask)
+    return mask
 
 
 '''
@@ -2080,12 +2109,15 @@ def render(p: Plan) -> str:
                   "    cos = _upload(model, emb.cos().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
                   "    sin = _upload(model, emb.sin().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
                   "    return cos, sin", "", ""]
+        if "window" in a:
+            L += _WINDOW_MASK_TEXT.split("\n")
         L += ["def _attention(model, prefix, x, cos, sin):",
               '    """Ordinary causal attention for the block at `prefix`: q, k, v projections, the head split, per-head RMSNorm on q and k when the',
               '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""']
+        if "layer_types" in a:
+            L += ['    layer_type = ATTENTION["layer_types"][int(prefix.rsplit(".", 2)[-2])]          # the prefix is "<layers path>.<i>.<attention name>"']
         if "rope" in a:
-            L += ['    layer_type = ATTENTION["layer_types"][int(prefix.rsplit(".", 2)[-2])]          # the prefix is "<layers path>.<i>.<attention name>"',
-                  "    cos, sin = cos[layer_type], sin[layer_type]"]
+            L += ["    cos, sin = cos[layer_type], sin[layer_type]"]
         L += ['    q = _linear(model, prefix + ".q_proj", x)',
               '    k = _linear(model, prefix + ".k_proj", x)',
               '    v = _linear(model, prefix + ".v_proj", x)',
@@ -2097,9 +2129,16 @@ def render(p: Plan) -> str:
         if a["k_norm"]:
             L.append('    k = ttnn.rms_norm(k, epsilon=ATTENTION["norm_eps"], weight=model["dev"][prefix + ".k_norm.weight"])')
         L += ["    q = ttnn.experimental.rotary_embedding_hf(q, cos, sin, is_decode_mode=False)",
-              "    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)",
-              '    o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])',
-              "    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+              "    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)"]
+        if "window" in a:
+            L += ["    seq = q.shape[2]",
+                  '    if layer_type == "sliding_attention" and seq > ATTENTION["window"]:          # inside the window a sliding layer is plain causal attention',
+                  '        o = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=_window_mask(model, seq), is_causal=False, scale=ATTENTION["scale"])',
+                  "    else:",
+                  '        o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])']
+        else:
+            L += ['    o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=ATTENTION["scale"])']
+        L += ["    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
               '    return _linear(model, prefix + ".o_proj", o)', "", ""]
     stubs = {s.function: s for s in p.stubs}
     used = [name for name in BLOCK_FAMILIES
@@ -2225,7 +2264,15 @@ def render(p: Plan) -> str:
           "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
           "            pass",
           '    model["dev"].clear()',
-          '    model["host"].clear()', ""]
+          '    model["host"].clear()']
+    if p.attention and "window" in p.attention:
+        L += ['    held = model.pop("window_mask", None)',
+              "    if held is not None:",
+              "        try:",
+              "            ttnn.deallocate(held[1])",
+              "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "            pass"]
+    L.append("")
     return "\n".join(L)
 
 
@@ -2276,7 +2323,7 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 # The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
 # called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
 FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary",
-                 "_rope_inv_freq")
+                 "_rope_inv_freq", "_window_mask")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
