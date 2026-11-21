@@ -778,14 +778,60 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     return True, result.summary()
 
 
+CONSTRUCTION_AUDIT_PARTS = ("evidence", "construction-remote-code")     # beneath the stage directory
+
+
+def _construction_audit_dir(run_dir: Path, stage_dir: Path) -> Path | None:
+    """Make the directory the construction helper writes its audit of the model's own code to, and take away an audit that an earlier attempt left
+    there. The directory is made beneath the run directory with no link followed (a link where a directory should be is refused). Returns its path,
+    or None when it cannot be made: the helper then runs without one, as it did before, and nothing is recorded."""
+    try:
+        stage_parts = Path(stage_dir).relative_to(Path(run_dir)).parts
+        parts = (*stage_parts, *CONSTRUCTION_AUDIT_PARTS)
+        with safeio.pinned_root(run_dir) as run:
+            safeio.mkdir_beneath(run.fd, parts)
+            safeio.unlink_beneath(run.fd, (*parts, port_construction.AUDIT_FILE))
+    except (OSError, ValueError, safeio.SafeReadError):
+        return None
+    return Path(run_dir).joinpath(*parts)
+
+
+def _record_construction_audit(ledger, run_dir: Path, spec, audit_dir: Path) -> None:
+    """After the helper ended, whatever became of it: put its audit of the model's own code in the ledger, with the file's path and the sha256 of the
+    bytes read now (`read_audit` hashes what it parsed). No file means the route was not used or the helper never got that far, and nothing is recorded. The helper wrote the file before the model's
+    code ran; code that ran with the user's permissions could have changed it since, and the entry says so."""
+    audit = port_construction.read_audit(audit_dir)
+    if audit is None:
+        return
+    if "unreadable" in audit:
+        ledger.append("decision", spec.number, decision="remote-code audit unreadable", problem=audit["unreadable"][:200])
+        return
+    record = {"path": os.path.relpath(audit_dir / port_construction.AUDIT_FILE, run_dir), "sha256": audit["sha256"]}          # the hash of the bytes that were parsed
+    ledger.append("decision", spec.number, decision="remote-code audit recorded", audit=record, files=audit["files"], files_total=audit["files_total"],
+                  scrubbed=audit["scrubbed"], note="written by the construction helper before the model's code was imported; code that ran could have changed it since")
+
+
 def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, snapshot, python, *, runner=None) -> tuple:
     """Write `stages/2/effective_construction.txt` (orchard/port_construction.py, issue 541) and record it in the ledger with its path and
     sha256, the way the facts file is recorded. Returns (written, the summary the facts file carries). Advisory: no reference interpreter,
-    a script that fails and a write error each leave no file and a ledger decision that names the reason. `runner` is for the tests."""
+    a script that fails and a write error each leave no file and a ledger decision that names the reason. `runner` is for the tests.
+
+    A model that ships its own code is built through stage 1's remote-code route. The helper writes its audit of that code to a directory made
+    here (`_construction_audit_dir`) before the code runs, and this function records it in the ledger afterwards, also when the helper timed out,
+    was killed or failed."""
     if not python:
         return False, None
+    audit_dir = _construction_audit_dir(run_dir, stage_dir)
     try:
-        text, flags, summary, why = port_construction.for_snapshot(python, snapshot, **({"runner": runner} if runner else {}))
+        return _write_effective_construction(ledger, run_dir, spec, stage_dir, snapshot, python, runner=runner, audit_dir=audit_dir)
+    finally:
+        if audit_dir is not None:
+            _record_construction_audit(ledger, run_dir, spec, audit_dir)
+
+
+def _write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, snapshot, python, *, runner, audit_dir) -> tuple:
+    try:
+        text, flags, summary, why = port_construction.for_snapshot(python, snapshot, audit_dir=audit_dir, **({"runner": runner} if runner else {}))
         if not text:
             ledger.append("decision", spec.number, decision="effective construction not written", problem=why[:300])
             return False, None

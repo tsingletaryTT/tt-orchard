@@ -42,6 +42,18 @@ from orchard import safeio
 from orchard.commands import run_command
 
 FILE_NAME = "effective_construction.txt"
+# The audit of the model's own code (stage 1's `allow_remote_code`), which the script writes into a directory the supervisor names, before the model's
+# code imports. The supervisor reads it after the script ends, whatever became of the script (a timeout, a kill, an error).
+AUDIT_FILE = "remote-code-audit.json"
+AUDIT_MAX_BYTES = 1 << 20          # choice: 10,000 names and hashes are about 0.85 MB; more than 1 MiB is not an audit this module reads
+MAX_AUDIT_FILES = 10000            # choice: a repository with more .py files than this gives "unreadable" (the size limit above is not what stops it)
+MAX_AUDIT_FILES_SHOWN = 50         # the ledger entry carries this many names and hashes; the file on disk has them all
+MAX_AUDIT_NAME = 200
+MAX_AUDIT_SCRUBBED = 100
+_AUDIT_PATH = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./+-]{0,199}")
+_AUDIT_HASH = re.compile(r"[0-9a-f]{64}")
+_AUDIT_WORDS = ("unreadable", "not a regular file", "over the size limit")      # what stage 1's `bounded_sha256` gives instead of a hash
+_AUDIT_VAR = re.compile(r"[A-Za-z0-9_]{1,100}")
 SCRIPT = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "effective_construction.py"
 MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION"
 ERROR_MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION_ERROR"
@@ -101,12 +113,15 @@ def _failure_cause(out) -> str:
     return f": {data['error']}" + (" (the model's own code was in use)" if data["remote_code"] else "")
 
 
-def run(python, snapshot, *, runner=run_command) -> tuple[dict | None, str]:
+def run(python, snapshot, *, runner=run_command, audit_dir=None) -> tuple[dict | None, str]:
     """(the script's parsed output, "") or (None, the reason). `python` is the reference interpreter. `runner(argv, timeout, env=...)` is
-    commands.run_command in production."""
+    commands.run_command in production. With `audit_dir` (an absolute directory) the script writes its audit of the model's own code there, before
+    that code runs; without it the script keeps the audit in a temporary directory, as before."""
     if not isinstance(python, str) or not python:
         return None, "no reference interpreter"
     argv = [python, "-I", str(SCRIPT), str(Path(snapshot).absolute())]
+    if audit_dir is not None:
+        argv.append(str(Path(audit_dir).absolute()))
     try:
         result = runner(argv, TIMEOUT_S, env=default_env())
     except Exception as exc:
@@ -312,9 +327,10 @@ def summary(text: str, flags: list[str], data: dict) -> dict:
     return out
 
 
-def for_snapshot(python, snapshot, *, runner=run_command) -> tuple[str, list[str], dict, str]:
-    """(text, flags, summary, "") on success; ("", [], {}, the reason) when the interpreter, the script or its output failed."""
-    data, why = run(python, snapshot, runner=runner)
+def for_snapshot(python, snapshot, *, runner=run_command, audit_dir=None) -> tuple[str, list[str], dict, str]:
+    """(text, flags, summary, "") on success; ("", [], {}, the reason) when the interpreter, the script or its output failed. `audit_dir` is passed on
+    to `run`."""
+    data, why = run(python, snapshot, runner=runner, audit_dir=audit_dir)
     if data is None:
         return "", [], {}, why
     try:
@@ -323,3 +339,42 @@ def for_snapshot(python, snapshot, *, runner=run_command) -> tuple[str, list[str
         return "", [], {}, f"the script's output was refused: {exc}"
     text, flags = render(cleaned)
     return text, flags, summary(text, flags, cleaned), ""
+
+
+# ---- the audit of the model's own code -----------------------------------------------------------------------------------------------
+
+def _clean_audit(data, sha256: str) -> dict:
+    """The audit as the ledger may carry it, or {"unreadable": a fixed reason}. Every field is type-checked and bounded; a reason never quotes the
+    file, which the model's own code could have written after the script did."""
+    bad = {"unreadable": "the audit file is not in the expected shape"}
+    if not isinstance(data, dict) or data.get("used") is not True:
+        return bad
+    files, scrubbed = data.get("files"), data.get("scrubbed")
+    if not isinstance(files, dict) or not isinstance(scrubbed, list) or len(files) > MAX_AUDIT_FILES or len(scrubbed) > MAX_AUDIT_SCRUBBED:
+        return bad
+    for name, digest in files.items():
+        if (not isinstance(name, str) or len(name) > MAX_AUDIT_NAME or not _AUDIT_PATH.fullmatch(name) or ".." in name.split("/")
+                or not isinstance(digest, str) or not (_AUDIT_HASH.fullmatch(digest) or digest in _AUDIT_WORDS)):
+            return bad
+    if not all(isinstance(v, str) and _AUDIT_VAR.fullmatch(v) for v in scrubbed):
+        return bad
+    shown = dict(sorted(files.items())[:MAX_AUDIT_FILES_SHOWN])
+    return {"used": True, "files": shown, "files_total": len(files), "scrubbed": sorted(set(scrubbed)), "sha256": sha256}
+
+
+def read_audit(directory) -> dict | None:
+    """What the script wrote to `directory/remote-code-audit.json`: None when no file is there (the route was not used, or the script never got that
+    far), {"unreadable": reason} when there is one that cannot be used, else the cleaned audit (`_clean_audit`) with the sha256 of the bytes that were
+    parsed (one read, so the hash and the content belong together). Never raises. The directory is held open without following a link in its last
+    name and the file is opened beneath it, size-limited, without following a link."""
+    try:
+        with safeio.pinned_root(directory) as pin:
+            raw = safeio.read_bytes(AUDIT_FILE, max_bytes=AUDIT_MAX_BYTES, anchor=pin.fd)
+            data = safeio.parse_json_bytes(raw, max_bytes=AUDIT_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        if "(ENOENT)" in str(getattr(exc, "reason", "")) or "(ENOENT)" in str(exc):
+            return None
+        return {"unreadable": f"the audit file could not be read: {str(getattr(exc, 'reason', exc.__class__.__name__))[:120]}"}
+    except OSError as exc:
+        return {"unreadable": f"the audit file could not be read ({exc.__class__.__name__})"}
+    return _clean_audit(data, hashlib.sha256(raw).hexdigest())
