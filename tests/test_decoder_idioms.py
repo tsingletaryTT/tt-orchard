@@ -18,7 +18,7 @@ def pin(tmp_path, orchard_dir=None):
     sd = run / "stages" / "2"
     sd.mkdir(parents=True)
     entries = []
-    stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run,
+    stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(run)}, run_dir=run,
                            paths=SimpleNamespace(orchard_dir=str(orchard_dir or Path(supervisor.__file__).resolve().parent.parent)),
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
@@ -76,7 +76,7 @@ def test_an_edit_the_coder_made_to_the_idioms_is_undone_on_the_next_pin(tmp_path
     _, sd, _ = pin(tmp_path)
     (sd / full_port.IDIOMS_NAME).write_text("planted")
     run = sd.parent.parent
-    stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
+    stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
                            ledger=SimpleNamespace(append=lambda *a, **k: None))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
     supervisor.Supervisor._pin_full_port(stub, SimpleNamespace(number=2), sd)
@@ -141,7 +141,7 @@ def test_a_directory_where_the_idioms_file_goes_is_a_decision_and_not_a_tracebac
     sd = run / "stages" / "2"
     (sd / full_port.IDIOMS_NAME).mkdir(parents=True)
     entries = []
-    stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
+    stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
     assert supervisor.Supervisor._pin_full_port(stub, SimpleNamespace(number=2), sd) == []
