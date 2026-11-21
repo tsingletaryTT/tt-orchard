@@ -124,7 +124,9 @@ VOCAB_MODES = (("greedy", 0.0, 1), ("sampled", 0.7, 1))      # (name, temperatur
 VOCAB_PLANTED = 10.0                          # the planted logit; every other logit is 0.0
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
-MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
+MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; the cap when the config sets none
+MIN_POSITIONS = 16               # the lowest cap (the gate refuses a record that compares fewer positions); orchard/full_port.py MIN_POSITIONS, a test keeps them equal
+POSITIONS_LIMIT = 8192           # the highest cap (about 12 minutes on a 7B port, a record of about 0.6 MB); orchard/full_port.py POSITIONS_LIMIT, a test keeps them equal
 FREE_RUN_TOKENS = 48             # choice: a few sentences of text for the person who reads it
 EXIT_GRACE_S = 60.0              # how long a worker that was asked to close may take to exit before it is killed
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
@@ -1583,6 +1585,19 @@ def length_check(w, seq: list) -> dict:
     return {"lengths": rows, "all_agree": all(r["agree"] for r in rows)}
 
 
+def positions_cap(config: dict) -> int:
+    """The most positions this run scores: the config's `max_positions` (the supervisor writes it from `--port-check-positions`) or MAX_POSITIONS
+    when the config sets none. A value that is not a whole number from MIN_POSITIONS to POSITIONS_LIMIT stops the run before the port loads."""
+    if "max_positions" not in config:
+        return MAX_POSITIONS
+    value = config["max_positions"]
+    if type(value) is not int or not MIN_POSITIONS <= value <= POSITIONS_LIMIT:
+        shown = str(value)[:40] if not isinstance(value, int) or abs(value) < 10 ** 12 else "a very large whole number"
+        raise PortFailed(f"port_check_config.json max_positions must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}; got {shown!r}",
+                         kind="setup")
+    return value
+
+
 def vocab_size_of(config) -> int | None:
     """The checkpoint's vocabulary size from its config (the text section when there is one), or None when it gives no whole number in range."""
     section = config.get("text_config") if isinstance(config, dict) and isinstance(config.get("text_config"), dict) else config
@@ -1633,17 +1648,25 @@ def vocab_check(w, vocab: int, dies: int) -> dict:
     return block
 
 
-def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
+def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None) -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
     10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
-    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's."""
+    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's.
+    Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note says which of the two
+    limited the count."""
     n = len(ref_lp)
     value = FIDELITY_SCALE * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
     block = {"kind": "reference-greedy-text", "scale": FIDELITY_SCALE, "tokens": n, "value": value,
              "reference_logprobs": ref_lp, "chip_logprobs": chip_lp}
     if n < FIDELITY_MIN_TOKENS:
-        block["note"] = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
-                         "this number is reported, not gated")
+        note = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
+                "this number is reported, not gated")
+        if cap is not None and reference_length is not None:
+            if reference_length <= cap:
+                note += f". The stage 1 reference holds {reference_length} tokens, which limits this score"
+            else:
+                note += f". The cap of {cap} positions limits this score (--port-check-positions raises it, up to {POSITIONS_LIMIT})"
+        block["note"] = note
     return block
 
 
@@ -1657,7 +1680,8 @@ def main() -> int:
         raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
     refuse_links()
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
-    n = min(len(reference), MAX_POSITIONS)
+    cap = positions_cap(config)
+    n = min(len(reference), cap)
     ref = reference[:n]
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     for stale in (RECORD, LAYER_FILE, LAYER_FILE.with_name(LAYER_FILE.name + ".tmp")):
@@ -1728,7 +1752,8 @@ def main() -> int:
               "prompt": {"path": PROMPT, "sha256": sha_file(RUN_DIR / PROMPT)},
               "reference_ids": ref, "chip_ids": chip,
               "top1_agreement": agreement,
-              **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
+              "positions": {"cap": cap, "scored": n, "reference_length": len(reference)},
+              **({"fidelity": fidelity_block(ref_lp, chip_lp, cap, len(reference))} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
               **({"near_ties": ties} if ties is not None else {}),
               "length_check": lengths,
               **({"vocab_check": vocab_block} if vocab_block is not None else {}),

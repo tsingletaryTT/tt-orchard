@@ -41,7 +41,15 @@ from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 RECORD_SCHEMA = "orchard-port-check/1"
 TOP1_MIN = SWAP_TOP1_MIN              # choice: the bar the weights-only stage 2 uses for the same measurement
 MIN_TOKENS = SWAP_MIN_TOKENS
-MIN_FREE_RUN_CHARS = 20               # choice: the same floor as the stock-runtime gate's free-run text
+# The positions the check scores (issue 731). `--port-check-positions` sets a cap, `port_check_config.json` carries it as `max_positions`, and the
+# check scores the smaller of the cap and the length of the stage 1 reference. The template's MAX_POSITIONS, MIN_POSITIONS and POSITIONS_LIMIT are
+# copies of these three (a test keeps them equal), because the template runs in the run directory and cannot import this module.
+DEFAULT_POSITIONS = 64                # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; a run that names no cap uses it
+MIN_POSITIONS = MIN_TOKENS            # the gate refuses a record that compares fewer positions, so a lower cap could never pass
+POSITIONS_LIMIT = 8192                # choice: the Olmo-Hybrid-7B port scored 4,000 positions in under 6 minutes including its load (issue 731), so 8,192 is about
+                                      # 12 minutes, inside the hardware test's 1 hour deadline; the record then holds about 0.6 MB (ids and log-probabilities),
+                                      # far below JSON_MAX. A larger cap needs its own measurement
+MIN_FREE_RUN_CHARS = 20              # choice: the same floor as the stock-runtime gate's free-run text
 MIN_FREE_RUN_WORDS = 4                # choice: a free run of one repeated word is not text
 REFERENCE_FILE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT_FILE = "stages/1/evidence/reference/prompt-ids.json"
@@ -171,6 +179,24 @@ def agreement(reference: list, chip: list) -> float:
     return sum(1 for a, b in zip(reference, chip) if a == b) / len(reference)
 
 
+def _shown(value) -> str:
+    """A value for a message: short, and safe for an integer too large to print (Python refuses a very long integer's digits)."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10 ** 12:
+        return "a very large whole number"
+    return str(value)[:40]
+
+
+def check_positions(value) -> int:
+    """The position cap from an option or a config value: a whole number from MIN_POSITIONS to POSITIONS_LIMIT. A string of at most six
+    digits is read as a number (an option arrives as text); a boolean, a float or anything else is refused."""
+    if isinstance(value, str) and value.strip().isdigit() and len(value.strip()) <= 6:
+        value = int(value)
+    if type(value) is not int or not MIN_POSITIONS <= value <= POSITIONS_LIMIT:
+        raise ValueError(f"the number of positions the port check scores must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}; "
+                         f"got {_shown(value)!r}")
+    return value
+
+
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, stage: int = 2,
           expected_chips: int | None = None, entry: int | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 2 or stage 3 directory of a full port. No reasons means the result passes.
@@ -287,6 +313,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     if _ids(chip_ids) and chip_ids:
         _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
+        _positions_reasons(record, stage_dir, ref_ids, len(chip_ids), reasons)
         _length_check_reasons(record, reasons)
         if _ids(record.get("reference_ids")) and len(record["reference_ids"]) == len(chip_ids):
             _near_tie_reasons(record, run_dir, record["reference_ids"], chip_ids, reasons)
@@ -534,6 +561,70 @@ def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list
     if on_disk != ref_lp:
         reasons.append(f"fidelity reference_logprobs are not the first log-probabilities of the stage 1 reference ({TOP5_FILE}): "
                        "the score was made against numbers the reference did not produce")
+
+
+def _config_cap(stage_dir, reasons: list):
+    """(the cap `port_check_config.json` sets, whether it sets one) for the stage; (DEFAULT_POSITIONS, False) when it sets none. None when the
+    config cannot be read or sets a value outside the range (a reason is added), or is missing (the template check already says so)."""
+    path = Path(stage_dir) / CONFIG_NAME
+    if not path.is_file():
+        return None
+    try:
+        cfg = safeio.read_json(path, max_bytes=1 << 16, expect=dict)
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{CONFIG_NAME} is not readable JSON, so the positions cap cannot be checked: {exc.reason}")
+        return None
+    if "max_positions" not in cfg:
+        return DEFAULT_POSITIONS, False
+    value = cfg["max_positions"]
+    if type(value) is not int:
+        reasons.append(f"{CONFIG_NAME} max_positions must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}, got {_shown(value)!r}")
+        return None
+    try:
+        return check_positions(value), True
+    except ValueError:
+        reasons.append(f"{CONFIG_NAME} max_positions {_shown(value)} is outside {MIN_POSITIONS} to {POSITIONS_LIMIT}")
+        return None
+
+
+def _positions_reasons(record: dict, stage_dir, ref_ids, scored: int, reasons: list) -> None:
+    """The record's `positions` block (issue 731): the cap that applied, the positions scored and the length of the stage 1 reference. The gate
+    recomputes it from what is on disk. The cap is the config's `max_positions` (the supervisor writes that file and the record hashes it), the
+    reference length is the stage 1 file's, and the positions scored are the smaller of the two and the number the record compares. A record
+    with no block was written before the setting existed: it ran with the default cap, so it may not compare more positions than that and its
+    config may not set another cap. Nothing here looks at the fidelity value; that stays report-only."""
+    config = _config_cap(stage_dir, reasons)
+    block = record.get("positions")
+    if block is None:
+        if scored > DEFAULT_POSITIONS:
+            reasons.append(f"the record has no positions block, so the default cap {DEFAULT_POSITIONS} applies, and it compares {scored} positions")
+        if config is not None and config[1]:
+            reasons.append(f"the record has no positions block but {CONFIG_NAME} sets max_positions {config[0]}")
+        return
+    if not isinstance(block, dict):
+        reasons.append("positions must be an object")
+        return
+    if set(block) != {"cap", "scored", "reference_length"}:
+        reasons.append("positions must hold exactly cap, scored and reference_length")
+        return
+    cap, got, ref_len = block["cap"], block["scored"], block["reference_length"]
+    if not all(type(v) is int for v in (cap, got, ref_len)):
+        reasons.append("positions cap, scored and reference_length must each be a whole number")
+        return
+    in_range = MIN_POSITIONS <= cap <= POSITIONS_LIMIT
+    if not in_range:
+        reasons.append(f"positions cap {_shown(cap)} is outside {MIN_POSITIONS} to {POSITIONS_LIMIT}")
+    if got != scored:
+        reasons.append(f"positions scored {_shown(got)} differs from the {scored} positions the record compares")
+    if in_range and got > cap:
+        reasons.append(f"positions scored {_shown(got)} is more than its cap {cap}")
+    if ref_ids is not None and ref_len != len(ref_ids):
+        reasons.append(f"positions reference_length {_shown(ref_len)} differs from the {len(ref_ids)} ids in the stage 1 reference")
+    elif in_range and got == scored and got != min(ref_len, cap):
+        reasons.append(f"positions scored {got} is not the smaller of the cap {cap} and the reference length {_shown(ref_len)}")
+    if in_range and config is not None and config[0] != cap:
+        reasons.append(f"positions cap {cap} is not the max_positions {config[0]} that {CONFIG_NAME} sets"
+                       + ("" if config[1] else f" (it sets none, so the default {DEFAULT_POSITIONS} applies)"))
 
 
 def _near_tie_reasons(record: dict, run_dir: Path, ref_ids: list, chip_ids: list, reasons: list) -> None:

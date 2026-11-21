@@ -5740,6 +5740,18 @@ Prompt: work on issue 457, which names three places that walked an agent's direc
 
 `scripts/port_op_count.py` now counts one cached decode step of the generated tiny Qwen4 port on the CPU fake: `prefill` on the prompt, then one `decode_step` with each layer function wrapped, so the ops are known per layer variant and for everything outside the layers. A decode layer of the gated-delta-net variant calls the recurrent op once where the prefill layer calls the chunk op once. Projected to Flash-Next (10 slots hit, 4 chips, 10 microseconds per op): 9555 ops, 95.5 ms for a cached decode token, against 9458 ops, 94.6 ms, for the earlier one-token forward. Caching does not lower the op count, since each op count is independent of the sequence length. It removes the re-run of the prompt for every token and makes each op one row. The floor of about 95 ms per token against about 26 ms per token upstream stands, and it comes from the number of ops. Two mutations of the counter turned the new test red.
 
+## 2026-11-21: the stage 2 check's position cap is a recorded setting (issue 731, part of; PR 788)
+
+The fidelity score needs about 4,000 scored tokens to separate bfp8 from bfp4 (issue 731: 9.991 against 9.821 on the Olmo-Hybrid-7B port), and the check stopped at a fixed `MAX_POSITIONS = 64`; the calibration runs used a raised copy of the template.
+- `--port-check-positions N` (supervisor and `tt-orchard bringup`; 16 to 8192, default 64). The supervisor writes it into `port_check_config.json` as `max_positions` and into `run_start` as `port_check_positions`, both only when it is not the default, so a run that does not name it has the files it had. A resume keeps the recorded value and refuses another; a run that began before the option counts as the default.
+- The template reads `max_positions` (a value outside the range stops the run before the port loads, kind `setup`) and scores the smaller of the cap and the stage 1 reference's length. Its record has `positions` = `{cap, scored, reference_length}`. The fidelity note says which of the two limited the count.
+- The gate recomputes the block: the cap is in range and equals the config's `max_positions`, the positions scored equal the number the record compares and the smaller of the cap and the reference length, and the reference length equals the stage 1 file's. A record with no block ran with the default cap, so it may not compare more than 64 positions and its config may not set another cap. The fidelity value is still report-only.
+- Finding: stage 1's reference decodes 32 tokens (`N_NEW` in the reference gate), so a cap above 32 changes nothing until the reference is longer. The cap was never the binding limit of today's runs; the record now says so. Scoring 4,000 tokens also needs a stage 1 reference of that length, sampled at temperature 1 as the calibration did; that is not part of this change.
+- The upper limit of 8192 is a choice: the 4,000-position calibration run took under 6 minutes including load, and a record of 8,192 positions is about 0.6 MB against the gate's 16 MiB JSON limit (a test checks the size).
+- `port_quality.py` has its own `MAX_POSITIONS = 64` ("the same as stage 2's"); it is not changed here.
+- Not run: no chip. The template ran on the CPU with the fake `ttnn`; a real port scoring more than 32 positions needs a longer reference and a chip run.
+
+
 ## 2026-11-21: stage 2 runs the vocabulary-per-die hazard's sampling test (PR 787)
 
 Prompt (operator, after the Aion-1.0-Instruct-2.3B run blocked at stage 2): fix the issues the run found and handle the vocabulary-per-die hazard that stage 0 flagged on it (vocabulary 200,029, two dies, 100,015 columns each).

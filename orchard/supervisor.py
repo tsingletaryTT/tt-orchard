@@ -230,6 +230,7 @@ def is_full_port_pause(reason) -> bool:
 
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
+_check_port_check_positions = full_port.check_positions      # the supervisor's __init__ has a `full_port` flag that hides the module there
 STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate reads a source file up to the same size, full_port.SOURCE_MAX)
 STAGE_3_SEED_ENTRIES = boundedwalk.PORT_ENTRIES   # the scan stops after this many entries of any kind (files, directories, links, caches): the file
                                           # count alone would let a directory of a million subdirectories be read to the end before anything refused it
@@ -884,7 +885,7 @@ class Supervisor:
                  keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
@@ -906,6 +907,10 @@ class Supervisor:
         # `--port-repair-rounds` (issue 420): the repair rounds a full-port stage 2 attempt gives the coder after a port check that failed on the
         # port itself. Recorded in run_start; `build` hands over the recorded value on a resume. 0 is the earlier behaviour: no rounds.
         self.port_repair_rounds = port_repair.check_rounds(port_repair_rounds)
+        # `--port-check-positions` (issue 731): the most positions the full-port stage 2 check scores (the smaller of this and the stage 1 reference's
+        # length). Written into port_check_config.json as `max_positions` and recorded in run_start, both only when it is not the default, so a run that
+        # does not name the option has the files it had before. `build` hands over the recorded value on a resume.
+        self.port_check_positions = _check_port_check_positions(port_check_positions)      # the module: __init__ has a `full_port` parameter
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
@@ -1294,6 +1299,7 @@ class Supervisor:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
+                               **({"port_check_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
@@ -4951,7 +4957,9 @@ class Supervisor:
         shipped = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TEMPLATE_NAME
         safeio.atomic_write(stage_dir / full_port.TEMPLATE_NAME, safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX), mode=os.stat(shipped).st_mode & 0o777)   # replaces what stands there
         config = stage_dir / full_port.CONFIG_NAME
-        _put(config, json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n")
+        settings = {"model_snapshot": str(Path(snapshot).absolute()),
+                    **({"max_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {})}
+        _put(config, json.dumps(settings, indent=2) + "\n")
         # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
         tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
         safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
@@ -6441,6 +6449,14 @@ def _port_repair_rounds_arg(text: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _port_check_positions_arg(text: str) -> int:
+    """argparse type of `--port-check-positions`: a whole number from full_port.MIN_POSITIONS to full_port.POSITIONS_LIMIT."""
+    try:
+        return full_port.check_positions(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def parse(argv=None):
     p = argparse.ArgumentParser(prog="python3 -m orchard.supervisor", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -6545,6 +6561,11 @@ def parse(argv=None):
                         f"gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the same "
                         f"check again (issue 420). 0 is the earlier behaviour, no rounds. Default {port_repair.DEFAULT_ROUNDS}, at most "
                         f"{port_repair.MAX_ROUNDS}. The ledger records the value and a resume keeps it; a resume that names another value is refused")
+    r.add_argument("--port-check-positions", type=_port_check_positions_arg, default=None, metavar="N",
+                   help=f"a full-port stage 2 check scores the smaller of N positions and the length of the stage 1 reference (issue 731). Default "
+                        f"{full_port.DEFAULT_POSITIONS}, from {full_port.MIN_POSITIONS} to {full_port.POSITIONS_LIMIT}. The record names the cap, the "
+                        f"positions scored and the reference's length. The ledger records the value when it is not the default and a resume keeps it; a "
+                        f"resume that names another value is refused")
     r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
                    help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
@@ -6779,6 +6800,15 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what the run's stage 2 attempts did)")
         repair_rounds = recorded_rounds
     repair_rounds = port_repair.DEFAULT_ROUNDS if repair_rounds is None else port_repair.check_rounds(repair_rounds)
+    check_positions = getattr(args, "port_check_positions", None)
+    if progress.started:                        # a resumed run keeps the position cap it started with (a run that began before the option: the default)
+        recorded_positions = full_port.check_positions((progress.run_start or {}).get("port_check_positions", full_port.DEFAULT_POSITIONS))
+        if check_positions is not None and check_positions != recorded_positions:
+            raise ValueError(f"this run started with a port check positions cap of {recorded_positions}; --port-check-positions {check_positions} differs. "
+                             "Leave the option out to resume with the recorded value, or move this run's directory aside and start a new run (the cap is "
+                             "part of what the run's stage 2 check scored)")
+        check_positions = recorded_positions
+    check_positions = full_port.DEFAULT_POSITIONS if check_positions is None else full_port.check_positions(check_positions)
     tool_dedupe = not getattr(args, "no_tool_dedupe", False)
     if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
         recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
@@ -6851,7 +6881,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,

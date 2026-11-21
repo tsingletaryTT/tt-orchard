@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--port-repair-rounds N] [--model-kind generative|reranker|embedding]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--port-repair-rounds N] [--port-check-positions N] [--model-kind generative|reranker|embedding]
     tt-orchard status  [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -84,6 +84,15 @@ def _port_repair_rounds_arg(text: str) -> int:
     from orchard import port_repair
     try:
         return port_repair.check_rounds(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _port_check_positions_arg(text: str) -> int:
+    """argparse type of `--port-check-positions`: a whole number from full_port.MIN_POSITIONS to full_port.POSITIONS_LIMIT (the supervisor checks the same range)."""
+    from orchard import full_port
+    try:
+        return full_port.check_positions(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
@@ -178,6 +187,10 @@ def _parser() -> argparse.ArgumentParser:
                         "gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the "
                         "same check again (issue 420). 0 is no rounds. Default 3, at most 10. The run records the value; a resume keeps it "
                         "and refuses another")
+    b.add_argument("--port-check-positions", type=_port_check_positions_arg, default=None, metavar="N",
+                   help="a full-port stage 2 check scores the smaller of N positions and the length of the stage 1 reference (issue 731). Default 64, "
+                        "from 16 to 8192. The check's record names the cap, the positions scored and the reference's length. The run records the "
+                        "value when it is not the default; a resume keeps it and refuses another")
     b.add_argument("--no-tool-dedupe", action="store_true",
                    help="send the agent every repeat read in full (by default a repeat read of an unchanged file in the same step is answered with a "
                         "short note naming the turn that holds the text; docs/tool-result-dedupe.md). The run records the choice when it is off; a "
@@ -1466,7 +1479,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
                                               weights_only_rehearsal=args.weights_only_rehearsal, thin_port=args.thin_port,
-                                              port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path,
+                                              port_repair_rounds=args.port_repair_rounds, port_check_positions=args.port_check_positions, telegraph_config=cfg_path,
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.classify:
