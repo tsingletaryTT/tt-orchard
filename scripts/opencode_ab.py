@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import subprocess
+import urllib.request
 import sys
 import time
 from pathlib import Path
@@ -27,9 +29,47 @@ COMMON = ["kernel-probe", "--config", str(BRINGUP), "--attempts", "1", "--temper
           "--style", "plain"]
 # (op, pair number, harness order). Harness order flips on every pair (ABBA).
 PILOT = [("add", 1, "OR"), ("center", 1, "RO")]
-BATCH = ([("add", i, "OR" if i % 2 else "RO") for i in (1, 2)] + [("center", i, "OR" if i % 2 else "RO") for i in (1, 2, 3, 4)]
-         + [("row_sum", i, "OR" if i % 2 else "RO") for i in (1, 2, 3, 4)])
+# Run log addendum 1: center and row_sum go from 4 to 6 attempts per harness when the pre-registered projection is at most 4.5 hours (it is: 4.17).
+BATCH = ([("add", i, "OR" if i % 2 else "RO") for i in (1, 2)] + [("center", i, "OR" if i % 2 else "RO") for i in (1, 2, 3, 4, 5, 6)]
+         + [("row_sum", i, "OR" if i % 2 else "RO") for i in (1, 2, 3, 4, 5, 6)])
+MAX_HOURS = 5.0                      # the pre-registered cap: no new attempt starts after this many hours from the driver's start
 SEED_BASE = {"pilot": 2026112000, "batch": 2026112100}
+METRICS_URL = "http://127.0.0.1:8011/metrics"
+_METRIC_LINE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)$")
+# Cumulative counters of the model server (vLLM's /metrics). One client at a time, so the change across an attempt belongs to it; the number of
+# requests the server counted is compared with the harness's own request count to show that no other client was served in between.
+_METRICS = {"requests": ("vllm:request_success_total", None), "requests_hit_reply_cap": ("vllm:request_success_total", 'finished_reason="length"'),
+            "prompt_tokens": ("vllm:prompt_tokens_total", None), "prompt_tokens_cache_hit": ("vllm:prompt_tokens_by_source_total", 'source="local_cache_hit"'),
+            "prompt_tokens_computed": ("vllm:prompt_tokens_by_source_total", 'source="local_compute"'),
+            "generation_tokens": ("vllm:generation_tokens_total", None), "prefill_s": ("vllm:request_prefill_time_seconds_sum", None),
+            "decode_s": ("vllm:request_decode_time_seconds_sum", None), "queue_s": ("vllm:request_queue_time_seconds_sum", None),
+            "first_token_s": ("vllm:time_to_first_token_seconds_sum", None), "preemptions": ("vllm:num_preemptions_total", None)}
+
+
+def metrics_snapshot() -> dict:
+    try:
+        text = urllib.request.urlopen(METRICS_URL, timeout=10).read().decode("utf-8", "replace")
+    except Exception as exc:                                  # a failed read is recorded, never fatal
+        return {"error": f"{exc.__class__.__name__}"}
+    sums = {k: 0.0 for k in _METRICS}
+    for line in text.splitlines():
+        m = _METRIC_LINE.match(line)
+        if not m:
+            continue
+        name, labels, value = m.group(1), m.group(2) or "", m.group(3)
+        for key, (metric, label) in _METRICS.items():
+            if name == metric and (label is None or label in labels):
+                try:
+                    sums[key] += float(value)
+                except ValueError:
+                    pass
+    return sums
+
+
+def metrics_delta(before: dict, after: dict) -> dict:
+    if "error" in before or "error" in after:
+        return {"error": before.get("error") or after.get("error")}
+    return {k: round(after[k] - before[k], 3) for k in before}
 
 
 def plan(phase: str) -> list:
@@ -62,19 +102,27 @@ def main(argv: list) -> int:
             d = json.loads(line)
             done.add((d["op"], d["n"], d["harness"]))
     errors_in_a_row = 0
+    began = time.monotonic()
     for step in plan(phase):
+        if time.monotonic() - began > MAX_HOURS * 3600:
+            print("stopping: the pre-registered 5-hour cap is reached", flush=True)
+            return 4
         key = (step["op"], step["n"], step["harness"])
         if key in done:
             continue
         outdir = tdir / ("opencode" if step["harness"] == "O" else "orchard") / f"{step['op']}-{step['n']}"
         args = ([] if step["harness"] == "O" else ["control"]) + COMMON + ["--op", step["op"], "--seed", str(step["seed"]), "--out", str(outdir)]
         started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        before = metrics_snapshot()
+        load_start = Path("/proc/loadavg").read_text().split()[:3]
         t0 = time.monotonic()
         log = tdir / f"{step['harness']}-{step['op']}-{step['n']}.log"
         with open(log, "wb") as lf:
             rc = subprocess.run([sys.executable, str(SCRIPT), *args], stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 cwd=str(REPO)).returncode
-        rec = {**step, "started_utc": started, "ended_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        after = metrics_snapshot()
+        rec = {**step, "server_delta": metrics_delta(before, after), "loadavg_start": load_start,
+               "loadavg_end": Path("/proc/loadavg").read_text().split()[:3], "started_utc": started, "ended_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "driver_wall_s": round(time.monotonic() - t0, 1), "returncode": rc, "out": str(outdir), "log": str(log),
                "attempt": read_attempt(outdir)}
         with open(timeline, "a") as f:

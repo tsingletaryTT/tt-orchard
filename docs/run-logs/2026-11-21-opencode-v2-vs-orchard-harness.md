@@ -157,9 +157,61 @@ otherwise run 4. The decision and the numbers go in the Pilot section before the
 for the chip, because the coder holds all four chips and the task rules forbid taking a lease. A static check against the cheat sheet finds calls the
 compiling package does not list; it does not prove that a kernel compiles.
 
+**Load windows, corrected (2026-11-21 19:49Z).** The coordinator corrected the first suite's window to 19:25:37Z to 19:42:30Z, which agrees with the
+journal (19:25:35Z to 19:42:31Z); the "about 19:34Z to about 19:51Z" figure given earlier was withdrawn, and the paragraph under Load conditions above
+that uses 19:34Z is superseded by this one. A second suite (`suite-main-final`, nice 10, CPUWeight 20) started about 19:49Z and should end near 20:06Z; its
+exact start and end are taken from the journal when it finishes and stored with the results (`suite-window.json`). Rule unchanged: an attempt inside a
+window is flagged and is left out of every wall-time comparison between harnesses.
+
 **Runner edit during the pilot.** After the pilot began, optional parameters (`skill_tool`, `skill_paths`) were added to `run_opencode` and
 `write_config` for the skill-discovery test. Their defaults reproduce the earlier behaviour, so the pilot's attempts are unaffected.
 
-## Pilot
+## Pilot (2026-11-21, 19:34Z to 19:47Z; not counted in the batch)
+
+Seed base 2026112000, one attempt per harness per op, in the registered order. Three attempts overlap the window of the first suite (`suite-fixstubs`, journal 19:25:35Z to 19:42:31Z, the
+coordinator's corrected figure 19:25:37Z to 19:42:30Z): OpenCode `add`, orchard `add` and orchard `center`. The OpenCode `center` attempt (19:43:09Z to
+19:47:17Z) began after that window ended and ended before the second suite started (about 19:49Z), so it overlaps neither. The load average at its start was not
+recorded (the driver took that reading from the batch on); the host's 1-minute load average at 19:47:41Z was 10.9 with no suite active. Wall times from the
+pilot are not compared.
+
+| order | harness | op | simulator result | class | turns or steps | agent wall s | tool calls | ended on |
+|---|---|---|---|---|---|---|---|---|
+| 1 | OpenCode | add | pass | - | 11 | 103.8 | read 9, glob 3, write 1, shell 2 | its own final answer |
+| 2 | orchard | add | pass | - | 9 | 71.9 | read_file 6, write_file 2, shell 1 | its own final answer |
+| 3 | orchard | center | fail | tt_lang_error | 40 | 307.1 | read_file 15, shell 23, write_file 2 | the 40-turn limit |
+| 4 | OpenCode | center | fail | tt_lang_error | 40 | 238.8 | read 13, glob 4, grep 2, write 1, shell 22 | the 40-step limit (a final text was forced at step 40) |
+
+Prompt and completion tokens counted by the harnesses: `add`: OpenCode 539,514 and 2,112, orchard 79,402 and 2,110. `center`: OpenCode 2,225,212 and
+5,008, orchard 1,002,839 and 5,546. The completion token counts are close; the prompt token counts differ by a factor of 6.8 on `add` and 2.2 on `center`
+(each step resends the context; OpenCode's system prompt and ten tool schemas make its first request much larger, and its file reads come back whole). The
+server's own counters (prefix-cache share, prefill and decode seconds) start with the batch.
+
+What the transcripts show (read for harness traps; model behaviour is left alone):
+
+- OpenCode `add`: 11 steps, 15 tool calls, all completed, no error event, no model named other than the Tenstorrent one, nothing on stderr. The agent
+  read `kernel_check.py`, `kernel_harness.py` and `references.py`, which the probe's skill never names. The largest input of any step was 66,341 tokens.
+- OpenCode `center`: 40 steps, 42 tool calls, all completed, no error event; it ran `kernel_check.py` 22 times itself and read the cheat sheet and the error
+  more than once. Its last reasoning names the blocker: the simulator's `reduce_sum` requires a `shape` argument (the simulator error is
+  `reduce_sum() missing 1 required positional argument: 'shape'`), while the cheat sheet says the chip's package (1.1.6) has no `shape` argument. The
+  probe's `kernel-probe.md` tells the coder to pass `shape`, the unedited check is the simulator, and the cheat sheet says to leave it out. Both harnesses'
+  `center` pilot attempts ended on the same simulator error. The conflict belongs to the task and the skill texts and not to either harness. It has to be
+  kept in mind when reading `center` and `row_sum` pass counts as a measure of a harness.
+- The orchard `center` attempt (the control) is the same failure. The orchard `add` attempt wrote `kernel.py` twice (the second write after the
+  automatic check output) and ran the check once itself.
+- No harness trap needed a change. The OpenCode step limit forces a final text at step 40, so a 40-step run always ends with `stop`; the runner labels
+  it `turns` (the count is compared with the limit).
+
+Changes after the pilot and before the batch, none touching what an attempt does: the driver takes the model server's counters (`/metrics`: prompt tokens
+from cache and computed, generated tokens, request prefill, decode and queue seconds, replies cut at the 4096 cap) and `/proc/loadavg` before and after every
+attempt, and stops starting attempts 5 hours after its start. `scripts/oc_quality.py` was added (it reads results and runs nothing against the server).
+
+**Decision under addendum 1.** Expected seconds of one `center` or `row_sum` attempt = max(600, mean of the two pilot `center` attempts, 273) = 600.
+Projection = 2 x (2 x 150 + 6 x 600 + 6 x 600) = 15,000 s = 4.17 h, which is at most 4.5 h. So `center` and `row_sum` run 6 attempts per harness: 28
+attempts (14 pairs), the 10 pairs of the plan plus `center` 5 and 6 and `row_sum` 5 and 6, harness order flipping on every pair as before. The pilot
+attempts took 4 to 5 minutes each, so the projection is more than the likely time. Start: a second suite (`suite-main-final`, started about 19:49Z, expected
+to end near 20:06Z) is running, so the batch waits for its end and no batch attempt overlaps it. The wait is used for the skill-discovery test, which
+compares no wall times. If another suite starts during the batch, its window is flagged on the attempts it overlaps.
+
+## Batch
 
 (to be written)
