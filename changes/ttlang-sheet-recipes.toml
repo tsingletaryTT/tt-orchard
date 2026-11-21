@@ -1,0 +1,3 @@
+target = "0.9.191"
+summary = "kernel-probe --cheat-sheet-recipes on adds four verified recipes by kind of op after the TT-Lang cheat sheet; off leaves the sheet byte for byte as it was."
+kind = "feature"
