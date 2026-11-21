@@ -112,6 +112,21 @@ def test_a_refusal_is_answered_with_stage_1s_route_and_a_second_load_with_trust_
     assert "hf_secret_value" not in json.dumps(report)                 # the names of scrubbed variables are recorded and never their values
 
 
+def test_the_tokenizers_flag_that_the_helpers_environment_sets_survives_the_route(tmp_path, monkeypatch):
+    # port_construction.default_env() sets TOKENIZERS_PARALLELISM=false on purpose. Stage 1's pattern matches the word TOKEN in it, so the route used
+    # to remove the flag and list it as a scrubbed credential in the construction file's introduction.
+    from orchard import port_construction
+    snap = snapshot_with_code(tmp_path)
+    install_fakes(monkeypatch, refuse=True, calls=[])
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", port_construction.default_env()["TOKENIZERS_PARALLELISM"])
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
+    script = load_script()
+    script.build_model(str(snap))
+    report = script.remote_code_report()
+    assert "HF_TOKEN" in report["scrubbed"] and "TOKENIZERS_PARALLELISM" not in report["scrubbed"]
+    assert os.environ["TOKENIZERS_PARALLELISM"] == "false"
+
+
 def test_a_model_without_custom_code_is_loaded_without_the_trust_flag_and_the_route_is_not_used(tmp_path, monkeypatch):
     snap = snapshot_with_code(tmp_path)
     calls = []
