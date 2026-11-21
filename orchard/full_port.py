@@ -35,7 +35,7 @@ import os
 import re
 from pathlib import Path
 
-from orchard import boundedwalk, safeio, ttnn_calls
+from orchard import boundedwalk, hazards, safeio, ttnn_calls
 from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 
 RECORD_SCHEMA = "orchard-port-check/1"
@@ -334,6 +334,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     _template_reasons(record, stage_dir, run_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
     _device_ops_reasons(record, run_dir, reasons, stage_dir)
+    _vocab_check_reasons(record, run_dir, reasons, stage_dir)
     return reasons, seen
 
 
@@ -606,6 +607,96 @@ def _length_check_reasons(record: dict, reasons: list) -> None:
             reasons.append("length_check with an error holds a string error and no all_agree")
     elif block.get("all_agree") is not all(r["agree"] for r in rows) or not isinstance(block.get("all_agree"), bool):
         reasons.append("length_check all_agree is not whether every row agrees")
+
+
+VOCAB_MAX = 10 ** 7                   # the template's VOCAB_MAX
+VOCAB_MODES = ("greedy", "sampled")   # the template's VOCAB_MODES names
+
+
+def _snapshot_vocab(stage_dir: Path):
+    """The vocabulary size the checkpoint's own config gives, read from the snapshot that this stage's `port_check_config.json` names (the way
+    `_snapshot_floor` reads the layer count), or None when it cannot be read or is not a whole number in range."""
+    try:
+        snapshot = safeio.read_json(Path(stage_dir) / CONFIG_NAME, max_bytes=1 << 16, expect=dict).get("model_snapshot")
+        if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
+            return None
+        config = safeio.read_json(safeio.resolved(Path(snapshot) / "config.json"), max_bytes=1 << 20, expect=dict)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    section = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+    n = section.get("vocab_size")
+    return n if type(n) is int and 0 < n <= VOCAB_MAX else None
+
+
+def _vocab_cases(vocab: int, dies: int) -> list:
+    """The (die, column, planted, mode) rows the template's `vocab_check` asks for, computed again here: the first column past the limit of each
+    die's slice and its last column, on each path. A test keeps this equal to the template's `vocab_probe_cases`."""
+    per_die = -(-vocab // dies)
+    rows = []
+    for die in range(dies):
+        start, end = die * per_die, min((die + 1) * per_die, vocab) - 1
+        for column in sorted({hazards.VOCAB_PER_DIE_LIMIT, end - start}):
+            if start + column <= end:
+                rows += [(die, column, start + column, mode) for mode in VOCAB_MODES]
+    return rows
+
+
+def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
+    """The vocabulary-per-die hazard's check (issue 183). The gate reads the vocabulary from the snapshot's own config.json, counts the
+    chips in the record, and decides from those two whether the check applies: columns per die above the hazard scan's limit need a
+    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook) or `pass` with one row for each planted
+    column on each path, and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record
+    that says otherwise."""
+    vocab, chips = _snapshot_vocab(stage_dir), record.get("chips")
+    if vocab is None or vocab <= hazards.VOCAB_PER_DIE_LIMIT:
+        return                                  # one die holding the whole vocabulary is already within the limit
+    if not isinstance(chips, list) or not 0 < len(chips) <= 64:
+        reasons.append(f"{RECORD_FILE} chips must be a list of 1 to 64 chips: the vocabulary check ({vocab} columns) cannot tell how many dies share them")
+        return
+    dies = len(chips)
+    if -(-vocab // dies) <= hazards.VOCAB_PER_DIE_LIMIT:
+        return
+    per_die, name = -(-vocab // dies), f"{RECORD_FILE} vocab_check"
+    block = record.get("vocab_check")
+    if block is None:
+        reasons.append(f"{name} is missing: the checkpoint's vocabulary is {vocab} columns over {dies} chips ({per_die} per die, above "
+                       f"{hazards.VOCAB_PER_DIE_LIMIT}), so the check that wrote the record had to run the vocabulary check (issue 183)")
+        return
+    if not isinstance(block, dict):
+        reasons.append(f"{name} must be an object")
+        return
+    for key, want in (("vocab_size", vocab), ("dies", dies), ("per_die", per_die), ("limit", hazards.VOCAB_PER_DIE_LIMIT)):
+        if block.get(key) != want or type(block.get(key)) is not int:
+            reasons.append(f"{name}.{key} is {block.get(key)!r}; the gate's own reading of the snapshot and the chips gives {want}")
+    status, cases = block.get("status"), block.get("cases")
+    if status == "skipped":
+        reason = block.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 300 or cases != []:
+            reasons.append(f"{name} with status skipped needs a reason of 1 to 300 characters and no cases")
+        return
+    if status != "pass":
+        reasons.append(f"{name}.status must be pass or skipped, got {status!r}")
+        return
+    if not isinstance(cases, list) or len(cases) > 64 or not all(isinstance(r, dict) for r in cases):
+        reasons.append(f"{name}.cases must be a list of at most 64 objects")
+        return
+    want_rows = _vocab_cases(vocab, dies)
+    have = [(r.get("die"), r.get("column"), r.get("planted"), r.get("mode")) for r in cases]
+    for die in range(dies):
+        if not any(h[0] == die for h in have):
+            reasons.append(f"{name} has no case for die {die}: every die's last column has to be tried")
+    if have != want_rows:
+        reasons.append(f"{name}.cases are not the {len(want_rows)} rows the gate expects for {vocab} columns over {dies} dies (the first column past "
+                       f"{hazards.VOCAB_PER_DIE_LIMIT} and the last column of each die, on the greedy and the sampled path)")
+        return
+    for r in cases:
+        got, planted = r.get("got"), r["planted"]
+        if type(got) is not int or type(r.get("ok")) is not bool:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}) needs a whole-number got and a boolean ok")
+        elif got != planted:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}): got {got}, planted {planted}")
+        elif r["ok"] is not True:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}) says ok=false but its id equals the planted id")
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:

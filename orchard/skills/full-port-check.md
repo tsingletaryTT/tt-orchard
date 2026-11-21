@@ -140,7 +140,10 @@ The prepare phase writes the port and `hw_test.json`, then `handoff.json`. The f
    nudge and then a pause.
 1. Read `stages/0/delta.json` (`path_reasons`, `differences`, `hazards`, `alignment`) and the stage 1 evidence. They say what differs
    from the nearest model and what the reference produced. Read the nearest model's TT code only as an example of how a layer is written
-   in ttnn. Do not edit files outside `stages/2/`.
+   in ttnn. Do not edit files outside `stages/2/`. When `stages/0/hazard-scan.json` lists `vocab_per_die_above_65536`, the board test calls
+   an optional `sample(model, logits, temperature, top_k) -> int` of `port_model.py` on logits whose one large value sits in the first column
+   past 65,535 of each die and in the last column of each die (see the interface in `port_check.py`). Define it to call the code the port's
+   sampler runs, so the test reaches that code. Without it the test records "skipped" and a wrap in the sampler stays untested.
 2. Write the port under `stages/2/port/` and test the parts that need no chip (weight names, shapes, a CPU run of your own layer
    code against the reference layer) with ordinary shell commands. Do not import `ttnn` in your own shell: importing it opens the
    device, and only the supervisor's test holds a lease.

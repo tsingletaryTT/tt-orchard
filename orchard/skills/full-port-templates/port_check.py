@@ -70,6 +70,17 @@ Optional hook, for localising a numerics failure (issue 505):
         evidence/layer-port.npz and this file prints one line, `PORT_CHECK_LAYERS <sha256 of that file> <layer count>`, which the
         supervisor's capture of the output keeps, so `stage_tools.py layer-diff` can tell this file from one written afterwards.
 
+Optional hook, for the vocabulary-per-die hazard (issue 183):
+
+    sample(model, logits: list[float], temperature: float, top_k: int) -> int
+        Pick the next token id from one row of logits the way the port's server picks it: with `temperature` 0 the largest logit, and otherwise a
+        draw from the `top_k` largest at that temperature. The check calls it only when the checkpoint's vocabulary over the chips of the mesh
+        gives more than 65,536 columns per die (the hazard scan lists `vocab_per_die_above_65536`). It plants one large logit in the first
+        column past 65,535 of each die's slice and in the last column of each die, with top_k 1, once with temperature 0 and once above 0, and
+        the id has to be the planted column. A sampler that wraps its index at 65,536 fails the run and the message names the die and the
+        column. A port with no `sample` is recorded as skipped, with that reason, and the run goes on. A port that samples on the chip
+        defines `sample` to call the same code its server runs.
+
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
 import collections
@@ -107,6 +118,10 @@ PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
 LENGTH_CHECK_LENGTHS = (2, 3, 4, 31, 32, 33)      # choice: the shortest prompts and the sizes at and around one tile of 32 tokens, where padding bugs sit
+VOCAB_PER_DIE_LIMIT = 65536                   # the hazard scan's limit (orchard/hazards.py VOCAB_PER_DIE_LIMIT; a test keeps the two equal): a sampler index wraps here
+VOCAB_MAX = 10 ** 7                           # choice: a vocabulary above this is not read (the largest real vocabularies are a few hundred thousand)
+VOCAB_MODES = (("greedy", 0.0, 1), ("sampled", 0.7, 1))      # (name, temperature, top_k): one candidate on the sampled path keeps its answer exact
+VOCAB_PLANTED = 10.0                          # the planted logit; every other logit is 0.0
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
@@ -952,6 +967,14 @@ def worker(read_fd: int, write_fd: int) -> int:
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
+            elif op == "sample":         # optional, untimed: the vocabulary-per-die hazard's targeted test (see `vocab_check`)
+                fn = getattr(mod, "sample", None)
+                if not callable(fn):
+                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)"})
+                else:
+                    logits = [0.0] * int(req["vocab"])
+                    logits[int(req["planted"])] = VOCAB_PLANTED
+                    reply({"ok": True, "id": int(fn(model, logits, float(req["temperature"]), int(req["top_k"])))})
             elif op == "close":
                 if mod is not None and model is not None:
                     mod.close(model)
@@ -1505,6 +1528,56 @@ def length_check(w, seq: list) -> dict:
     return {"lengths": rows, "all_agree": all(r["agree"] for r in rows)}
 
 
+def vocab_size_of(config) -> int | None:
+    """The checkpoint's vocabulary size from its config (the text section when there is one), or None when it gives no whole number in range."""
+    section = config.get("text_config") if isinstance(config, dict) and isinstance(config.get("text_config"), dict) else config
+    n = section.get("vocab_size") if isinstance(section, dict) else None
+    return n if type(n) is int and 0 < n <= VOCAB_MAX else None
+
+
+def vocab_per_die(vocab: int, dies: int) -> int:
+    return -(-vocab // dies)
+
+
+def vocab_flagged(vocab: int, dies: int) -> bool:
+    """Whether the hazard scan's vocabulary hazard applies: the columns one die holds are above the limit (orchard/hazards.py)."""
+    return vocab_per_die(vocab, dies) > VOCAB_PER_DIE_LIMIT
+
+
+def vocab_probe_cases(vocab: int, dies: int) -> list:
+    """The columns to plant a maximum in, die by die: the first column past the limit of that die's slice and its last column. `planted` is
+    the id of the whole vocabulary, `column` the position inside the die."""
+    per_die = vocab_per_die(vocab, dies)
+    cases = []
+    for die in range(dies):
+        start, end = die * per_die, min((die + 1) * per_die, vocab) - 1
+        for column in sorted({VOCAB_PER_DIE_LIMIT, end - start}):
+            if start + column <= end:
+                cases.append({"die": die, "column": column, "planted": start + column})
+    return cases
+
+
+def vocab_check(w, vocab: int, dies: int) -> dict:
+    """The vocabulary-per-die hazard's targeted test (issue 183): for each planted column, ask the port's `sample` hook on the greedy and on the
+    sampled path for the id of a logits row whose only large value sits in that column. A wrong id, or an error in the hook, fails the run with a
+    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason."""
+    block = {"flagged": True, "vocab_size": vocab, "dies": dies, "per_die": vocab_per_die(vocab, dies), "limit": VOCAB_PER_DIE_LIMIT,
+             "status": "pass", "reason": "", "cases": []}
+    for case in vocab_probe_cases(vocab, dies):
+        for mode, temperature, top_k in VOCAB_MODES:
+            got = w.ask(op="sample", vocab=vocab, planted=case["planted"], temperature=temperature, top_k=top_k)
+            if "skipped" in w.last:
+                return {**block, "status": "skipped", "reason": str(w.last["skipped"])[:300], "cases": []}
+            row = {**case, "mode": mode, "got": got, "ok": got == case["planted"]}
+            block["cases"].append(row)
+            if not row["ok"]:
+                raise PortFailed(f"vocab check: the port's sample returned id {got} on the {mode} path, where the only large logit sits in id "
+                                 f"{case['planted']} (die {case['die']}, column {case['column']} of {block['per_die']}). The hazard scan predicted "
+                                 f"this: a sampler index wraps at {VOCAB_PER_DIE_LIMIT} columns per die. Make the port's sampler return the "
+                                 "right id for every column of the vocabulary.", op="sample")
+    return block
+
+
 def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
     10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
@@ -1570,6 +1643,8 @@ def main() -> int:
             free.append(w.ask(op="decode", token=free[-1], position=len(prompt) + k - 1))
         agreement = sum(1 for a, b in zip(ref, chip) if a == b) / n
         lengths = length_check(w, prompt + reference)      # after everything the record needs from the port; nothing in it can change the top-1 agreement
+        vocab = vocab_size_of(read_config(model_dir))
+        vocab_block = vocab_check(w, vocab, len(chips)) if vocab is not None and vocab_flagged(vocab, len(chips)) else None
         layers_note, n_layers = None, 0
         if agreement < LAYER_DIAG_BELOW:          # advice for the coder, after everything the record needs; nothing in it can change the record
             try:
@@ -1601,6 +1676,7 @@ def main() -> int:
               **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
               **({"near_ties": ties} if ties is not None else {}),
               "length_check": lengths,
+              **({"vocab_check": vocab_block} if vocab_block is not None else {}),
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
@@ -1621,6 +1697,10 @@ def main() -> int:
         bad = [r["length"] for r in lc["lengths"] if not r["agree"]]
         print(f"length check: prefill and prefill-then-decode give different next tokens at lengths {bad} (reported, not gated). A port that pads a "
               "prompt or handles a tile boundary wrongly does this; look at how prefill and decode_step treat the last tokens.", flush=True)
+    if "vocab_check" in record:
+        vb = record["vocab_check"]
+        print(f"vocab check: {vb['status']}" + (f", {vb['reason']}" if vb["reason"] else f" ({len(vb['cases'])} cases over {vb['dies']} dies, "
+              f"{vb['per_die']} columns each)"), flush=True)
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)
