@@ -1059,6 +1059,11 @@ def _port_facts_reference_source(base: Path):
     return port_facts.reference_source(base, "toy")
 
 
+def _port_construction_read_audit(base: Path):
+    from orchard import port_construction
+    return port_construction.read_audit(base / "audit")
+
+
 def _port_excerpts_own_modeling(base: Path):
     from orchard import port_excerpts
     return port_excerpts.own_modeling_source(base / "snap", {"auto_map": {"AutoModelForCausalLM": "modeling_toy.ToyForCausalLM"}})
@@ -1386,6 +1391,7 @@ READERS: list[Reader] = [
            documented=(_PortFactsError,)),
     Reader("port_facts.reference_source", _port_facts_reference_source, rel="models/toy/configuration_toy.py"),
     Reader("port_excerpts.own_modeling_source", _port_excerpts_own_modeling, rel="snap/modeling_toy.py"),
+    Reader("port_construction.read_audit", _port_construction_read_audit, rel="audit/remote-code-audit.json"),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
@@ -1514,7 +1520,6 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 
 # Modules that parse JSON and have no reader in READERS yet: the backlog. tests/test_hostile_readers.py keeps this list exact.
 UNREGISTERED_MODULES = (
-    'port_construction.py',      # json.loads of one stdout line from the reference interpreter, not a file; tests/test_port_construction.py feeds it hostile lines
     'long_sweep.py',
     'full_port_quality.py',      # json.loads(json.dumps(...)) compares two of its own values, no outside file
     'full_port_entries.py',      # json.loads(json.dumps(...)) of its own summary, no outside file
