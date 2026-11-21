@@ -240,8 +240,9 @@ def test_the_attention_picks_its_tables_by_the_layer_type_of_its_layer():
     assert p.attention["rope"]["full_attention"]["kind"] == "yarn" and p.attention["rope"]["sliding_attention"]["kind"] == "default"
     assert "theta" not in p.attention                                              # no single theta: every layer type holds its own
     assert 'ATTENTION["layer_types"][' in text and "_rope_inv_freq" in text
-    for helper in ("_rope_inv_freq",):
-        assert helper in pt.FIXED_HELPERS                                          # a failure inside a table helper is never a repair target
+    from orchard import thin_repair
+    for helper in ("_rope_inv_freq", "_rope_tables"):
+        assert thin_repair._holds_generated_mark(text, helper), helper             # a failure inside a table helper is never a repair target
 
 
 @pytest.mark.parametrize("what, mutate, reason", [
@@ -354,7 +355,8 @@ def test_a_sliding_window_is_generated_and_recorded():
     text, p = generate(window_config(8))
     assert p.stubs == [] and p.attention is not None and p.attention["window"] == 8
     assert "_window_mask" in text and "attn_mask=_window_mask(model, seq)" in text
-    assert "_window_mask" in pt.FIXED_HELPERS                          # a failure inside the mask helper is never a repair target
+    from orchard import thin_repair
+    assert thin_repair._holds_generated_mark(text, "_window_mask")     # a failure inside the mask helper is never a repair target
     flat, _ = generate(aion_rope_config(hd=16, original=16, window=None))
     assert "_window_mask" not in flat and "window" not in generate(aion_rope_config(hd=16, original=16, window=None))[1].attention
 
@@ -444,7 +446,7 @@ def test_close_frees_the_window_mask(monkeypatch, tmp_path):
     assert model.get("window_mask") is None and model["dev"] == {}
 
 
-@pytest.mark.parametrize("window", ["8", 8.5, True, -3, 0])
+@pytest.mark.parametrize("window", ["8", 8.5, True, -3, 0, [], {}, "x\0y", 10 ** 20, 10 ** 400, -(10 ** 400), float("inf"), float("nan")])
 def test_a_sliding_window_that_is_not_a_positive_whole_number_leaves_a_named_stub(window):
     """A layer marked sliding with a window the generator cannot read must not turn into full attention without a word."""
     cfg = window_config(8)
@@ -488,3 +490,122 @@ def test_a_sliding_window_with_layer_types_that_do_not_cover_the_layers_leaves_a
     reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
     assert p.attention is None, layer_types
     assert reasons and all("sliding" in r or "layer_types" in r for r in reasons), (layer_types, reasons)
+
+
+# ---- hostile values in a layer-keyed rope block (checklist item 1): a named stub, never an exception ------------------------------------------------
+
+HOSTILE = [[], {}, "", "x\0y", 10 ** 400, -(10 ** 400), True, float("nan"), float("inf"), -1, 0]
+
+
+@pytest.mark.parametrize("key", ["rope_theta", "factor", "original_max_position_embeddings"])
+@pytest.mark.parametrize("value", HOSTILE + [None], ids=lambda v: repr(v)[:14])
+def test_a_hostile_required_value_in_a_layer_keyed_block_is_a_named_stub(key, value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["full_attention"][key] = value
+    text, p = generate(cfg)
+    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
+    assert p.attention is None and reasons and all(key in r for r in reasons), (key, value, reasons)
+
+
+@pytest.mark.parametrize("key", ["beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim"])
+@pytest.mark.parametrize("value", HOSTILE, ids=lambda v: repr(v)[:14])
+def test_a_hostile_optional_value_in_a_layer_keyed_block_is_a_named_stub(key, value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["full_attention"][key] = value
+    text, p = generate(cfg)
+    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
+    assert p.attention is None and reasons and all(key in r for r in reasons), (key, value, reasons)
+
+
+@pytest.mark.parametrize("value", [[], {}, "", "x\0y", 10 ** 400, True, float("nan"), 0.5, 2])
+def test_a_partial_rotary_factor_other_than_one_in_a_layer_keyed_block_is_a_named_stub(value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["sliding_attention"]["partial_rotary_factor"] = value
+    text, p = generate(cfg)
+    reasons = [s.reason for s in p.stubs if "ttention" in s.cls or "attn" in s.function]
+    assert p.attention is None and reasons and all("partial_rotary_factor" in r for r in reasons), (value, reasons)
+
+
+@pytest.mark.parametrize("value", [None, [], {}, "", "x\0y", 10 ** 400, True, 3.5])
+def test_a_hostile_rope_type_or_layer_type_name_is_a_named_stub(value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["full_attention"]["rope_type"] = value
+    text, p = generate(cfg)
+    assert p.attention is None and p.stubs
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["layer_types"] = ["sliding_attention", value, "full_attention"]
+    text, p = generate(cfg)
+    assert p.attention is None and p.stubs
+
+
+def test_a_flat_block_with_an_integer_too_large_for_a_float_does_not_crash_the_plan_for_a_layer_keyed_config():
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["sliding_attention"]["rope_theta"] = 10 ** 400
+    text, p = generate(cfg)
+    assert p.attention is None
+
+
+@pytest.mark.parametrize("window", [1, 2, 31, 40, 64])
+def test_the_port_matches_a_banded_torch_forward_for_small_and_large_windows(monkeypatch, tmp_path, window):
+    """40 tokens pad to 64. A window of 1 sees only the query itself; 31 and 40 sit under the padded length (the mask is used); 64 covers it (the causal call)."""
+    cfg = window_config(window)
+    ids = [(11 * i + 2) % 50 for i in range(40)]
+    mod, model, weights, got = run_port(monkeypatch, tmp_path, cfg, ids)
+    want = torch_forward(weights, cfg, ids)
+    assert torch.allclose(got, want, atol=2e-3, rtol=2e-3), (window, (got - want).abs().max())
+
+
+# ---- a config value is never echoed as it came: the port must still parse ---------------------------------------------------------------------
+
+INJECTION = ['\'"""\nraise SystemExit(7)\n"""', "\\", "a'b\"c", "x" * 10_000, "line\nbreak", "tab\tx"]
+
+
+def assert_a_clean_port(text, p):
+    import ast
+    tree = ast.parse(text)                                                       # a SyntaxError here is the failure
+    assert not any(isinstance(n, ast.Raise) and "SystemExit" in ast.unparse(n) for n in ast.walk(tree)), "hostile text became code"
+    assert "SystemExit" not in "\n".join(s.reason for s in p.stubs)
+    assert all(len(s.reason) < 600 for s in p.stubs)
+
+
+@pytest.mark.parametrize("value", INJECTION, ids=lambda v: repr(v)[:12])
+def test_a_hostile_string_for_sliding_window_leaves_a_port_that_parses(value):
+    cfg = window_config(8)
+    cfg["sliding_window"] = value
+    text, p = generate(cfg)
+    assert p.attention is None and p.stubs
+    assert_a_clean_port(text, p)
+
+
+@pytest.mark.parametrize("value", INJECTION, ids=lambda v: repr(v)[:12])
+def test_a_hostile_rope_type_leaves_a_port_that_parses(value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["rope_parameters"]["full_attention"]["rope_type"] = value
+    text, p = generate(cfg)
+    assert p.attention is None and p.stubs
+    assert_a_clean_port(text, p)
+    flat = aion_rope_config(hd=16, window=None)
+    flat["rope_parameters"] = {"rope_type": value, "rope_theta": 1000.0}
+    text, p = generate(flat)
+    assert_a_clean_port(text, p)
+
+
+@pytest.mark.parametrize("value", INJECTION, ids=lambda v: repr(v)[:12])
+def test_a_hostile_layer_type_name_leaves_a_port_that_parses(value):
+    cfg = aion_rope_config(hd=16, window=None)
+    cfg["layer_types"] = ["sliding_attention", value, "full_attention"]
+    text, p = generate(cfg)                                                     # no block for that name: a stub that does not echo it
+    assert p.attention is None and p.stubs
+    assert_a_clean_port(text, p)
+    cfg["rope_parameters"][value] = dict(cfg["rope_parameters"]["full_attention"])
+    text, p = generate(cfg)                                                     # with a block: generated, the name a repr literal in ATTENTION
+    assert_a_clean_port(text, p)
+
+
+def test_shown_prints_plain_names_and_small_numbers_and_names_the_type_of_anything_else():
+    assert pt._shown("full_attention") == "'full_attention'" and pt._shown(8) == "8" and pt._shown(0.5) == "0.5" and pt._shown(None) == "None"
+    assert pt._shown(True) == "True"
+    assert pt._shown([1]) == "<a list>" and pt._shown({"a": 1}) == "<a dict>" and pt._shown(10 ** 400) == "<a int>"
+    assert pt._shown(float("nan")) == "<a float>" and pt._shown(float("inf")) == "<a float>"
+    assert pt._shown('a"b') == "<a string that is not a plain name>" and pt._shown("x" * 41) == "<a string that is not a plain name>"
+    assert pt._shown("x" * 40) == repr("x" * 40) and pt._shown("") == "<a string that is not a plain name>"

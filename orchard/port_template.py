@@ -136,6 +136,30 @@ def _number(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) != float("inf") else None
 
 
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+
+
+def _shown(value) -> str:
+    """`value` as it may appear in a stub reason: a short plain name or a small number as its repr, anything else as a word that names its type. A reason
+    goes into the docstring of the stub and into the ledger; a quote, a backslash or a newline in a config value would end the docstring and leave a
+    port that does not parse (a `sliding_window` of `'\"\"\"` did), so a config value is never echoed as it came."""
+    if isinstance(value, str):
+        return repr(value) if _PLAIN_NAME.fullmatch(value) else "<a string that is not a plain name>"
+    if value is None or isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, int) and abs(value) < 10 ** 12:
+        return repr(value)
+    if isinstance(value, float) and value == value and abs(value) < 1e12:
+        return repr(value)
+    return f"<a {type(value).__name__}>"
+
+
+def _float_of(x):
+    """`x` as a float when it is a finite number that a float can hold, else None. An int of 400 digits passes `_number` and raises OverflowError in
+    `float(...)`; this answers None for it (issue 461's rule, `safeio.fits_float`)."""
+    return float(x) if safeio.fits_float(x) else None          # finite: ok fits_float has checked that the value is a finite number a float holds
+
+
 # ---- the construction: which class is at which module path -------------------------------------------------------------------------------
 
 def _group_size_fits(attrs: dict, width: int) -> bool:
@@ -1734,10 +1758,10 @@ def _rotary_plan(section: dict, hidden: int):
         return None, "the config gives neither head_dim nor num_attention_heads"
     rope = _rope_dict(section)
     if rope_keyed_by_layer_type(section):
-        return None, f"rope_parameters is keyed by layer type ({', '.join(sorted(rope))}); one rotary table for every layer would be wrong"
+        return None, f"rope_parameters is keyed by layer type ({', '.join(_shown(k) for k in sorted(rope))}); one rotary table for every layer would be wrong"
     rope_type = rope.get("rope_type", rope.get("type", "default")) if rope else "default"
     if rope_type != "default":
-        return None, f"rope_type is {rope_type!r}, not the default"
+        return None, f"rope_type is {_shown(rope_type)}, not the default"
     factor = _number(rope.get("partial_rotary_factor", section.get("partial_rotary_factor", 1.0)))
     if factor is None or not 0 < factor <= 1:
         return None, "partial_rotary_factor is not a number above 0 and at most 1"
@@ -1762,33 +1786,33 @@ def _layer_rope_plan(section: dict, kcls: str):
     for t in sorted(set(layer_types)):
         block = section["rope_parameters"].get(t)
         if not isinstance(block, dict):
-            return None, f"{kcls}: rope_parameters has no block for layer type {t!r}"
+            return None, f"{kcls}: rope_parameters has no block for layer type {_shown(t)}"
         kind = block.get("rope_type", block.get("type"))
-        theta = _number(block.get("rope_theta"))
+        theta = _float_of(block.get("rope_theta"))
         if theta is None or theta <= 0:
-            return None, f"{kcls}: rope_theta of layer type {t!r} is missing or not a positive number"
-        if block.get("partial_rotary_factor") is not None and _number(block.get("partial_rotary_factor")) != 1:
-            return None, f"{kcls}: partial_rotary_factor of layer type {t!r} is not 1; the generated rotary rotates the whole head"
+            return None, f"{kcls}: rope_theta of layer type {_shown(t)} is missing or not a positive number"
+        if block.get("partial_rotary_factor") is not None and _float_of(block.get("partial_rotary_factor")) != 1.0:
+            return None, f"{kcls}: partial_rotary_factor of layer type {_shown(t)} is not 1; the generated rotary rotates the whole head"
         if kind == "default":
-            out[t] = {"kind": "default", "theta": float(theta)}
+            out[t] = {"kind": "default", "theta": theta}
         elif kind == "yarn":
-            factor = _number(block.get("factor"))
+            factor = _float_of(block.get("factor"))
             original = _whole(block, "original_max_position_embeddings")
             if factor is None or factor <= 0:
-                return None, f"{kcls}: the yarn block of layer type {t!r} has no positive number as factor"
+                return None, f"{kcls}: the yarn block of layer type {_shown(t)} has no positive number as factor"
             if not original:
-                return None, f"{kcls}: the yarn block of layer type {t!r} has no whole number as original_max_position_embeddings"
-            spec = {"kind": "yarn", "theta": float(theta), "factor": float(factor), "original_max": original}
+                return None, f"{kcls}: the yarn block of layer type {_shown(t)} has no whole number as original_max_position_embeddings"
+            spec = {"kind": "yarn", "theta": theta, "factor": factor, "original_max": original}
             for key in ("beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim"):
                 if block.get(key) is None:
                     continue
-                value = _number(block.get(key))
+                value = _float_of(block.get(key))
                 if value is None or value <= 0:
-                    return None, f"{kcls}: {key} of the yarn block of layer type {t!r} is not a positive number"
-                spec[key] = float(value)
+                    return None, f"{kcls}: {key} of the yarn block of layer type {_shown(t)} is not a positive number"
+                spec[key] = value
             out[t] = spec
         else:
-            return None, f"{kcls}: the rope_type of layer type {t!r} is {kind!r}; the generated tables write the default type and yarn"
+            return None, f"{kcls}: the rope_type of layer type {_shown(t)} is {_shown(kind)}; the generated tables write the default type and yarn"
     return {"layer_types": list(layer_types), "rope": out}, None
 
 
@@ -1821,7 +1845,7 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     window = sliding_window_of(section)
     marked = isinstance(section.get("layer_types"), list) and "sliding_attention" in section["layer_types"]
     if marked and section.get("sliding_window") is not None and not window:
-        return None, (f"{kcls}: layer_types lists sliding_attention and sliding_window is {section.get('sliding_window')!r}, which is not a positive "
+        return None, (f"{kcls}: layer_types lists sliding_attention and sliding_window is {_shown(section.get('sliding_window'))}, which is not a positive "
                       "whole number, so the window of the sliding layers is not known")
     if window and layer_rope is None:
         n_layers = _whole(section, "num_hidden_layers")
@@ -1873,6 +1897,7 @@ _LAYER_ROPE_TEXT = '''def _rope_inv_freq(spec, hd):
     them. The default type is 1 / theta ** (2i / hd). Yarn mixes the interpolated and the original frequencies over a ramp between the beta_fast and beta_slow
     rotation counts, and scales cos and sin by 0.1 * ln(factor) + 1 unless the block gives attention_factor. The ramp bounds are always truncated: the
     reference reads `truncate` from the top-level rope_parameters, which holds no such key when the config is keyed by layer type."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
     import math
     base = spec["theta"]
     pos_freqs = base ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd)
@@ -1901,6 +1926,7 @@ _LAYER_ROPE_TEXT = '''def _rope_inv_freq(spec, hd):
 def _rope_tables(model, n):
     """cos and sin for positions 0..n-1 of every layer type, as two dicts {layer type: [1, 1, n, head_dim] TILE bf16 on the device} in the HF layout (freqs
     repeated twice). `_attention` takes the pair of its own layer type from them."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
     hd = ATTENTION["head_dim"]
     cos, sin = {}, {}
     for layer_type in sorted(set(ATTENTION["layer_types"])):
@@ -1918,6 +1944,7 @@ _WINDOW_MASK_TEXT = '''def _window_mask(model, n):
     """The additive attention mask [1, 1, n, n] (bf16, TILE) of the sliding layers: 0 where a query may attend (itself and the ATTENTION["window"] - 1
     positions before it, the reference's `kv_idx > q_idx - sliding_window`), -30000 elsewhere. It is built once per padded length and kept in
     model["window_mask"]; a new length frees the old mask, and close frees the last one."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
     held = model.get("window_mask")
     if held is not None and held[0] == n:
         return held[1]
@@ -2322,8 +2349,7 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 
 # The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
 # called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
-FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary",
-                 "_rope_inv_freq", "_window_mask")
+FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
