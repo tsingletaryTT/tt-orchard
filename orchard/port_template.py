@@ -1748,6 +1748,50 @@ def _rotary_plan(section: dict, hidden: int):
     return {"head_dim": head_dim, "rot": rot, "theta": float(theta)}, None
 
 
+def _layer_rope_plan(section: dict, kcls: str):
+    """({"layer_types": [...], "rope": {layer type: block}}, None) for a config whose `rope_parameters` is keyed by layer type, else (None, why).
+    A block is {"kind": "default", "theta"} or {"kind": "yarn", "theta", "factor", "original_max", and the optional beta_fast, beta_slow,
+    attention_factor, mscale, mscale_all_dim}. Everything in a block is a finite number; a block the tables do not follow (another rope type, a missing
+    setting, a partial rotary factor) gives the reason, which names the layer type and the setting (issue 790)."""
+    n = _whole(section, "num_hidden_layers")
+    layer_types = section.get("layer_types")
+    if not isinstance(layer_types, list) or not n or len(layer_types) != n or not all(isinstance(t, str) and t for t in layer_types):
+        return None, (f"{kcls}: rope_parameters is keyed by layer type, and layer_types is not a list of {n} layer type names, so the rotary table of "
+                      "each layer is not known")
+    out = {}
+    for t in sorted(set(layer_types)):
+        block = section["rope_parameters"].get(t)
+        if not isinstance(block, dict):
+            return None, f"{kcls}: rope_parameters has no block for layer type {t!r}"
+        kind = block.get("rope_type", block.get("type"))
+        theta = _number(block.get("rope_theta"))
+        if theta is None or theta <= 0:
+            return None, f"{kcls}: rope_theta of layer type {t!r} is missing or not a positive number"
+        if block.get("partial_rotary_factor") is not None and _number(block.get("partial_rotary_factor")) != 1:
+            return None, f"{kcls}: partial_rotary_factor of layer type {t!r} is not 1; the generated rotary rotates the whole head"
+        if kind == "default":
+            out[t] = {"kind": "default", "theta": float(theta)}
+        elif kind == "yarn":
+            factor = _number(block.get("factor"))
+            original = _whole(block, "original_max_position_embeddings")
+            if factor is None or factor <= 0:
+                return None, f"{kcls}: the yarn block of layer type {t!r} has no positive number as factor"
+            if not original:
+                return None, f"{kcls}: the yarn block of layer type {t!r} has no whole number as original_max_position_embeddings"
+            spec = {"kind": "yarn", "theta": float(theta), "factor": float(factor), "original_max": original}
+            for key in ("beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim"):
+                if block.get(key) is None:
+                    continue
+                value = _number(block.get(key))
+                if value is None or value <= 0:
+                    return None, f"{kcls}: {key} of the yarn block of layer type {t!r} is not a positive number"
+                spec[key] = float(value)
+            out[t] = spec
+        else:
+            return None, f"{kcls}: the rope_type of layer type {t!r} is {kind!r}; the generated tables write the default type and yarn"
+    return {"layer_types": list(layer_types), "rope": out}, None
+
+
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
     """(settings, None) for an attention block the generator writes (q, k, v and o projections, optional per-head RMSNorm on q and k,
     rotary in the HF layout over the whole head, causal SDPA), else (None, why)."""
@@ -1769,18 +1813,21 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     if factor is not None and factor != 1:
         return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
+    layer_rope = None
     if rope_keyed_by_layer_type(section):
-        return None, (f"{kcls}: rope_parameters is keyed by layer type ({', '.join(sorted(rope))}); the generated attention builds one rotary table "
-                      "for every layer")
+        layer_rope, why = _layer_rope_plan(section, kcls)
+        if layer_rope is None:
+            return None, why
     window = sliding_window_of(section)
     if window:
         return None, (f"{kcls}: layer_types lists sliding_attention with sliding_window {window}; the generated attention is causal over the whole "
                       "prefix in every layer")
-    rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
-    if rope_type != "default":
-        return None, f"{kcls}: rope_type is not default"
-    theta = _number((rope or {}).get("rope_theta")) if isinstance(rope, dict) else None
-    theta = theta or _number(section.get("rope_theta")) or 10000.0
+    if layer_rope is None:
+        rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
+        if rope_type != "default":
+            return None, f"{kcls}: rope_type is not default"
+        theta = _number((rope or {}).get("rope_theta")) if isinstance(rope, dict) else None
+        theta = theta or _number(section.get("rope_theta")) or 10000.0
     for n in ("q_norm", "k_norm"):
         if n in kkids:
             ncls, nattrs = con.resolve(f"{kp}.{n}")
@@ -1788,7 +1835,8 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
             if not _is_rms_norm(ncls, nattrs) or w is None or w.shape != (head_dim,):
                 return None, f"{kcls}: {n} is not a plain RMSNorm over head_dim"
     scaling = _number(kattrs.get("scaling"))
-    return {"heads": heads, "kv_heads": kv, "head_dim": head_dim, "theta": float(theta), "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
+    rope_part = {"theta": float(theta)} if layer_rope is None else layer_rope          # one theta, or the layer types and one block each
+    return {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
             "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
             "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}, None
 
@@ -1808,6 +1856,53 @@ def _stub_function(name: str, args: str, stub: Stub, extra: list | None = None) 
         lines.append(f"    # {e}")
     lines.append(f"    raise NotImplementedError({_lit(f'{name}: {stub.cls} at {stub.path} is not written yet')})")
     return lines + ["", ""]
+
+
+_LAYER_ROPE_TEXT = '''def _rope_inv_freq(spec, hd):
+    """Inverse frequencies [hd // 2] and the attention scaling of one rope block (a value of ATTENTION["rope"]), computed the way transformers computes
+    them. The default type is 1 / theta ** (2i / hd). Yarn mixes the interpolated and the original frequencies over a ramp between the beta_fast and beta_slow
+    rotation counts, and scales cos and sin by 0.1 * ln(factor) + 1 unless the block gives attention_factor. The ramp bounds are always truncated: the
+    reference reads `truncate` from the top-level rope_parameters, which holds no such key when the config is keyed by layer type."""
+    import math
+    base = spec["theta"]
+    pos_freqs = base ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd)
+    if spec["kind"] == "default":
+        return 1.0 / pos_freqs, 1.0
+    factor, original = spec["factor"], spec["original_max"]
+    scaling = spec.get("attention_factor")
+    if scaling is None:
+        mscale, mscale_all = spec.get("mscale"), spec.get("mscale_all_dim")
+
+        def get_mscale(scale, m=1.0):
+            return 1.0 if scale <= 1 else 0.1 * m * math.log(scale) + 1.0
+        scaling = float(get_mscale(factor, mscale) / get_mscale(factor, mscale_all)) if mscale and mscale_all else get_mscale(factor)
+
+    def correction_dim(rotations):
+        return (hd * math.log(original / (rotations * 2 * math.pi))) / (2 * math.log(base))
+    low = max(math.floor(correction_dim(spec.get("beta_fast") or 32)), 0)
+    high = min(math.ceil(correction_dim(spec.get("beta_slow") or 1)), hd - 1)
+    if low == high:
+        high += 0.001
+    ramp = torch.clamp((torch.arange(hd // 2, dtype=torch.float32) - low) / (high - low), 0, 1)
+    extrapolation = 1 - ramp
+    return (1.0 / (factor * pos_freqs)) * (1 - extrapolation) + (1.0 / pos_freqs) * extrapolation, scaling
+
+
+def _rope_tables(model, n):
+    """cos and sin for positions 0..n-1 of every layer type, as two dicts {layer type: [1, 1, n, head_dim] TILE bf16 on the device} in the HF layout (freqs
+    repeated twice). `_attention` takes the pair of its own layer type from them."""
+    hd = ATTENTION["head_dim"]
+    cos, sin = {}, {}
+    for layer_type in sorted(set(ATTENTION["layer_types"])):
+        inv_freq, scaling = _rope_inv_freq(ATTENTION["rope"][layer_type], hd)
+        freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]
+        emb = torch.cat([freqs, freqs], dim=-1)
+        cos[layer_type] = _upload(model, (emb.cos() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+        sin[layer_type] = _upload(model, (emb.sin() * scaling).reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    return cos, sin
+
+
+'''
 
 
 def render(p: Plan) -> str:
@@ -1972,20 +2067,26 @@ def render(p: Plan) -> str:
               "    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))", "", ""]
     if p.attention:
         a = p.attention
-        L += [f"ATTENTION = {_lit(a)}", "", "",
-              "def _rope_tables(model, n):",
-              '    """cos and sin for positions 0..n-1 in the HF layout (freqs repeated twice), [1, 1, n, head_dim] TILE bf16 on the device."""',
-              '    hd = ATTENTION["head_dim"]',
-              '    inv_freq = 1.0 / (ATTENTION["theta"] ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))',
-              "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]",
-              "    emb = torch.cat([freqs, freqs], dim=-1)",
-              "    cos = _upload(model, emb.cos().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
-              "    sin = _upload(model, emb.sin().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
-              "    return cos, sin", "", "",
-              "def _attention(model, prefix, x, cos, sin):",
+        L += [f"ATTENTION = {_lit(a)}", "", ""]
+        if "rope" in a:
+            L += _LAYER_ROPE_TEXT.split("\n")
+        else:
+            L += ["def _rope_tables(model, n):",
+                  '    """cos and sin for positions 0..n-1 in the HF layout (freqs repeated twice), [1, 1, n, head_dim] TILE bf16 on the device."""',
+                  '    hd = ATTENTION["head_dim"]',
+                  '    inv_freq = 1.0 / (ATTENTION["theta"] ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))',
+                  "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]",
+                  "    emb = torch.cat([freqs, freqs], dim=-1)",
+                  "    cos = _upload(model, emb.cos().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+                  "    sin = _upload(model, emb.sin().reshape(1, 1, n, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+                  "    return cos, sin", "", ""]
+        L += ["def _attention(model, prefix, x, cos, sin):",
               '    """Ordinary causal attention for the block at `prefix`: q, k, v projections, the head split, per-head RMSNorm on q and k when the',
-              '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""',
-              '    q = _linear(model, prefix + ".q_proj", x)',
+              '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""']
+        if "rope" in a:
+            L += ['    layer_type = ATTENTION["layer_types"][int(prefix.rsplit(".", 2)[-2])]          # the prefix is "<layers path>.<i>.<attention name>"',
+                  "    cos, sin = cos[layer_type], sin[layer_type]"]
+        L += ['    q = _linear(model, prefix + ".q_proj", x)',
               '    k = _linear(model, prefix + ".k_proj", x)',
               '    v = _linear(model, prefix + ".v_proj", x)',
               "    xqkv = ttnn.concat([q, k, v], dim=-1)",
@@ -2174,7 +2275,8 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 
 # The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
 # called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
-FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary")
+FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary",
+                 "_rope_inv_freq")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
