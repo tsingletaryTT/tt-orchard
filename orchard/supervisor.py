@@ -763,7 +763,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     points at). Advisory: a config that cannot be read, a missing or hostile reference module and a write error each leave no file, a ledger
     decision that names the reason, and the coder works from the facts file and its skill as before."""
     try:
-        result = port_excerpts.for_root(root, port_facts.read_config(snapshot))
+        result = port_excerpts.for_root(root, port_facts.read_config(snapshot), snapshot=snapshot)
         if not result.text:
             ledger.append("decision", spec.number, decision="reference excerpts not written", problem=result.reason[:300])
             return False, None
@@ -773,7 +773,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
                       problem=f"{exc.__class__.__name__}: an unexpected error while writing the excerpts")
         return False, None
     ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
-                  classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
+                  source=result.summary()["source"], classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
     return True, result.summary()
 
 
@@ -794,7 +794,8 @@ def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, s
                       problem=f"{exc.__class__.__name__}: an unexpected error while building the file")
         return False, None
     ledger.append("decision", spec.number, decision="effective construction written", construction=record,
-                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"])
+                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"],
+                  **({"remote_code": summary["remote_code"]} if summary.get("remote_code") else {}))
     return True, summary
 
 
