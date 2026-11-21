@@ -1,0 +1,3 @@
+target = "0.9.190"
+summary = "Stage 2's construction helper keeps its audit of a model's own code on disk before that code runs and the supervisor records it even after a hang; stage 1's scrub keeps TOKENIZERS_PARALLELISM; the flat-rope generator path takes no float() of a huge number."
+kind = "fix"
