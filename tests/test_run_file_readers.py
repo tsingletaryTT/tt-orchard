@@ -628,7 +628,7 @@ def test_the_port_check_files_are_written_over_a_fifo_or_link_and_a_refused_hw_t
         for name in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json", full_port.TOOLS_NAME, "stage_tools.json"):
             build({shape!r}, sd / name)
         entries = []
-        stub = SimpleNamespace(inputs={{"model": str(run)}}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
+        stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={{"model": str(run)}}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
                                ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
         stub._run_json = lambda *a: S._run_json(stub, *a)
         problems = S._pin_full_port(stub, SimpleNamespace(number=2), sd, command=True)

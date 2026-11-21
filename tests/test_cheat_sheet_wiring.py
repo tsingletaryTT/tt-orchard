@@ -118,7 +118,7 @@ def pin(tmp_path, *, orchard_dir=None, before=None):
     for name, text in (before or {}).items():
         (sd / name).write_text(text)
     entries = []
-    stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run,
+    stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(run)}, run_dir=run,
                            paths=SimpleNamespace(orchard_dir=str(orchard_dir or Path(supervisor.__file__).resolve().parent.parent)),
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
@@ -139,7 +139,7 @@ def test_an_edit_the_coder_made_to_the_sheet_is_undone_on_the_next_pin(tmp_path)
     _, sd, _ = pin(tmp_path)
     (sd / full_port.CHEAT_NAME).write_text("{}")
     (sd / full_port.CHEAT_MD_NAME).write_text("planted")
-    supervisor.Supervisor._pin_full_port(SimpleNamespace(inputs={"model": str(tmp_path)}, run_dir=sd.parent.parent, paths=SimpleNamespace(
+    supervisor.Supervisor._pin_full_port(SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(tmp_path)}, run_dir=sd.parent.parent, paths=SimpleNamespace(
         orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)), ledger=SimpleNamespace(append=lambda *a, **k: None),
         _run_json=lambda *a: None), SimpleNamespace(number=2), sd)
     assert (sd / full_port.CHEAT_NAME).read_bytes() == op_cheats.TTNN_SHEET.read_bytes() and "planted" not in (sd / full_port.CHEAT_MD_NAME).read_text()
