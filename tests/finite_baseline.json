@@ -34,7 +34,6 @@
  "orchard/package_templates/verify_bundle.py": 1,
  "orchard/plan.py": 1,
  "orchard/port_construction.py": 1,
- "orchard/port_template.py": 5,
  "orchard/preflight.py": 1,
  "orchard/profile_summary.py": 1,
  "orchard/qwen35_package.py": 2,
