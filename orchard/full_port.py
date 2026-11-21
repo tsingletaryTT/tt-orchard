@@ -735,9 +735,10 @@ def _vocab_cases(vocab: int, dies: int) -> list:
 def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
     """The vocabulary-per-die hazard's check (issue 183). The gate reads the vocabulary from the snapshot's own config.json, counts the
     chips in the record, and decides from those two whether the check applies: columns per die above the hazard scan's limit need a
-    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook) or `pass` with one row for each planted
-    column on each path, and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record
-    that says otherwise."""
+    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook), `not-applicable` (the port has no hook, declares
+    that its token is chosen on the host over the whole row, and the row it returned had the snapshot's vocabulary width: the gate checks the
+    declaration, the width, the template's sentence and the empty case list), or `pass` with one row for each planted column on each path,
+    and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record that says otherwise."""
     vocab, chips = _snapshot_vocab(stage_dir), record.get("chips")
     if vocab is None or vocab <= hazards.VOCAB_PER_DIE_LIMIT:
         return                                  # one die holding the whole vocabulary is already within the limit
@@ -765,8 +766,20 @@ def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: 
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 300 or cases != []:
             reasons.append(f"{name} with status skipped needs a reason of 1 to 300 characters and no cases")
         return
+    if status == "not-applicable":
+        choice, width = block.get("token_choice"), block.get("row_length")
+        if choice != hazards.TOKEN_CHOICE_HOST:
+            reasons.append(f"{name}.token_choice is {str(choice)[:40]!r}; status not-applicable needs {hazards.TOKEN_CHOICE_HOST!r}, the port's "
+                           "declaration that its token is chosen on the host over the whole row")
+        if type(width) is not int or width != vocab:
+            reasons.append(f"{name}.row_length is {str(width)[:40]!r}; status not-applicable needs a row of the snapshot's {vocab} columns")
+        if block.get("reason") != hazards.VOCAB_NOT_APPLICABLE_REASON:
+            reasons.append(f"{name}.reason is not the sentence the check writes for status not-applicable")
+        if cases != []:
+            reasons.append(f"{name}.cases must be empty for status not-applicable")
+        return
     if status != "pass":
-        reasons.append(f"{name}.status must be pass or skipped, got {status!r}")
+        reasons.append(f"{name}.status must be pass, skipped or not-applicable, got {str(status)[:40]!r}")
         return
     if not isinstance(cases, list) or len(cases) > 64 or not all(isinstance(r, dict) for r in cases):
         reasons.append(f"{name}.cases must be a list of at most 64 objects")

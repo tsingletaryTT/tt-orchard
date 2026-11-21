@@ -1,0 +1,4 @@
+target = "0.9.190"
+summary = "The vocabulary-per-die check records not-applicable for a generated port, which returns the whole vocabulary row to the host and declares TOKEN_CHOICE = host-row; a port with no declaration keeps skipped."
+kind = "fix"
+pr = 794

@@ -62,7 +62,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import defaults, op_cheats, safeio, ttnn_calls
+from orchard import defaults, hazards, op_cheats, safeio, ttnn_calls
 
 STUB_MARK = "# AGENT:"
 GENERATED_MARK = "# generated-by: orchard/port_template.py"
@@ -1985,6 +1985,7 @@ def render(p: Plan) -> str:
           f"CONFIG = {_lit(p.config)}",
           f"N_LAYERS = {p.n_layers}", f"HIDDEN = {p.hidden}", f"VOCAB = {p.vocab}", f"PAD_ID = {p.pad_id}",
           "PAD_TO = 32                       # the sequence is padded to a tile multiple; the logits are read at the last real position",
+          f'TOKEN_CHOICE = "{hazards.TOKEN_CHOICE_HOST}"           # prefill and decode_step return the whole vocabulary row to the host; the caller picks the token there, so no sampler runs on a die',
           f"LAYER_VARIANT = {_lit(dict(sorted((i, l.key) for l in p.layers for i in l.indices)))}",
           "# Every tensor pattern of the checkpoint and how load() places it: linear_weight (transposed once, TILE bf16), linear_bias, embedding",
           "# (ROW_MAJOR bf16 table), norm and norm_plus_one ([1, 1, 1, dim] TILE bf16), tile (any other float tensor), host (integer tensors stay in torch).",

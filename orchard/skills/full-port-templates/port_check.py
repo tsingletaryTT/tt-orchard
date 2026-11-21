@@ -81,6 +81,12 @@ Optional hook, for the vocabulary-per-die hazard (issue 183):
         column. A port with no `sample` is recorded as skipped, with that reason, and the run goes on. A port that samples on the chip
         defines `sample` to call the same code its server runs.
 
+    TOKEN_CHOICE = "host-row"      (a module constant, optional)
+        Says: this port returns the whole vocabulary row to the host and the caller picks the token there, so no sampler runs on a die. The port
+        generator writes it. With no `sample` function, the check records the vocabulary check as `not-applicable` when the port
+        declares this and the last row it returned had exactly the vocabulary's width; a row of another width keeps `skipped`. A port that does
+        sample on a chip must not declare it.
+
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
 import collections
@@ -122,6 +128,11 @@ VOCAB_PER_DIE_LIMIT = 65536                   # the hazard scan's limit (orchard
 VOCAB_MAX = 10 ** 7                           # choice: a vocabulary above this is not read (the largest real vocabularies are a few hundred thousand)
 VOCAB_MODES = (("greedy", 0.0, 1), ("sampled", 0.7, 1))      # (name, temperature, top_k): one candidate on the sampled path keeps its answer exact
 VOCAB_PLANTED = 10.0                          # the planted logit; every other logit is 0.0
+# What a generated port declares as `TOKEN_CHOICE`, and the sentence recorded when that makes the vocabulary check not applicable. Both are
+# orchard/hazards.py's TOKEN_CHOICE_HOST and VOCAB_NOT_APPLICABLE_REASON (this file runs where `orchard` cannot be imported; a test keeps them equal).
+TOKEN_CHOICE_HOST = "host-row"
+NOT_APPLICABLE_REASON = ("the port returns the whole vocabulary row to the host, and the check and the server choose the next token by "
+                         "argmax over that row there, so no per-die column index is used on this path")
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; the cap when the config sets none
@@ -381,6 +392,26 @@ def argmax(logits) -> int:
         if v > best:
             best, at = v, i
     return int(at)
+
+
+def row_length(logits) -> int:
+    """The number of entries in whatever the port returned, read the way `argmax` reads it (list, numpy or torch): the width of the row the
+    token is chosen from."""
+    if hasattr(logits, "reshape") and hasattr(logits, "argmax"):
+        return int(logits.reshape(-1).shape[0])
+    return len(list(logits))
+
+
+LAST_ROW = {"n": None}               # the width of the row the port returned for its latest prefill or decode_step, for the vocabulary check
+
+
+def note_row(logits) -> None:
+    """Keep the width of the row the port just returned. A value `row_length` cannot read leaves None, which the vocabulary check never counts as
+    a whole row."""
+    try:
+        LAST_ROW["n"] = row_length(logits)
+    except Exception:
+        LAST_ROW["n"] = None
 
 
 def logprob(logits, token: int) -> float:
@@ -968,20 +999,27 @@ def worker(read_fd: int, write_fd: int) -> int:
                 COUNTS.clear()
                 TRACE_REPLAYS.clear()
                 out = mod.prefill(model, [int(i) for i in req["ids"]])
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
+                token = argmax(out)
+                note_row(out)                # after argmax, so a one-shot iterable is read once by argmax and counts as no whole row here
+                reply({"ok": True, "id": token, OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "decode":
                 COUNTS.clear()
                 TRACE_REPLAYS.clear()
                 out = mod.decode_step(model, int(req["token"]), int(req["position"]))
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
+                token = argmax(out)
+                note_row(out)
+                reply({"ok": True, "id": token, OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
             elif op == "sample":         # optional, untimed: the vocabulary-per-die hazard's targeted test (see `vocab_check`)
                 fn = getattr(mod, "sample", None)
                 if not callable(fn):
-                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)"})
+                    choice = getattr(mod, "TOKEN_CHOICE", None)       # what the port declares: passed on only when it is the exact string, so no other object reaches the pipe
+                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)",
+                           "token_choice": choice if isinstance(choice, str) and choice == TOKEN_CHOICE_HOST else None,
+                           "row_length": LAST_ROW["n"]})
                 else:
                     logits = [0.0] * int(req["vocab"])
                     logits[int(req["planted"])] = VOCAB_PLANTED
@@ -1627,17 +1665,33 @@ def vocab_probe_cases(vocab: int, dies: int) -> list:
     return cases
 
 
+def without_hook(block: dict, reply: dict, vocab: int) -> dict:
+    """The block for a port with no `sample` function. `not-applicable` needs both facts: the port declares `TOKEN_CHOICE = "host-row"` (a generated
+    port does), and the last row it returned had exactly `vocab` entries, so the check and the server choose the token by argmax over the whole
+    row on the host and no per-die column index exists to wrap. A declaration with another width, or none, or any other value, is `skipped`; the
+    reason says why when a declaration was made. Both values come from the worker and are compared, never echoed."""
+    choice, width = reply.get("token_choice"), reply.get("row_length")
+    base = str(reply["skipped"])
+    if choice == TOKEN_CHOICE_HOST and type(width) is int:
+        if width == vocab:
+            return {**block, "status": "not-applicable", "reason": NOT_APPLICABLE_REASON, "token_choice": choice, "row_length": width, "cases": []}
+        base += (f"; the port declares {TOKEN_CHOICE_HOST} but its last row had {width} entries for a vocabulary of {vocab}, "
+                 "so the declaration is not used")
+    return {**block, "status": "skipped", "reason": base[:300], "cases": []}
+
+
 def vocab_check(w, vocab: int, dies: int) -> dict:
     """The vocabulary-per-die hazard's targeted test (issue 183): for each planted column, ask the port's `sample` hook on the greedy and on the
     sampled path for the id of a logits row whose only large value sits in that column. A wrong id, or an error in the hook, fails the run with a
-    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason."""
+    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason, or as not-applicable when it
+    declares that its token is chosen on the host over the whole row and the row it returned had the vocabulary's width (`without_hook`)."""
     block = {"flagged": True, "vocab_size": vocab, "dies": dies, "per_die": vocab_per_die(vocab, dies), "limit": VOCAB_PER_DIE_LIMIT,
              "status": "pass", "reason": "", "cases": []}
     for case in vocab_probe_cases(vocab, dies):
         for mode, temperature, top_k in VOCAB_MODES:
             got = w.ask(op="sample", vocab=vocab, planted=case["planted"], temperature=temperature, top_k=top_k)
             if "skipped" in w.last:
-                return {**block, "status": "skipped", "reason": str(w.last["skipped"])[:300], "cases": []}
+                return without_hook(block, w.last, vocab)
             row = {**case, "mode": mode, "got": got, "ok": got == case["planted"]}
             block["cases"].append(row)
             if not row["ok"]:

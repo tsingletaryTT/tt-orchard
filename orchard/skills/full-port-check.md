@@ -143,7 +143,10 @@ The prepare phase writes the port and `hw_test.json`, then `handoff.json`. The f
    in ttnn. Do not edit files outside `stages/2/`. When `stages/0/hazard-scan.json` lists `vocab_per_die_above_65536`, the board test calls
    an optional `sample(model, logits, temperature, top_k) -> int` of `port_model.py` on logits whose one large value sits in the first column
    past 65,535 of each die and in the last column of each die (see the interface in `port_check.py`). Define it to call the code the port's
-   sampler runs, so the test reaches that code. Without it the test records "skipped" and a wrap in the sampler stays untested.
+   sampler runs, so the test reaches that code. Without it the test records "skipped" and a wrap in the sampler stays untested. A port
+   whose `prefill` and `decode_step` return the whole vocabulary row to the host, so the caller picks the token there (the generated
+   ports do), needs no sampler: it declares `TOKEN_CHOICE = "host-row"`, and when the last row it returned had exactly the vocabulary's
+   width the test records "not-applicable" and the gate accepts it. Declare it only if it is true; a row of another width keeps "skipped".
 2. Write the port under `stages/2/port/` and test the parts that need no chip (weight names, shapes, a CPU run of your own layer
    code against the reference layer) with ordinary shell commands. Do not import `ttnn` in your own shell: importing it opens the
    device, and only the supervisor's test holds a lease.
