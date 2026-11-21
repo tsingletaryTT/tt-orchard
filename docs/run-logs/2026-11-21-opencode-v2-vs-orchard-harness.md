@@ -98,7 +98,7 @@ flagged, and wall-time differences between harnesses are not read from them. The
 
 ### Plan
 
-**Pilot** (seed base 2026112000, not counted in the batch): `add` and `center`, one attempt per harness, order: OpenCode `add`, orchard `add`,
+**Pilot** (seed base 2026112000; the pilot attempts are left out of the batch counts): `add` and `center`, one attempt per harness, order: OpenCode `add`, orchard `add`,
 orchard `center`, OpenCode `center`. Read the OpenCode transcript (`--format json`, kept under `oc-meta/`) and fix harness traps before the
 batch. Model behaviour is left as it is. Anything changed is written below.
 
@@ -117,6 +117,48 @@ one server profile, one task family. The harnesses differ in system prompt, tool
 in passes is a difference between the whole setups and says nothing separately about the skill text or about the harness code.
 
 **Stop rules.** Stop and report if the server errors twice in a row, if an attempt escapes the sandbox, or after 5 hours.
+
+### Addendum 1: operator instruction on quality (written 2026-11-21, after the pilot began and before any batch attempt)
+
+The coordinator passed on this instruction from the operator: "continue comparing; when opencode is slower, evaluate if its results are better even
+so". The pilot had two of its four attempts done when it arrived (OpenCode `add` and orchard `add`, both passed); no batch attempt had started. The
+plan above stays as it is, with these additions.
+
+**Attempts per op.** `center` and `row_sum` may go from 4 to 6 attempts per harness (pairs 5 and 6 of each, harness order `O R` then `R O`,
+seed base 2026112100 plus the pair index, continuing the numbering after the 10 pairs of the plan). Rule, fixed now: after the pilot, take the
+expected seconds of one attempt as the larger of 600 and the mean of the pilot's `center` attempts, for `center` and for `row_sum` (the 2026-10-28
+ladder shows 650 to 1800 s on the 2-chip coder). Projected batch seconds = 2 harnesses x (2 x 150 for `add` + 6 x expected for `center` + 6 x expected
+for `row_sum`). If the projection is at most 4.5 hours (the 5-hour cap less a margin for the discovery test and overruns), run 6 per op and harness;
+otherwise run 4. The decision and the numbers go in the Pilot section before the batch starts.
+
+**Quality readout** (raw numbers; derived figures are labelled as arithmetic on them), for both harnesses, per attempt and per op:
+
+1. *Time to a pass.* Agent wall seconds of each passing attempt. Passes per hour of agent wall time over all of a harness's attempts of an op
+   (passes divided by the sum of agent wall seconds of every attempt, failures included, times 3600). A same-budget view: for each op, with T the
+   longest agent wall time among the other harness's passing attempts, how many of this harness's attempts passed within T (undefined when the other
+   harness has no pass). Attempts that overlapped the `suite-fixstubs` window are flagged, and wall-time differences are not read from them.
+2. *Margin of passing kernels,* from the unedited check's own measures (`set_measures`): `pcc_min`, relative L2, slope, max absolute error, and the
+   outlier input sets separately. Worst and median over a harness's passing attempts, with the distance to each bar (PCC 0.999, relative L2 0.01,
+   slope 0.98 to 1.02, max absolute error within 0.01 + 0.01 |expected|).
+3. *Closeness of failures.* The same measures when the check produced them, and the failure class. A failure is a near miss when it is numeric and
+   within 10 times of the bar: PCC at least 0.99, relative L2 at most 0.1, slope between 0.8 and 1.2. Deadlock, dataflow step, shape mismatch, import
+   error, tt-lang error, forbidden code and no kernel are structural.
+4. *Kernel quality the simulator pass does not show.* (a) A static check of each passing `kernel.py` against the cheat sheet the probe writes into the
+   attempt directory (`ttlang_cheat_sheet.json`, the signatures of the package that compiles for the chip): the tt-lang calls the kernel uses, with any
+   call that is not in the sheet flagged. (b) Lines of code, and whether the kernel follows the reference files' worked pattern. (c) A held-out run on
+   an input set the agent never saw, only if the shipped check can take another seed or shape without being edited; if it cannot, the log says so.
+5. *How the work got done.* Number of writes of `kernel.py`, whether the agent ran `kernel_check.py` itself before it finished, tool calls by tool,
+   and whether it ended on its own or on a limit; for OpenCode the step count against the 40-step setting. Orchard runs the check after every write
+   by itself; those automatic runs are counted apart from runs the agent asked for.
+6. *The question for the verdict:* where OpenCode took longer, did it buy a better kernel (wider margin, fewer unsupported calls, passes the held-out
+   input set) or only a slower pass; and the same question the other way round for orchard.
+
+**What these numbers cannot show.** Two to six attempts per cell, one model, one server profile. The simulator is the only judge: no kernel is compiled
+for the chip, because the coder holds all four chips and the task rules forbid taking a lease. A static check against the cheat sheet finds calls the
+compiling package does not list; it does not prove that a kernel compiles.
+
+**Runner edit during the pilot.** After the pilot began, optional parameters (`skill_tool`, `skill_paths`) were added to `run_opencode` and
+`write_config` for the skill-discovery test. Their defaults reproduce the earlier behaviour, so the pilot's attempts are unaffected.
 
 ## Pilot
 
