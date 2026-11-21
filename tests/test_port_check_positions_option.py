@@ -92,21 +92,54 @@ def test_a_coder_that_edits_the_config_during_prepare_gets_the_supervisors_cap_b
 
 # ---- resume -----------------------------------------------------------------------------------------------------------------
 
-def test_a_resume_with_another_cap_is_refused_and_one_without_the_option_keeps_the_recorded_cap(rig):
+@pytest.fixture
+def built(monkeypatch):
+    """The supervisors `Rig.run` builds, in order, so a test can read what a resumed supervisor believes (the files of a finished stage are not rewritten)."""
+    import test_supervisor
+    from orchard.supervisor import build
+    made = []
+    monkeypatch.setattr(test_supervisor, "build", lambda *a, **k: made.append(build(*a, **k)) or made[-1])
+    return made
+
+
+def test_a_resume_with_another_cap_is_refused(rig, built):
     rig.args.port_check_positions = 16
     run_to_the_end_of_stage_2(rig)
     rig.args.port_check_positions = 32
     with pytest.raises(ValueError, match="port check positions"):
         rig.run(pid=200)
-    rig.args.port_check_positions = None
-    rig.run(pid=200)                                          # no option: the recorded 16 stands, and nothing is refused
-    assert run_start(rig)["port_check_positions"] == 16 and config(rig)["max_positions"] == 16
 
 
-def test_a_run_that_started_with_the_default_refuses_a_resume_that_names_another_cap(rig):
+def test_a_resume_without_the_option_keeps_the_recorded_cap(rig, built):
+    rig.args.port_check_positions = 16
     run_to_the_end_of_stage_2(rig)
+    assert built[-1].port_check_positions == 16
+    rig.args.port_check_positions = None
+    rig.run(pid=200)                                          # no option: nothing is refused
+    assert built[-1].port_check_positions == 16 and run_start(rig)["port_check_positions"] == 16
+
+
+def test_a_resume_that_names_the_recorded_cap_is_accepted(rig, built):
+    rig.args.port_check_positions = 16
+    run_to_the_end_of_stage_2(rig)
+    rig.args.port_check_positions = 16
+    rig.run(pid=200)
+    assert built[-1].port_check_positions == 16
+
+
+def test_a_run_that_started_with_the_default_refuses_a_resume_that_names_another_cap(rig, built):
+    run_to_the_end_of_stage_2(rig)
+    assert built[-1].port_check_positions == 64
     rig.args.port_check_positions = 16
     with pytest.raises(ValueError, match="port check positions"):
         rig.run(pid=200)
     rig.args.port_check_positions = 64                         # the same as the run's own default: accepted
     rig.run(pid=200)
+    assert built[-1].port_check_positions == 64
+
+
+def test_a_resume_without_the_option_of_a_run_that_started_with_the_default_keeps_the_default(rig, built):
+    run_to_the_end_of_stage_2(rig)
+    rig.args.port_check_positions = None
+    rig.run(pid=200)
+    assert built[-1].port_check_positions == 64 and "port_check_positions" not in run_start(rig)

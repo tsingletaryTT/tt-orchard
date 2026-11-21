@@ -49,7 +49,7 @@ def set_config(stage, **extra):
 
 
 def longer_reference(run, n):
-    """A stage 1 reference of `n` ids (the honest fake port predicts each id as the last one plus 1, up to its vocabulary of 200)."""
+    """A stage 1 reference of `n` ids (the HONEST fake port predicts each id as the last one plus 1, up to its vocabulary of 200)."""
     ev = run / "stages" / "1" / "evidence" / "reference"
     ids = list(range(100, 100 + n))
     (ev / "generated-ids.json").write_text(json.dumps({"generated_ids": ids, "generated_text": "x"}))
@@ -249,8 +249,15 @@ def test_the_gate_refuses_a_record_whose_block_was_removed_when_the_config_sets_
 
 
 def test_the_gate_refuses_a_record_with_no_block_that_compares_more_than_the_default_cap(tmp_path):
-    reasons = tampered(tmp_path, lambda r: r.pop("positions"), cap=100, reference=80)
-    assert any("no positions block" in r for r in reasons), reasons
+    run, stage = ran(tmp_path, cap=100, reference=80)               # 80 positions scored under a cap of 100
+    rec = record(stage)
+    rec.pop("positions")
+    write_record(stage, rec)
+    cfg = json.loads((stage / full_port.CONFIG_NAME).read_text())
+    cfg.pop("max_positions")                                         # and the config no longer names a cap: only the default can apply
+    (stage / full_port.CONFIG_NAME).write_text(json.dumps(cfg))
+    reasons = positions_reasons(run, stage)
+    assert any("no positions block, so the default cap 64 applies, and it compares 80 positions" in r for r in reasons), reasons
 
 
 def test_a_record_written_before_the_setting_existed_still_passes(tmp_path):

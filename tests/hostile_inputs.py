@@ -982,6 +982,13 @@ from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
 from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
+def _full_port_config_cap(base: Path):
+    """The gate's read of the stage's port_check_config.json for the positions cap (issue 731): `base` stands for the stage directory."""
+    from orchard import full_port
+    reasons: list = []
+    return full_port._config_cap(base, reasons), reasons
+
+
 def _preflight_config_json(base: Path):
     from orchard import preflight
     return preflight._config_json(base / "input.json")
@@ -1401,6 +1408,7 @@ READERS: list[Reader] = [
     Reader("drop_watch.gozer_chips", _drop_watch_gozer_chips, feed="bytes"),
     Reader("drop_watch.tick (hostile Hub record)", _drop_watch_tick_hub_record, feed="bytes", check=_drop_watch_started_nothing),
     Reader("drop_watch.tick (hostile state file)", _drop_watch_tick_state, rel="state.json", check=_drop_watch_started_nothing),
+    Reader("full_port._config_cap (hostile port_check_config.json)", _full_port_config_cap, rel="port_check_config.json"),
 ]
 
 BY_NAME = {r.name: r for r in READERS}
