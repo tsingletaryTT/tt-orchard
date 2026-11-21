@@ -1052,6 +1052,11 @@ def _port_facts_reference_source(base: Path):
     return port_facts.reference_source(base, "toy")
 
 
+def _port_excerpts_own_modeling(base: Path):
+    from orchard import port_excerpts
+    return port_excerpts.own_modeling_source(base / "snap", {"auto_map": {"AutoModelForCausalLM": "modeling_toy.ToyForCausalLM"}})
+
+
 def _profile_analyze_raw_file(base: Path):
     from orchard import profile_summary
     return profile_summary.analyze_raw_file(base / "input.json")
@@ -1373,6 +1378,7 @@ READERS: list[Reader] = [
     Reader("port_facts.build (hostile weights file)", _port_facts_build, rel="snap/model.safetensors", setup=_port_facts_config,
            documented=(_PortFactsError,)),
     Reader("port_facts.reference_source", _port_facts_reference_source, rel="models/toy/configuration_toy.py"),
+    Reader("port_excerpts.own_modeling_source", _port_excerpts_own_modeling, rel="snap/modeling_toy.py"),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),

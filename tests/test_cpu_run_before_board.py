@@ -210,7 +210,7 @@ def test_a_checkpoint_over_the_limit_is_not_loaded(tmp_path):
     marker = tmp_path / "LOAD-RAN"
     d = stage(tmp_path, GOOD.replace("def load(model_dir, mesh_device):\n", f"def load(model_dir, mesh_device):\n    open({str(marker)!r}, 'w').close()\n"))
     with open(tmp_path / "snapshot" / "model.safetensors", "wb") as fh:          # sparse: no disk space is used
-        fh.truncate((4 << 30) + 1)
+        fh.truncate((12 << 30) + 1)          # above the cap of the limit (issue 782), so any host refuses it
     r = run_cpu(d)
     assert r.returncode == 3 and "above the CPU run's limit" in no_verdict_line(r) and not marker.exists()
 

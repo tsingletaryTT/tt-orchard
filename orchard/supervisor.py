@@ -763,7 +763,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     points at). Advisory: a config that cannot be read, a missing or hostile reference module and a write error each leave no file, a ledger
     decision that names the reason, and the coder works from the facts file and its skill as before."""
     try:
-        result = port_excerpts.for_root(root, port_facts.read_config(snapshot))
+        result = port_excerpts.for_root(root, port_facts.read_config(snapshot), snapshot=snapshot)
         if not result.text:
             ledger.append("decision", spec.number, decision="reference excerpts not written", problem=result.reason[:300])
             return False, None
@@ -773,7 +773,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
                       problem=f"{exc.__class__.__name__}: an unexpected error while writing the excerpts")
         return False, None
     ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
-                  classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
+                  source=result.summary()["source"], classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
     return True, result.summary()
 
 
@@ -794,7 +794,8 @@ def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, s
                       problem=f"{exc.__class__.__name__}: an unexpected error while building the file")
         return False, None
     ledger.append("decision", spec.number, decision="effective construction written", construction=record,
-                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"])
+                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"],
+                  **({"remote_code": summary["remote_code"]} if summary.get("remote_code") else {}))
     return True, summary
 
 
@@ -860,8 +861,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
 PRECHECK_OUTPUT_MAX = 64 * 1024
 # The CPU run of the port against the torch stand-in of ttnn (issue 697, `port_check.py --cpu N`): load, one prefill and one decode step on a
-# checkpoint of at most 4 GiB (the template's CPU_RUN_MAX_BYTES). Ten minutes covers a cold torch import and a load of that size; a run that
-# takes longer gives no verdict and the board check runs.
+# checkpoint of at most the template's `cpu_run_limit` (a share of the host's available memory, between 4 and 12 GiB; issue 782). Ten minutes
+# covers a cold torch import and a load of that size; a run that takes longer gives no verdict and the board check runs.
 CPU_RUN_DEADLINE_S = 600.0
 CPU_RUN_NO_VERDICT = 3              # the template's CPU_NO_VERDICT
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
@@ -5832,7 +5833,8 @@ class Supervisor:
             text = ""
         line = next((ln for ln in reversed(text.splitlines()) if ln.startswith(("CPU run passed", "CPU run gave no verdict"))), "")
         if code == 0 and not timed_out:
-            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3))
+            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3),
+                               size_limit=port_repair.safe_text(line, self._homes())[:600])
         else:
             self.ledger.append("decision", n, decision="CPU run gave no verdict", returncode=code, timed_out=bool(timed_out),
                                reason=port_repair.safe_text(line, self._homes())[:600], note="the board check runs as it would have")

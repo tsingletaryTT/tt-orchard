@@ -23,14 +23,28 @@ its named child modules. Per-layer index attributes (`layer_idx`) are left out s
 The output is sorted, so two runs on the same checkpoint print the same bytes. The rendering and the comparison with the defaults are the
 supervisor's (orchard/port_construction.py); this file only reads.
 
+A model that ships its own code (issue 781). When transformers refuses a load because the repository has custom code, the script takes stage 1's
+route (`reference-gate-templates/reference_gate.py`, `allow_remote_code`): environment variables whose names look like secrets are removed,
+the hub and transformers go offline, HOME moves to an empty scratch directory, every `.py` file under the snapshot is listed with its sha256,
+and the load runs again with `trust_remote_code=True`. The result then carries `remote_code`: {"used", "files", "files_total", "scrubbed"}.
+A model without custom code is loaded with no trust flag and the route is not touched. This is not a sandbox: the code runs with this user's
+file permissions on the meta device and may use the network. The scratch home and the audit file live in a temporary directory that is removed
+when the script ends.
+
+When the script fails it prints one line that starts with ERROR_MARK and holds {"error": <exception class name>, "remote_code": <bool>} and
+exits with code 3. The line holds the class name only: an exception message can quote the model's files or the user's paths.
+
 `describe` takes any object with `named_modules()`, so the tests run it on fakes without torch."""
+import importlib.util
 import inspect
 import math
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION"
+ERROR_MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION_ERROR"
 MAX_CLASSES = 80                # classes kept; the rest are counted
 MAX_VARIANTS = 6                # distinct attribute sets kept per class; the rest are counted
 MAX_PATHS = 3                   # example module paths kept per variant
@@ -40,6 +54,8 @@ MAX_ITEMS = 8                   # elements kept of a tuple or list attribute
 MAX_CHILDREN = 16
 MAX_PARAMS = 40
 MAX_MODULES = 200_000           # modules read; a model with more is cut and says so
+MAX_REMOTE_FILES = 64           # .py files of the snapshot listed in the remote-code report; the rest are counted
+MAX_SCRUBBED = 40               # environment variable names listed as removed
 PER_INSTANCE = frozenset({"layer_idx", "layer_id", "layer_index", "layer_number", "block_idx", "block_id", "idx", "index", "training"})
 _NUMBER = re.compile(r"(?<=\.)\d+(?=\.|$)")
 _NOT_SET = object()
@@ -172,6 +188,57 @@ def dense_shim(snapshot: str):
     return (shim, raw) if shim.needs_dense_shim(raw) else (None, None)
 
 
+_ROUTE = {"gate": None, "scratch": None}
+
+
+def remote_code_route():
+    """Stage 1's reference gate loaded from the shipped template (the same file, so the same scrub, audit and hash rules), with its scratch
+    home and audit directory pointed at a temporary directory so nothing is written beside the shipped template. Loaded once."""
+    if _ROUTE["gate"] is None:
+        path = Path(__file__).resolve().parent.parent / "reference-gate-templates" / "reference_gate.py"
+        spec = importlib.util.spec_from_file_location("reference_gate_for_construction", path)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        scratch = tempfile.TemporaryDirectory(prefix="orchard-construction-")
+        gate.HOME_SCRATCH = Path(scratch.name) / "home"
+        gate.EVIDENCE = Path(scratch.name) / "evidence"
+        _ROUTE.update({"gate": gate, "scratch": scratch})
+    return _ROUTE["gate"]
+
+
+def remote_code_report():
+    """What the route did, bounded for the result line, or None when the model's own code was not used."""
+    gate = _ROUTE["gate"]
+    if gate is None or not gate.REMOTE_CODE["used"]:
+        return None
+    files = gate.REMOTE_CODE["files"]
+    return {"used": True, "files": dict(sorted(files.items())[:MAX_REMOTE_FILES]), "files_total": len(files),
+            "scrubbed": sorted(gate.REMOTE_CODE["scrubbed"])[:MAX_SCRUBBED]}
+
+
+def load_with_remote_code(fn, *args, snapshot):
+    """`fn(*args, trust_remote_code=False)`; when transformers refuses because the repository has custom code, stage 1's `allow_remote_code`
+    runs (once) and the call repeats with `trust_remote_code=True`. The first call passes False and not nothing: with no flag transformers asks
+    on the terminal and prints its question into this script's output. Any other error goes up unchanged."""
+    gate = remote_code_route()
+    if gate.REMOTE_CODE["used"]:
+        return fn(*args, trust_remote_code=True)
+    try:
+        return fn(*args, trust_remote_code=False)
+    except ValueError as exc:
+        if "trust_remote_code" not in str(exc):
+            raise
+    gate.allow_remote_code(Path(snapshot))
+    return fn(*args, trust_remote_code=True)
+
+
+def release_scratch():
+    """Remove the temporary directory of the route, when there is one."""
+    if _ROUTE["scratch"] is not None:
+        _ROUTE["scratch"].cleanup()
+        _ROUTE.update({"gate": None, "scratch": None})
+
+
 def build_model(snapshot: str):
     """The reference model for the snapshot's config on the meta device (no weights are read or allocated)."""
     import contextlib
@@ -182,7 +249,8 @@ def build_model(snapshot: str):
         config = shim.prepare_config(transformers, raw)         # stage 1's config preparation for a dense Qwen4 checkpoint (issue 550)
         make_context = shim.dense_layers                        # a generator-based context manager can be entered once: one per attempt
     else:
-        config = transformers.AutoConfig.from_pretrained(snapshot, trust_remote_code=False)
+        # Only transformers' own refusal ("pass trust_remote_code=True") starts stage 1's route, then the load repeats.
+        config = load_with_remote_code(transformers.AutoConfig.from_pretrained, snapshot, snapshot=snapshot)
         make_context = contextlib.nullcontext
     names = [a for a in (getattr(config, "architectures", None) or []) if isinstance(a, str)]
     last = None
@@ -192,6 +260,8 @@ def build_model(snapshot: str):
         try:
             with torch.device("meta"), make_context():
                 if hasattr(factory, "from_config"):             # an Auto class
+                    if getattr(config, "auto_map", None):       # the model declares its own classes: stage 1's route applies
+                        return load_with_remote_code(factory.from_config, config, snapshot=snapshot)
                     return factory.from_config(config)
                 return factory(config)                          # the architecture class the config names
         except Exception as exc:        # the next factory is tried; the last error is what the caller reports
@@ -204,8 +274,18 @@ def main(argv) -> int:
     if len(argv) != 2:
         print("usage: effective_construction.py SNAPSHOT_DIR", file=sys.stderr)
         return 2
-    print(MARK + " " + json.dumps(describe(build_model(argv[1])), sort_keys=True, separators=(",", ":"), allow_nan=False))
-    return 0
+    try:
+        result = describe(build_model(argv[1]))
+        report = remote_code_report()
+        if report is not None:
+            result["remote_code"] = report
+        print(MARK + " " + json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        return 0
+    except Exception as exc:                # the class name only: a message can quote the model's files or the user's paths
+        print(ERROR_MARK + " " + json.dumps({"error": type(exc).__name__[:60], "remote_code": remote_code_report() is not None}))
+        return 3
+    finally:
+        release_scratch()
 
 
 if __name__ == "__main__":
