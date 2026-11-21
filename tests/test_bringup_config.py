@@ -444,6 +444,13 @@ def test_thin_port_is_added_only_when_the_caller_asks(tmp_path):
     assert argv.count("--thin-port") == 1 and supervisor.parse(argv).thin_port is True
 
 
+def test_port_check_positions_are_added_only_when_the_caller_names_them(tmp_path):
+    cfg = load(tmp_path)
+    assert "--port-check-positions" not in bc.supervisor_argv(cfg, "Cloudflare/clef")          # a resume then keeps the value the run recorded
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", port_check_positions=200)
+    assert argv[argv.index("--port-check-positions") + 1] == "200" and supervisor.parse(argv).port_check_positions == 200
+
+
 def test_port_repair_rounds_are_added_only_when_the_caller_names_them(tmp_path):
     cfg = load(tmp_path)
     assert "--port-repair-rounds" not in bc.supervisor_argv(cfg, "Cloudflare/clef")          # a resume then keeps the value the run recorded

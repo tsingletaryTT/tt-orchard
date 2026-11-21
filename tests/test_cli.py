@@ -1222,6 +1222,20 @@ def test_bringup_refuses_the_thin_port_without_a_full_port(conf, capsys):
     assert "--full-port" in capsys.readouterr().err
 
 
+def test_bringup_passes_port_check_positions_to_the_supervisor_only_when_given(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--port-check-positions" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--port-check-positions", "200"])
+    assert code == 0 and rec.argv[rec.argv.index("--port-check-positions") + 1] == "200"
+
+
+def test_bringup_refuses_a_port_check_positions_cap_out_of_range(conf, capsys):
+    for bad in ("15", "8193", "abc"):
+        with pytest.raises(SystemExit):
+            run(conf, ["bringup", "Cloudflare/clef", "--port-check-positions", bad])
+    assert "from 16 to 8192" in capsys.readouterr().err
+
+
 def test_bringup_passes_port_repair_rounds_to_the_supervisor_only_when_given(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
     assert "--port-repair-rounds" not in rec.argv

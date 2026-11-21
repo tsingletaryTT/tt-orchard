@@ -19,6 +19,12 @@ weights read, no ttnn, no chip) and turns its output into two things:
 module (or a known alias such as `eps` and `variance_epsilon`). A difference is listed. The comparison cannot see a setting that the
 constructor stores under another name or does not store; those still appear in the per-class lines as attributes.
 
+A model that ships its own code (issue 781). The script takes stage 1's remote-code route when transformers refuses a load, and its result then carries
+a `remote_code` report: the sha256 of each `.py` file that may have run, and the names (never the values) of the environment variables removed. `clean`
+checks the report, the file says that the model's code ran, and the summary and the ledger carry it. When the script fails it prints an
+ERROR_MARK line with the exception class name only; `run` copies the name into the reason when it is a plain identifier and drops the line
+otherwise, so no text of an exception, a path or a model file reaches the ledger.
+
 The text is deterministic: classes and keys are sorted, no address or time is written, and the numbers are printed with `repr`. The file's
 sha256 is in the facts file and in the ledger decision that records it, so a later reader can tell whether the coder's file was the one the
 supervisor wrote. Everything that comes from the interpreter's output is bounded and type-checked here: this step is advisory, so a failure
@@ -38,6 +44,7 @@ from orchard.commands import run_command
 FILE_NAME = "effective_construction.txt"
 SCRIPT = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "effective_construction.py"
 MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION"
+ERROR_MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION_ERROR"
 TIMEOUT_S = 600                    # choice: a meta-device build of a large model is seconds; this ends a hang
 OUTPUT_MAX = 4 << 20               # the script's output is bounded by its own caps; this stops a hostile interpreter
 MAX_TEXT_BYTES = 48 * 1024         # the written file
@@ -57,6 +64,13 @@ ALIASES = {"eps": ("variance_epsilon", "epsilon", "layer_norm_epsilon", "norm_ep
 _FIRST = re.compile(r"act|eps|group|dilation|scale|gate|theta|base|window|budget|top_k|temperature|norm|bias|softcap|clip", re.I)
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,119}")
 _PATH = re.compile(r"[A-Za-z0-9_.{}<>-]{1,160}")
+_REMOTE_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}")      # a path inside the snapshot: no leading dot or slash
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_UNHASHED = ("unreadable", "not a regular file", "over the size limit")      # the words stage 1's hasher gives for a file it could not hash
+_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,59}")
+MAX_REMOTE_FILES = 64
+MAX_SCRUBBED = 40
+TEXT_SCRUBBED = 10                 # names of removed variables the file itself lists
 
 
 class ConstructionError(Exception):
@@ -67,6 +81,24 @@ def default_env() -> dict:
     """A nearly empty environment for the reference interpreter: offline, no device variables, no tokens."""
     return {"PATH": os.environ.get("PATH", os.defpath), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "CUDA_VISIBLE_DEVICES": "",
             "TOKENIZERS_PARALLELISM": "false"}
+
+
+def _failure_cause(out) -> str:
+    """"" or `: <exception class name>[, the model's own code was in use]` from the script's ERROR_MARK line. The name must be a plain identifier
+    and the flag a boolean, else the whole line is dropped: the reason holds nothing the model or an exception wrote."""
+    if not isinstance(out, str) or len(out) > OUTPUT_MAX:
+        return ""
+    lines = [l for l in out.splitlines() if l.startswith(ERROR_MARK + " ")]
+    if len(lines) != 1:
+        return ""
+    try:
+        data = json.loads(lines[0][len(ERROR_MARK) + 1:])
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(data, dict) or not isinstance(data.get("error"), str) or not _CLASS_NAME.fullmatch(data["error"]) \
+            or not isinstance(data.get("remote_code"), bool):
+        return ""
+    return f": {data['error']}" + (" (the model's own code was in use)" if data["remote_code"] else "")
 
 
 def run(python, snapshot, *, runner=run_command) -> tuple[dict | None, str]:
@@ -80,7 +112,7 @@ def run(python, snapshot, *, runner=run_command) -> tuple[dict | None, str]:
     except Exception as exc:
         return None, f"the reference interpreter could not be started ({exc.__class__.__name__})"
     if getattr(result, "returncode", 1) != 0:
-        return None, f"the script exited with code {getattr(result, 'returncode', None)!r}"
+        return None, f"the script exited with code {getattr(result, 'returncode', None)!r}" + _failure_cause(getattr(result, "stdout", ""))
     out = getattr(result, "stdout", "")
     if not isinstance(out, str) or len(out) > OUTPUT_MAX:
         return None, "the script's output is missing or too large"
@@ -119,6 +151,27 @@ def _count(x, what: str) -> int:
     return x
 
 
+def _remote_code(report) -> dict | None:
+    """The `remote_code` report of the script's output, type-checked and bounded, or None when the key is absent. ConstructionError otherwise."""
+    if report is None:
+        return None
+    if not isinstance(report, dict) or report.get("used") is not True:
+        raise ConstructionError("remote_code is not an object that says used")
+    files, scrubbed = report.get("files"), report.get("scrubbed")
+    if not isinstance(files, dict) or len(files) > MAX_REMOTE_FILES:
+        raise ConstructionError(f"remote_code files is not an object of at most {MAX_REMOTE_FILES}")
+    out = {}
+    for name, digest in files.items():
+        if not isinstance(name, str) or not _REMOTE_FILE.fullmatch(name) or ".." in name.split("/") or "//" in name:
+            raise ConstructionError("a remote_code file name is not a path inside the snapshot")
+        if not isinstance(digest, str) or not (_SHA256.fullmatch(digest) or digest in _UNHASHED):
+            raise ConstructionError("a remote_code hash is not a sha256")
+        out[name] = digest
+    if not isinstance(scrubbed, list) or len(scrubbed) > MAX_SCRUBBED or not all(isinstance(n, str) and _NAME.fullmatch(n) for n in scrubbed):
+        raise ConstructionError("remote_code scrubbed is not a list of names")
+    return {"files": dict(sorted(out.items())), "files_total": _count(report.get("files_total"), "files_total"), "scrubbed": sorted(set(scrubbed))}
+
+
 def clean(data: dict) -> dict:
     """The script's output with every field type-checked and bounded, or ConstructionError."""
     classes = data.get("classes")
@@ -154,7 +207,7 @@ def clean(data: dict) -> dict:
                     "variants_left_out": _count(c.get("variants_left_out", 0), "variants_left_out")})
     return {"model_class": str(data.get("model_class", ""))[:80], "modules_total": _count(data.get("modules_total", 0), "modules_total"),
             "classes": sorted(out, key=lambda c: c["class"]), "classes_left_out": _count(data.get("classes_left_out", 0), "classes_left_out"),
-            "modules_cut": data.get("modules_cut") is True}
+            "modules_cut": data.get("modules_cut") is True, "remote_code": _remote_code(data.get("remote_code"))}
 
 
 # ---- resolved vs class default --------------------------------------------------------------------------------------------------
@@ -215,6 +268,13 @@ def render(data: dict) -> tuple[str, list[str]]:
              "These are the values the constructors resolved from the config, which can differ from the default in the class's "
              "signature in the reference excerpts. Settings the module keeps under another name appear as attributes.", "",
              "## Resolved vs class default", ""]
+    remote = data.get("remote_code")
+    if remote:
+        n = remote["files_total"]
+        names = ", ".join(remote["scrubbed"][:TEXT_SCRUBBED])
+        lines[2:2] = [f"The model ships its own code ({n} .py file{'s' if n != 1 else ''}). The script ran it on the meta device to build this file, after "
+                      f"environment variables with credential-like names were removed ({names or 'none were set'}), with the hub offline and HOME "
+                      "moved to an empty directory. The ledger lists the sha256 of each file. This is not a sandbox.", ""]
     lines += [f"- {f}" for f in flags] or ["- (none: every constructor parameter that has a default kept it)"]
     lines += ["", "## Modules", ""]
     for c in data["classes"]:
@@ -244,9 +304,12 @@ def summary(text: str, flags: list[str], data: dict) -> dict:
     """What the facts file carries about the file: its name, sha256 and size, the class count and the first lines of the list. The hash is of
     the bytes written, so the facts file pins the sibling file."""
     raw = text.encode("utf-8")
-    return {"file": FILE_NAME, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "classes": len(data["classes"]),
-            "resolved_vs_default": [f[:SUMMARY_FLAG_CHARS] for f in flags[:SUMMARY_FLAGS]],
-            "resolved_vs_default_total": len(flags), "note": NOTE}
+    out = {"file": FILE_NAME, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "classes": len(data["classes"]),
+           "resolved_vs_default": [f[:SUMMARY_FLAG_CHARS] for f in flags[:SUMMARY_FLAGS]],
+           "resolved_vs_default_total": len(flags), "note": NOTE}
+    if data.get("remote_code"):
+        out["remote_code"] = data["remote_code"]           # the ledger records it; the facts file keeps its own bounded copy of the summary
+    return out
 
 
 def for_snapshot(python, snapshot, *, runner=run_command) -> tuple[str, list[str], dict, str]:

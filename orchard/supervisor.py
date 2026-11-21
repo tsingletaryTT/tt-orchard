@@ -230,6 +230,7 @@ def is_full_port_pause(reason) -> bool:
 
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
+_check_port_check_positions = full_port.check_positions      # the supervisor's __init__ has a `full_port` flag that hides the module there
 STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate reads a source file up to the same size, full_port.SOURCE_MAX)
 STAGE_3_SEED_ENTRIES = boundedwalk.PORT_ENTRIES   # the scan stops after this many entries of any kind (files, directories, links, caches): the file
                                           # count alone would let a directory of a million subdirectories be read to the end before anything refused it
@@ -763,7 +764,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     points at). Advisory: a config that cannot be read, a missing or hostile reference module and a write error each leave no file, a ledger
     decision that names the reason, and the coder works from the facts file and its skill as before."""
     try:
-        result = port_excerpts.for_root(root, port_facts.read_config(snapshot))
+        result = port_excerpts.for_root(root, port_facts.read_config(snapshot), snapshot=snapshot)
         if not result.text:
             ledger.append("decision", spec.number, decision="reference excerpts not written", problem=result.reason[:300])
             return False, None
@@ -773,7 +774,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
                       problem=f"{exc.__class__.__name__}: an unexpected error while writing the excerpts")
         return False, None
     ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
-                  classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
+                  source=result.summary()["source"], classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
     return True, result.summary()
 
 
@@ -794,7 +795,8 @@ def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, s
                       problem=f"{exc.__class__.__name__}: an unexpected error while building the file")
         return False, None
     ledger.append("decision", spec.number, decision="effective construction written", construction=record,
-                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"])
+                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"],
+                  **({"remote_code": summary["remote_code"]} if summary.get("remote_code") else {}))
     return True, summary
 
 
@@ -860,8 +862,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
 PRECHECK_OUTPUT_MAX = 64 * 1024
 # The CPU run of the port against the torch stand-in of ttnn (issue 697, `port_check.py --cpu N`): load, one prefill and one decode step on a
-# checkpoint of at most 4 GiB (the template's CPU_RUN_MAX_BYTES). Ten minutes covers a cold torch import and a load of that size; a run that
-# takes longer gives no verdict and the board check runs.
+# checkpoint of at most the template's `cpu_run_limit` (a share of the host's available memory, between 4 and 12 GiB; issue 782). Ten minutes
+# covers a cold torch import and a load of that size; a run that takes longer gives no verdict and the board check runs.
 CPU_RUN_DEADLINE_S = 600.0
 CPU_RUN_NO_VERDICT = 3              # the template's CPU_NO_VERDICT
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
@@ -883,7 +885,7 @@ class Supervisor:
                  keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
@@ -905,10 +907,15 @@ class Supervisor:
         # `--port-repair-rounds` (issue 420): the repair rounds a full-port stage 2 attempt gives the coder after a port check that failed on the
         # port itself. Recorded in run_start; `build` hands over the recorded value on a resume. 0 is the earlier behaviour: no rounds.
         self.port_repair_rounds = port_repair.check_rounds(port_repair_rounds)
+        # `--port-check-positions` (issue 731): the most positions the full-port stage 2 check scores (the smaller of this and the stage 1 reference's
+        # length). Written into port_check_config.json as `max_positions` and recorded in run_start, both only when it is not the default, so a run that
+        # does not name the option has the files it had before. `build` hands over the recorded value on a resume.
+        self.port_check_positions = _check_port_check_positions(port_check_positions)      # the module: __init__ has a `full_port` parameter
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
         self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
+        self._thin_handover = ""                       # the note for the agent's repair step when the thin repair's history stopped a function (issue 783)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
         self.stack_pins, self._run_resumed = stack_pins, False
@@ -1292,6 +1299,7 @@ class Supervisor:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
+                               **({"port_check_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
@@ -3020,6 +3028,9 @@ class Supervisor:
                         return stop, [f"the thin repair round {k} ended: {stop}"], None
                     if thin_ok:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the thin repair settled
+                    elif self._thin_handover:
+                        # The history stopped the thin repair of a function (issue 783): the agent's step is told which function and its callers.
+                        friend_note = (friend_note + "\n\n" if friend_note else "") + self._thin_handover
                 if not driven_ok and not thin_ok:
                     if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
                         ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
@@ -4696,6 +4707,7 @@ class Supervisor:
         ends). Anything the thin repair cannot place or settle (a numerics failure, a line outside a function, two refused replies, an endpoint
         that fails, a round past the cap) is recorded as `thin repair handed to the coder` and the agent's repair step runs as without the option."""
         n = spec.number
+        self._thin_handover = ""
         if n != 2 or not thin_port(self.ledger.read()):
             return False, None
         if stop := self._driven_stop(spec):
@@ -4710,10 +4722,12 @@ class Supervisor:
         fields = dict(round=k, function=result.function, error_type=result.etype, hint=result.hint, requests=result.requests,
                       prompt_chars=result.prompt_chars, completion_tokens=result.completion_tokens, seconds=round(self.clock() - started, 3))
         if result.status == "spliced":
-            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, **fields)
+            # The hash ties the history file's diff for this round to the ledger (the diff is the coder's reply, so it is evidence).
+            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, diff_sha256=result.diff_sha256, **fields)
             return True, self._driven_stop(spec)
         self.ledger.append("decision", n, decision="thin repair handed to the coder", reason=result.reason or result.status, outcome=result.status,
                            tier=used, **fields)
+        self._thin_handover = result.note                  # empty unless the history stopped the function: the agent's step reads it
         return False, None
 
     def _draft(self, spec, stage_dir: Path) -> None:
@@ -4943,7 +4957,9 @@ class Supervisor:
         shipped = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TEMPLATE_NAME
         safeio.atomic_write(stage_dir / full_port.TEMPLATE_NAME, safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX), mode=os.stat(shipped).st_mode & 0o777)   # replaces what stands there
         config = stage_dir / full_port.CONFIG_NAME
-        _put(config, json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n")
+        settings = {"model_snapshot": str(Path(snapshot).absolute()),
+                    **({"max_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {})}
+        _put(config, json.dumps(settings, indent=2) + "\n")
         # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
         tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
         safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
@@ -5825,7 +5841,8 @@ class Supervisor:
             text = ""
         line = next((ln for ln in reversed(text.splitlines()) if ln.startswith(("CPU run passed", "CPU run gave no verdict"))), "")
         if code == 0 and not timed_out:
-            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3))
+            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3),
+                               size_limit=port_repair.safe_text(line, self._homes())[:600])
         else:
             self.ledger.append("decision", n, decision="CPU run gave no verdict", returncode=code, timed_out=bool(timed_out),
                                reason=port_repair.safe_text(line, self._homes())[:600], note="the board check runs as it would have")
@@ -6432,6 +6449,14 @@ def _port_repair_rounds_arg(text: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _port_check_positions_arg(text: str) -> int:
+    """argparse type of `--port-check-positions`: a whole number from full_port.MIN_POSITIONS to full_port.POSITIONS_LIMIT."""
+    try:
+        return full_port.check_positions(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def parse(argv=None):
     p = argparse.ArgumentParser(prog="python3 -m orchard.supervisor", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -6536,6 +6561,11 @@ def parse(argv=None):
                         f"gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the same "
                         f"check again (issue 420). 0 is the earlier behaviour, no rounds. Default {port_repair.DEFAULT_ROUNDS}, at most "
                         f"{port_repair.MAX_ROUNDS}. The ledger records the value and a resume keeps it; a resume that names another value is refused")
+    r.add_argument("--port-check-positions", type=_port_check_positions_arg, default=None, metavar="N",
+                   help=f"a full-port stage 2 check scores the smaller of N positions and the length of the stage 1 reference (issue 731). Default "
+                        f"{full_port.DEFAULT_POSITIONS}, from {full_port.MIN_POSITIONS} to {full_port.POSITIONS_LIMIT}. The record names the cap, the "
+                        f"positions scored and the reference's length. The ledger records the value when it is not the default and a resume keeps it; a "
+                        f"resume that names another value is refused")
     r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
                    help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
@@ -6770,6 +6800,15 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what the run's stage 2 attempts did)")
         repair_rounds = recorded_rounds
     repair_rounds = port_repair.DEFAULT_ROUNDS if repair_rounds is None else port_repair.check_rounds(repair_rounds)
+    check_positions = getattr(args, "port_check_positions", None)
+    if progress.started:                        # a resumed run keeps the position cap it started with (a run that began before the option: the default)
+        recorded_positions = full_port.check_positions((progress.run_start or {}).get("port_check_positions", full_port.DEFAULT_POSITIONS))
+        if check_positions is not None and check_positions != recorded_positions:
+            raise ValueError(f"this run started with a port check positions cap of {recorded_positions}; --port-check-positions {check_positions} differs. "
+                             "Leave the option out to resume with the recorded value, or move this run's directory aside and start a new run (the cap is "
+                             "part of what the run's stage 2 check scored)")
+        check_positions = recorded_positions
+    check_positions = full_port.DEFAULT_POSITIONS if check_positions is None else full_port.check_positions(check_positions)
     tool_dedupe = not getattr(args, "no_tool_dedupe", False)
     if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
         recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
@@ -6842,7 +6881,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,

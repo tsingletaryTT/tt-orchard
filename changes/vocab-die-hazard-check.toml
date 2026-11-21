@@ -1,0 +1,4 @@
+target = "0.9.188"
+summary = "Stage 2 runs the vocabulary-per-die hazard's sampling test through an optional sample hook of the port, and the gate checks the block."
+pr = 787
+kind = "feature"

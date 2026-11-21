@@ -70,6 +70,17 @@ Optional hook, for localising a numerics failure (issue 505):
         evidence/layer-port.npz and this file prints one line, `PORT_CHECK_LAYERS <sha256 of that file> <layer count>`, which the
         supervisor's capture of the output keeps, so `stage_tools.py layer-diff` can tell this file from one written afterwards.
 
+Optional hook, for the vocabulary-per-die hazard (issue 183):
+
+    sample(model, logits: list[float], temperature: float, top_k: int) -> int
+        Pick the next token id from one row of logits the way the port's server picks it: with `temperature` 0 the largest logit, and otherwise a
+        draw from the `top_k` largest at that temperature. The check calls it only when the checkpoint's vocabulary over the chips of the mesh
+        gives more than 65,536 columns per die (the hazard scan lists `vocab_per_die_above_65536`). It plants one large logit in the first
+        column past 65,535 of each die's slice and in the last column of each die, with top_k 1, once with temperature 0 and once above 0, and
+        the id has to be the planted column. A sampler that wraps its index at 65,536 fails the run and the message names the die and the
+        column. A port with no `sample` is recorded as skipped, with that reason, and the run goes on. A port that samples on the chip
+        defines `sample` to call the same code its server runs.
+
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
 import collections
@@ -107,9 +118,15 @@ PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
 LENGTH_CHECK_LENGTHS = (2, 3, 4, 31, 32, 33)      # choice: the shortest prompts and the sizes at and around one tile of 32 tokens, where padding bugs sit
+VOCAB_PER_DIE_LIMIT = 65536                   # the hazard scan's limit (orchard/hazards.py VOCAB_PER_DIE_LIMIT; a test keeps the two equal): a sampler index wraps here
+VOCAB_MAX = 10 ** 7                           # choice: a vocabulary above this is not read (the largest real vocabularies are a few hundred thousand)
+VOCAB_MODES = (("greedy", 0.0, 1), ("sampled", 0.7, 1))      # (name, temperature, top_k): one candidate on the sampled path keeps its answer exact
+VOCAB_PLANTED = 10.0                          # the planted logit; every other logit is 0.0
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
-MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
+MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; the cap when the config sets none
+MIN_POSITIONS = 16               # the lowest cap (the gate refuses a record that compares fewer positions); orchard/full_port.py MIN_POSITIONS, a test keeps them equal
+POSITIONS_LIMIT = 8192           # the highest cap (about 12 minutes on a 7B port, a record of about 0.6 MB); orchard/full_port.py POSITIONS_LIMIT, a test keeps them equal
 FREE_RUN_TOKENS = 48             # choice: a few sentences of text for the person who reads it
 EXIT_GRACE_S = 60.0              # how long a worker that was asked to close may take to exit before it is killed
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
@@ -144,7 +161,16 @@ FORGED = threading.Event()       # set when a line from the worker mentions MARK
 CPU_TTNN = HERE / "cpu_ttnn.py"           # the stand-in, copied here by the supervisor (orchard/skills/full-port-templates/cpu_ttnn.py)
 CHEAT_FILE = HERE / "cheat_sheet.json"    # the verified sheet, copied here by the supervisor; its signatures are checked on every call
 CHEAT_MAX = 1 << 22                       # bytes of the sheet read
-CPU_RUN_MAX_BYTES = 4 << 30               # choice: a larger checkpoint is not loaded on the CPU (the stand-in keeps float32 copies of the weights)
+# The size limit of the CPU run (issues 697 and 782). The stand-in keeps float32 copies of the weights, so a bf16 checkpoint of B bytes holds about
+# 2 B of float32 and the load maps the file as well: about 3 B resident at the peak. The limit is a share of the host's available memory, so a
+# host with room checks a 2.3B-parameter model (4.59 GB) and a loaded host checks less. A checkpoint above the limit is not loaded.
+CPU_RUN_FLOOR_BYTES = 4 << 30             # choice: the limit before issue 782; a host that reports less memory, or none, still gets this
+CPU_RUN_CAP_BYTES = 12 << 30              # choice: about a 6B-parameter bf16 model; the supervisor gives the run ten minutes, so a larger load would time out
+CPU_RUN_MEMORY_DIVISOR = 5                # choice: the limit is MemAvailable // 5, which leaves room for the 3x peak above and the port's own use
+CPU_RUN_OVERRIDE_ENV = "ORCHARD_CPU_RUN_MAX_BYTES"     # set through the supervisor's `--env`; a whole number of bytes
+CPU_RUN_OVERRIDE_CEILING_BYTES = 64 << 30              # choice: an override above this is cut to it, so one setting cannot exhaust the host
+CPU_RUN_MEMINFO = "/proc/meminfo"
+CPU_RUN_MEMINFO_MAX = 1 << 16             # bytes of /proc/meminfo read (it is a few kilobytes)
 CPU_NO_VERDICT = 3                        # the exit code of a CPU run that neither passed nor found a fault of the port
 
 
@@ -952,6 +978,14 @@ def worker(read_fd: int, write_fd: int) -> int:
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
+            elif op == "sample":         # optional, untimed: the vocabulary-per-die hazard's targeted test (see `vocab_check`)
+                fn = getattr(mod, "sample", None)
+                if not callable(fn):
+                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)"})
+                else:
+                    logits = [0.0] * int(req["vocab"])
+                    logits[int(req["planted"])] = VOCAB_PLANTED
+                    reply({"ok": True, "id": int(fn(model, logits, float(req["temperature"]), int(req["top_k"])))})  # finite: ok temperature is a VOCAB_MODES constant
             elif op == "close":
                 if mod is not None and model is not None:
                     mod.close(model)
@@ -1378,6 +1412,50 @@ def checkpoint_bytes(model_dir: str) -> int:
     return total
 
 
+def mem_available_bytes(meminfo=CPU_RUN_MEMINFO) -> int | None:
+    """MemAvailable from /proc/meminfo in bytes, or None when the file is missing, unreadable or has no usable line. The read is bounded."""
+    try:
+        with open(meminfo, "rb") as fh:          # hardening: ok the kernel's own /proc/meminfo (a test passes a file of its own); bounded read in a try
+            text = fh.read(CPU_RUN_MEMINFO_MAX).decode("ascii", "replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            parts = line.split()
+            if len(parts) == 3 and parts[1].isascii() and parts[1].isdigit() and parts[2] == "kB":
+                return int(parts[1]) * 1024
+            return None
+    return None
+
+
+def cpu_run_limit(environ=None, meminfo=CPU_RUN_MEMINFO) -> tuple:
+    """(the limit in bytes, a phrase that says where it came from) for the CPU run of a checkpoint.
+
+    The rule: the override in CPU_RUN_OVERRIDE_ENV when it is a whole number of bytes above zero (cut to CPU_RUN_OVERRIDE_CEILING_BYTES);
+    otherwise MemAvailable // CPU_RUN_MEMORY_DIVISOR, raised to CPU_RUN_FLOOR_BYTES and cut to CPU_RUN_CAP_BYTES. A host that does not report
+    MemAvailable gets the floor. The phrase is printed in the run's line and recorded in the ledger, so a reader can tell which rule applied."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(CPU_RUN_OVERRIDE_ENV)
+    ignored = ""
+    if raw is not None:
+        if raw.isascii() and raw.isdigit() and 0 < len(raw) <= 19 and int(raw) > 0:
+            value = int(raw)
+            if value > CPU_RUN_OVERRIDE_CEILING_BYTES:
+                return CPU_RUN_OVERRIDE_CEILING_BYTES, f"{CPU_RUN_OVERRIDE_ENV}={raw}, cut to the ceiling of {CPU_RUN_OVERRIDE_CEILING_BYTES} bytes"
+            return value, f"{CPU_RUN_OVERRIDE_ENV}={raw}"
+        ignored = f"{CPU_RUN_OVERRIDE_ENV} ignored (not a whole number of bytes above zero); "
+    avail = mem_available_bytes(meminfo)
+    if avail is None:
+        return CPU_RUN_FLOOR_BYTES, f"{ignored}the floor of {CPU_RUN_FLOOR_BYTES} bytes, because MemAvailable could not be read"
+    share = avail // CPU_RUN_MEMORY_DIVISOR
+    if share < CPU_RUN_FLOOR_BYTES:
+        return CPU_RUN_FLOOR_BYTES, (f"{ignored}the floor of {CPU_RUN_FLOOR_BYTES} bytes (a share of MemAvailable {avail} bytes, "
+                                     f"{share}, is below it)")
+    if share > CPU_RUN_CAP_BYTES:
+        return CPU_RUN_CAP_BYTES, f"{ignored}the cap of {CPU_RUN_CAP_BYTES} bytes (a share of MemAvailable {avail} bytes is {share})"
+    return share, f"{ignored}1/{CPU_RUN_MEMORY_DIVISOR} of MemAvailable {avail} bytes"
+
+
 def cpu_main(flags) -> int:
     """`port_check.py --cpu N` (issue 697): the port's load, one prefill of the stage 1 prompt and one decode step, in a worker that imports the
     CPU stand-in of ttnn (stages/2/cpu_ttnn.py) behind the verified sheet's signatures, with a stand-in device of N chips. No chip is opened
@@ -1385,7 +1463,7 @@ def cpu_main(flags) -> int:
 
     Exit 0: every request ran. Exit 2 with the usual FAILED and PORT_CHECK_FAILURE lines: a fault of the port, either a call the sheet refuses
     or a missing name, key, index or import (or a wrong call) raised at a line of the port (`cpu_fault`); the board would fail the same way.
-    Exit CPU_NO_VERDICT: anything else (the stand-in lacks an op, an error inside the stand-in, no torch, a checkpoint over CPU_RUN_MAX_BYTES,
+    Exit CPU_NO_VERDICT: anything else (the stand-in lacks an op, an error inside the stand-in, no torch, a checkpoint over the limit of cpu_run_limit,
     a missing stage 1 file); the line `CPU run gave no verdict: ...` says why and the board check decides. What a pass does not show: that the
     numbers are right, that the device accepts the shapes and layouts, or anything about code the three requests did not reach."""
     if len(flags) != 1 or not flags[0].isdigit() or not 0 < int(flags[0]) <= 64:
@@ -1402,9 +1480,10 @@ def cpu_main(flags) -> int:
     except (OSError, ValueError, KeyError, TypeError, PortFailed) as exc:
         print(f"CPU run gave no verdict: its inputs do not read ({type(exc).__name__}: {str(exc)[:300]})", flush=True)
         return CPU_NO_VERDICT
-    if size > CPU_RUN_MAX_BYTES:
-        print(f"CPU run gave no verdict: the checkpoint holds {size} bytes, above the CPU run's limit of {CPU_RUN_MAX_BYTES}; it was not loaded",
-              flush=True)
+    limit, limit_source = cpu_run_limit()
+    if size > limit:
+        print(f"CPU run gave no verdict: the checkpoint holds {size} bytes, above the CPU run's limit of {limit} bytes ({limit_source}); "
+              "it was not loaded", flush=True)
         return CPU_NO_VERDICT
     w = Worker()
     try:
@@ -1428,7 +1507,8 @@ def cpu_main(flags) -> int:
     if FORGED.is_set():
         raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
     print(f"CPU run passed: load, a prefill of {len(prompt)} tokens and one decode step ran against the CPU stand-in of ttnn on {n_chips} "
-          "stand-in chip(s). No board was used, so this does not show the port runs on the chip or computes the right numbers.", flush=True)
+          "stand-in chip(s). No board was used, so this does not show the port runs on the chip or computes the right numbers. "
+          f"The checkpoint holds {size} bytes; the size limit was {limit} bytes ({limit_source}).", flush=True)
     return 0
 
 
@@ -1505,17 +1585,88 @@ def length_check(w, seq: list) -> dict:
     return {"lengths": rows, "all_agree": all(r["agree"] for r in rows)}
 
 
-def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
+def positions_cap(config: dict) -> int:
+    """The most positions this run scores: the config's `max_positions` (the supervisor writes it from `--port-check-positions`) or MAX_POSITIONS
+    when the config sets none. A value that is not a whole number from MIN_POSITIONS to POSITIONS_LIMIT stops the run before the port loads."""
+    if "max_positions" not in config:
+        return MAX_POSITIONS
+    value = config["max_positions"]
+    if type(value) is not int or not MIN_POSITIONS <= value <= POSITIONS_LIMIT:
+        shown = str(value)[:40] if not isinstance(value, int) or abs(value) < 10 ** 12 else "a very large whole number"
+        raise PortFailed(f"port_check_config.json max_positions must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}; got {shown!r}",
+                         kind="setup")
+    return value
+
+
+def vocab_size_of(config) -> int | None:
+    """The checkpoint's vocabulary size from its config (the text section when there is one), or None when it gives no whole number in range."""
+    section = config.get("text_config") if isinstance(config, dict) and isinstance(config.get("text_config"), dict) else config
+    n = section.get("vocab_size") if isinstance(section, dict) else None
+    return n if type(n) is int and 0 < n <= VOCAB_MAX else None
+
+
+def vocab_per_die(vocab: int, dies: int) -> int:
+    return -(-vocab // dies)
+
+
+def vocab_flagged(vocab: int, dies: int) -> bool:
+    """Whether the hazard scan's vocabulary hazard applies: the columns one die holds are above the limit (orchard/hazards.py)."""
+    return vocab_per_die(vocab, dies) > VOCAB_PER_DIE_LIMIT
+
+
+def vocab_probe_cases(vocab: int, dies: int) -> list:
+    """The columns to plant a maximum in, die by die: the first column past the limit of that die's slice and its last column. `planted` is
+    the id of the whole vocabulary, `column` the position inside the die."""
+    per_die = vocab_per_die(vocab, dies)
+    cases = []
+    for die in range(dies):
+        start, end = die * per_die, min((die + 1) * per_die, vocab) - 1
+        for column in sorted({VOCAB_PER_DIE_LIMIT, end - start}):
+            if start + column <= end:
+                cases.append({"die": die, "column": column, "planted": start + column})
+    return cases
+
+
+def vocab_check(w, vocab: int, dies: int) -> dict:
+    """The vocabulary-per-die hazard's targeted test (issue 183): for each planted column, ask the port's `sample` hook on the greedy and on the
+    sampled path for the id of a logits row whose only large value sits in that column. A wrong id, or an error in the hook, fails the run with a
+    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason."""
+    block = {"flagged": True, "vocab_size": vocab, "dies": dies, "per_die": vocab_per_die(vocab, dies), "limit": VOCAB_PER_DIE_LIMIT,
+             "status": "pass", "reason": "", "cases": []}
+    for case in vocab_probe_cases(vocab, dies):
+        for mode, temperature, top_k in VOCAB_MODES:
+            got = w.ask(op="sample", vocab=vocab, planted=case["planted"], temperature=temperature, top_k=top_k)
+            if "skipped" in w.last:
+                return {**block, "status": "skipped", "reason": str(w.last["skipped"])[:300], "cases": []}
+            row = {**case, "mode": mode, "got": got, "ok": got == case["planted"]}
+            block["cases"].append(row)
+            if not row["ok"]:
+                raise PortFailed(f"vocab check: the port's sample returned id {got} on the {mode} path, where the only large logit sits in id "
+                                 f"{case['planted']} (die {case['die']}, column {case['column']} of {block['per_die']}). The hazard scan predicted "
+                                 f"this: a sampler index wraps at {VOCAB_PER_DIE_LIMIT} columns per die. Make the port's sampler return the "
+                                 "right id for every column of the vocabulary.", op="sample")
+    return block
+
+
+def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None) -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
     10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
-    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's."""
+    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's.
+    Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note says which of the two
+    limited the count."""
     n = len(ref_lp)
     value = FIDELITY_SCALE * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
     block = {"kind": "reference-greedy-text", "scale": FIDELITY_SCALE, "tokens": n, "value": value,
              "reference_logprobs": ref_lp, "chip_logprobs": chip_lp}
     if n < FIDELITY_MIN_TOKENS:
-        block["note"] = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
-                         "this number is reported, not gated")
+        note = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
+                "this number is reported, not gated")
+        if cap is not None and reference_length is not None:
+            if reference_length <= cap:
+                note += f". The stage 1 reference holds {reference_length} tokens, which limits this score"
+            else:
+                note += f". The cap of {cap} positions limits this score (--port-check-positions raises it, up to {POSITIONS_LIMIT})"
+        block["note"] = note
     return block
 
 
@@ -1529,7 +1680,8 @@ def main() -> int:
         raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
     refuse_links()
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
-    n = min(len(reference), MAX_POSITIONS)
+    cap = positions_cap(config)
+    n = min(len(reference), cap)
     ref = reference[:n]
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     for stale in (RECORD, LAYER_FILE, LAYER_FILE.with_name(LAYER_FILE.name + ".tmp")):
@@ -1570,6 +1722,8 @@ def main() -> int:
             free.append(w.ask(op="decode", token=free[-1], position=len(prompt) + k - 1))
         agreement = sum(1 for a, b in zip(ref, chip) if a == b) / n
         lengths = length_check(w, prompt + reference)      # after everything the record needs from the port; nothing in it can change the top-1 agreement
+        vocab = vocab_size_of(read_config(model_dir))
+        vocab_block = vocab_check(w, vocab, len(chips)) if vocab is not None and vocab_flagged(vocab, len(chips)) else None
         layers_note, n_layers = None, 0
         if agreement < LAYER_DIAG_BELOW:          # advice for the coder, after everything the record needs; nothing in it can change the record
             try:
@@ -1598,9 +1752,11 @@ def main() -> int:
               "prompt": {"path": PROMPT, "sha256": sha_file(RUN_DIR / PROMPT)},
               "reference_ids": ref, "chip_ids": chip,
               "top1_agreement": agreement,
-              **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
+              "positions": {"cap": cap, "scored": n, "reference_length": len(reference)},
+              **({"fidelity": fidelity_block(ref_lp, chip_lp, cap, len(reference))} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
               **({"near_ties": ties} if ties is not None else {}),
               "length_check": lengths,
+              **({"vocab_check": vocab_block} if vocab_block is not None else {}),
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
@@ -1621,6 +1777,10 @@ def main() -> int:
         bad = [r["length"] for r in lc["lengths"] if not r["agree"]]
         print(f"length check: prefill and prefill-then-decode give different next tokens at lengths {bad} (reported, not gated). A port that pads a "
               "prompt or handles a tile boundary wrongly does this; look at how prefill and decode_step treat the last tokens.", flush=True)
+    if "vocab_check" in record:
+        vb = record["vocab_check"]
+        print(f"vocab check: {vb['status']}" + (f", {vb['reason']}" if vb["reason"] else f" ({len(vb['cases'])} cases over {vb['dies']} dies, "
+              f"{vb['per_die']} columns each)"), flush=True)
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)

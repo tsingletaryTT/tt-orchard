@@ -395,6 +395,12 @@ def _tool_use_count(base: Path):
     return tool_use.count(base)
 
 
+def _thin_repair_load_history(base: Path):
+    """The history file of the thin repair rounds (`stages/2/thin_repair_history.json`, issue 783): the stage directory is the argument."""
+    from orchard import thin_repair
+    return thin_repair.load_history(base)
+
+
 def _ledger_read_entries(base: Path):
     from orchard import ledger
     return ledger.read_entries(base / "input.json")
@@ -982,6 +988,13 @@ from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
 from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
+def _full_port_config_cap(base: Path):
+    """The gate's read of the stage's port_check_config.json for the positions cap (issue 731): `base` stands for the stage directory."""
+    from orchard import full_port
+    reasons: list = []
+    return full_port._config_cap(base, reasons), reasons
+
+
 def _preflight_config_json(base: Path):
     from orchard import preflight
     return preflight._config_json(base / "input.json")
@@ -1044,6 +1057,11 @@ def _port_facts_build(base: Path):
 def _port_facts_reference_source(base: Path):
     from orchard import port_facts
     return port_facts.reference_source(base, "toy")
+
+
+def _port_excerpts_own_modeling(base: Path):
+    from orchard import port_excerpts
+    return port_excerpts.own_modeling_source(base / "snap", {"auto_map": {"AutoModelForCausalLM": "modeling_toy.ToyForCausalLM"}})
 
 
 def _profile_analyze_raw_file(base: Path):
@@ -1278,6 +1296,7 @@ READERS: list[Reader] = [
     Reader("profile_summary.read_report_file", _profile_read_report_file, documented=(_SafeReadError, _ProfileError)),
     Reader("profile_summary.summarise_dir (hostile ops CSV)", _profile_summarise_dir, rel="ops_perf_results_hostile.csv"),
     Reader("tool_use.count", _tool_use_count, suffix=b"\n", rel="stages/2/log/prepare-00001.jsonl"),
+    Reader("thin_repair.load_history", _thin_repair_load_history, rel="thin_repair_history.json"),
     Reader("preflight._config_json", _preflight_config_json),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
@@ -1366,6 +1385,7 @@ READERS: list[Reader] = [
     Reader("port_facts.build (hostile weights file)", _port_facts_build, rel="snap/model.safetensors", setup=_port_facts_config,
            documented=(_PortFactsError,)),
     Reader("port_facts.reference_source", _port_facts_reference_source, rel="models/toy/configuration_toy.py"),
+    Reader("port_excerpts.own_modeling_source", _port_excerpts_own_modeling, rel="snap/modeling_toy.py"),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
@@ -1401,6 +1421,7 @@ READERS: list[Reader] = [
     Reader("drop_watch.gozer_chips", _drop_watch_gozer_chips, feed="bytes"),
     Reader("drop_watch.tick (hostile Hub record)", _drop_watch_tick_hub_record, feed="bytes", check=_drop_watch_started_nothing),
     Reader("drop_watch.tick (hostile state file)", _drop_watch_tick_state, rel="state.json", check=_drop_watch_started_nothing),
+    Reader("full_port._config_cap (hostile port_check_config.json)", _full_port_config_cap, rel="port_check_config.json"),
 ]
 
 BY_NAME = {r.name: r for r in READERS}

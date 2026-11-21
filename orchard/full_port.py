@@ -35,13 +35,21 @@ import os
 import re
 from pathlib import Path
 
-from orchard import boundedwalk, safeio, ttnn_calls
+from orchard import boundedwalk, hazards, safeio, ttnn_calls
 from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 
 RECORD_SCHEMA = "orchard-port-check/1"
 TOP1_MIN = SWAP_TOP1_MIN              # choice: the bar the weights-only stage 2 uses for the same measurement
 MIN_TOKENS = SWAP_MIN_TOKENS
-MIN_FREE_RUN_CHARS = 20               # choice: the same floor as the stock-runtime gate's free-run text
+# The positions the check scores (issue 731). `--port-check-positions` sets a cap, `port_check_config.json` carries it as `max_positions`, and the
+# check scores the smaller of the cap and the length of the stage 1 reference. The template's MAX_POSITIONS, MIN_POSITIONS and POSITIONS_LIMIT are
+# copies of these three (a test keeps them equal), because the template runs in the run directory and cannot import this module.
+DEFAULT_POSITIONS = 64                # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; a run that names no cap uses it
+MIN_POSITIONS = MIN_TOKENS            # the gate refuses a record that compares fewer positions, so a lower cap could never pass
+POSITIONS_LIMIT = 8192                # choice: the Olmo-Hybrid-7B port scored 4,000 positions in under 6 minutes including its load (issue 731), so 8,192 is about
+                                      # 12 minutes, inside the hardware test's 1 hour deadline; the record then holds about 0.6 MB (ids and log-probabilities),
+                                      # far below JSON_MAX. A larger cap needs its own measurement
+MIN_FREE_RUN_CHARS = 20              # choice: the same floor as the stock-runtime gate's free-run text
 MIN_FREE_RUN_WORDS = 4                # choice: a free run of one repeated word is not text
 REFERENCE_FILE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT_FILE = "stages/1/evidence/reference/prompt-ids.json"
@@ -171,6 +179,24 @@ def agreement(reference: list, chip: list) -> float:
     return sum(1 for a, b in zip(reference, chip) if a == b) / len(reference)
 
 
+def _shown(value) -> str:
+    """A value for a message: short, and safe for an integer too large to print (Python refuses a very long integer's digits)."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10 ** 12:
+        return "a very large whole number"
+    return str(value)[:40]
+
+
+def check_positions(value) -> int:
+    """The position cap from an option or a config value: a whole number from MIN_POSITIONS to POSITIONS_LIMIT. A string of at most six
+    digits is read as a number (an option arrives as text); a boolean, a float or anything else is refused."""
+    if isinstance(value, str) and value.strip().isdigit() and len(value.strip()) <= 6:
+        value = int(value)
+    if type(value) is not int or not MIN_POSITIONS <= value <= POSITIONS_LIMIT:
+        raise ValueError(f"the number of positions the port check scores must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}; "
+                         f"got {_shown(value)!r}")
+    return value
+
+
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, stage: int = 2,
           expected_chips: int | None = None, entry: int | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 2 or stage 3 directory of a full port. No reasons means the result passes.
@@ -287,6 +313,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     if _ids(chip_ids) and chip_ids:
         _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
+        _positions_reasons(record, stage_dir, ref_ids, len(chip_ids), reasons)
         _length_check_reasons(record, reasons)
         if _ids(record.get("reference_ids")) and len(record["reference_ids"]) == len(chip_ids):
             _near_tie_reasons(record, run_dir, record["reference_ids"], chip_ids, reasons)
@@ -334,6 +361,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     _template_reasons(record, stage_dir, run_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
     _device_ops_reasons(record, run_dir, reasons, stage_dir)
+    _vocab_check_reasons(record, run_dir, reasons, stage_dir)
     return reasons, seen
 
 
@@ -535,6 +563,70 @@ def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list
                        "the score was made against numbers the reference did not produce")
 
 
+def _config_cap(stage_dir, reasons: list):
+    """(the cap `port_check_config.json` sets, whether it sets one) for the stage; (DEFAULT_POSITIONS, False) when it sets none. None when the
+    config cannot be read or sets a value outside the range (a reason is added), or is missing (the template check already says so)."""
+    path = Path(stage_dir) / CONFIG_NAME
+    if not path.is_file():
+        return None
+    try:
+        cfg = safeio.read_json(path, max_bytes=1 << 16, expect=dict)
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{CONFIG_NAME} is not readable JSON, so the positions cap cannot be checked: {exc.reason}")
+        return None
+    if "max_positions" not in cfg:
+        return DEFAULT_POSITIONS, False
+    value = cfg["max_positions"]
+    if type(value) is not int:
+        reasons.append(f"{CONFIG_NAME} max_positions must be a whole number from {MIN_POSITIONS} to {POSITIONS_LIMIT}, got {_shown(value)!r}")
+        return None
+    try:
+        return check_positions(value), True
+    except ValueError:
+        reasons.append(f"{CONFIG_NAME} max_positions {_shown(value)} is outside {MIN_POSITIONS} to {POSITIONS_LIMIT}")
+        return None
+
+
+def _positions_reasons(record: dict, stage_dir, ref_ids, scored: int, reasons: list) -> None:
+    """The record's `positions` block (issue 731): the cap that applied, the positions scored and the length of the stage 1 reference. The gate
+    recomputes it from what is on disk. The cap is the config's `max_positions` (the supervisor writes that file and the record hashes it), the
+    reference length is the stage 1 file's, and the positions scored are the smaller of the two and the number the record compares. A record
+    with no block was written before the setting existed: it ran with the default cap, so it may not compare more positions than that and its
+    config may not set another cap. Nothing here looks at the fidelity value; that stays report-only."""
+    config = _config_cap(stage_dir, reasons)
+    block = record.get("positions")
+    if block is None:
+        if scored > DEFAULT_POSITIONS:
+            reasons.append(f"the record has no positions block, so the default cap {DEFAULT_POSITIONS} applies, and it compares {scored} positions")
+        if config is not None and config[1]:
+            reasons.append(f"the record has no positions block but {CONFIG_NAME} sets max_positions {config[0]}")
+        return
+    if not isinstance(block, dict):
+        reasons.append("positions must be an object")
+        return
+    if set(block) != {"cap", "scored", "reference_length"}:
+        reasons.append("positions must hold exactly cap, scored and reference_length")
+        return
+    cap, got, ref_len = block["cap"], block["scored"], block["reference_length"]
+    if not all(type(v) is int for v in (cap, got, ref_len)):
+        reasons.append("positions cap, scored and reference_length must each be a whole number")
+        return
+    in_range = MIN_POSITIONS <= cap <= POSITIONS_LIMIT
+    if not in_range:
+        reasons.append(f"positions cap {_shown(cap)} is outside {MIN_POSITIONS} to {POSITIONS_LIMIT}")
+    if got != scored:
+        reasons.append(f"positions scored {_shown(got)} differs from the {scored} positions the record compares")
+    if in_range and got > cap:
+        reasons.append(f"positions scored {_shown(got)} is more than its cap {cap}")
+    if ref_ids is not None and ref_len != len(ref_ids):
+        reasons.append(f"positions reference_length {_shown(ref_len)} differs from the {len(ref_ids)} ids in the stage 1 reference")
+    elif in_range and got == scored and got != min(ref_len, cap):
+        reasons.append(f"positions scored {got} is not the smaller of the cap {cap} and the reference length {_shown(ref_len)}")
+    if in_range and config is not None and config[0] != cap:
+        reasons.append(f"positions cap {cap} is not the max_positions {config[0]} that {CONFIG_NAME} sets"
+                       + ("" if config[1] else f" (it sets none, so the default {DEFAULT_POSITIONS} applies)"))
+
+
 def _near_tie_reasons(record: dict, run_dir: Path, ref_ids: list, chip_ids: list, reasons: list) -> None:
     """The record's report-only `near_ties` block, when it has one: recomputed here from the record's own ids and the stage 1 top-5 file. It never
     fails a run for the number of disagreements; it fails a block that does not match what the reference on disk says, since the block is
@@ -606,6 +698,96 @@ def _length_check_reasons(record: dict, reasons: list) -> None:
             reasons.append("length_check with an error holds a string error and no all_agree")
     elif block.get("all_agree") is not all(r["agree"] for r in rows) or not isinstance(block.get("all_agree"), bool):
         reasons.append("length_check all_agree is not whether every row agrees")
+
+
+VOCAB_MAX = 10 ** 7                   # the template's VOCAB_MAX
+VOCAB_MODES = ("greedy", "sampled")   # the template's VOCAB_MODES names
+
+
+def _snapshot_vocab(stage_dir: Path):
+    """The vocabulary size the checkpoint's own config gives, read from the snapshot that this stage's `port_check_config.json` names (the way
+    `_snapshot_floor` reads the layer count), or None when it cannot be read or is not a whole number in range."""
+    try:
+        snapshot = safeio.read_json(Path(stage_dir) / CONFIG_NAME, max_bytes=1 << 16, expect=dict).get("model_snapshot")
+        if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
+            return None
+        config = safeio.read_json(safeio.resolved(Path(snapshot) / "config.json"), max_bytes=1 << 20, expect=dict)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    section = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+    n = section.get("vocab_size")
+    return n if type(n) is int and 0 < n <= VOCAB_MAX else None
+
+
+def _vocab_cases(vocab: int, dies: int) -> list:
+    """The (die, column, planted, mode) rows the template's `vocab_check` asks for, computed again here: the first column past the limit of each
+    die's slice and its last column, on each path. A test keeps this equal to the template's `vocab_probe_cases`."""
+    per_die = -(-vocab // dies)
+    rows = []
+    for die in range(dies):
+        start, end = die * per_die, min((die + 1) * per_die, vocab) - 1
+        for column in sorted({hazards.VOCAB_PER_DIE_LIMIT, end - start}):
+            if start + column <= end:
+                rows += [(die, column, start + column, mode) for mode in VOCAB_MODES]
+    return rows
+
+
+def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
+    """The vocabulary-per-die hazard's check (issue 183). The gate reads the vocabulary from the snapshot's own config.json, counts the
+    chips in the record, and decides from those two whether the check applies: columns per die above the hazard scan's limit need a
+    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook) or `pass` with one row for each planted
+    column on each path, and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record
+    that says otherwise."""
+    vocab, chips = _snapshot_vocab(stage_dir), record.get("chips")
+    if vocab is None or vocab <= hazards.VOCAB_PER_DIE_LIMIT:
+        return                                  # one die holding the whole vocabulary is already within the limit
+    if not isinstance(chips, list) or not 0 < len(chips) <= 64:
+        reasons.append(f"{RECORD_FILE} chips must be a list of 1 to 64 chips: the vocabulary check ({vocab} columns) cannot tell how many dies share them")
+        return
+    dies = len(chips)
+    if -(-vocab // dies) <= hazards.VOCAB_PER_DIE_LIMIT:
+        return
+    per_die, name = -(-vocab // dies), f"{RECORD_FILE} vocab_check"
+    block = record.get("vocab_check")
+    if block is None:
+        reasons.append(f"{name} is missing: the checkpoint's vocabulary is {vocab} columns over {dies} chips ({per_die} per die, above "
+                       f"{hazards.VOCAB_PER_DIE_LIMIT}), so the check that wrote the record had to run the vocabulary check (issue 183)")
+        return
+    if not isinstance(block, dict):
+        reasons.append(f"{name} must be an object")
+        return
+    for key, want in (("vocab_size", vocab), ("dies", dies), ("per_die", per_die), ("limit", hazards.VOCAB_PER_DIE_LIMIT)):
+        if block.get(key) != want or type(block.get(key)) is not int:
+            reasons.append(f"{name}.{key} is {block.get(key)!r}; the gate's own reading of the snapshot and the chips gives {want}")
+    status, cases = block.get("status"), block.get("cases")
+    if status == "skipped":
+        reason = block.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 300 or cases != []:
+            reasons.append(f"{name} with status skipped needs a reason of 1 to 300 characters and no cases")
+        return
+    if status != "pass":
+        reasons.append(f"{name}.status must be pass or skipped, got {status!r}")
+        return
+    if not isinstance(cases, list) or len(cases) > 64 or not all(isinstance(r, dict) for r in cases):
+        reasons.append(f"{name}.cases must be a list of at most 64 objects")
+        return
+    want_rows = _vocab_cases(vocab, dies)
+    have = [(r.get("die"), r.get("column"), r.get("planted"), r.get("mode")) for r in cases]
+    for die in range(dies):
+        if not any(h[0] == die for h in have):
+            reasons.append(f"{name} has no case for die {die}: every die's last column has to be tried")
+    if have != want_rows:
+        reasons.append(f"{name}.cases are not the {len(want_rows)} rows the gate expects for {vocab} columns over {dies} dies (the first column past "
+                       f"{hazards.VOCAB_PER_DIE_LIMIT} and the last column of each die, on the greedy and the sampled path)")
+        return
+    for r in cases:
+        got, planted = r.get("got"), r["planted"]
+        if type(got) is not int or type(r.get("ok")) is not bool:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}) needs a whole-number got and a boolean ok")
+        elif got != planted:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}): got {got}, planted {planted}")
+        elif r["ok"] is not True:
+            reasons.append(f"{name} die {r['die']} column {r['column']} ({r['mode']}) says ok=false but its id equals the planted id")
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
