@@ -14,6 +14,13 @@ files only) and parsed with `ast`. Nothing is imported or run, so the module's t
 holds a null byte, is nested deeper than the parser allows, is not found, or is too large gives an empty result with a reason, and the
 coder works without the file as it did before this module existed. `for_root` never raises: this step is advisory.
 
+The source. A model type that the installed transformers does not have may ship its own modeling file (the config's `auto_map` names it,
+for example `modeling_aion_instruct.AionInstructForCausalLM`). When the snapshot directory is given and the installed transformers has no
+module for the model type, the file named by `auto_map["AutoModelForCausalLM"]` (else `AutoModel`) is read from the snapshot. The file is a
+third party's code, so it is parsed and never imported or run (issue 781). Its name must be a plain `modeling_*` module in the snapshot's own
+top directory: a name that points to another repository (`org/repo--module`), holds a path separator or a dot-dot, or is long is refused,
+and a link in the snapshot that leads outside the snapshot's cache is refused (`safeio.resolved_inside`).
+
 Bounds. A class is at most MAX_CLASS_BYTES of code (signature, `forward`, helpers), the file is at most MAX_TOTAL_BYTES, a helper is at
 most HELPER_BYTES, and at most MAX_CLASSES classes are considered. Everything cut or left out is listed, in the file's header and in the
 result's `left_out`. A class name longer than MAX_KEY_CHARS characters is not copied anywhere.
@@ -49,6 +56,9 @@ SUMMARY_LEFT_OUT = 6
 SUMMARY_CHARS = 100
 MAX_LAYER_KINDS = 64
 
+_SOURCE = re.compile(r"transformers|modeling_[A-Za-z0-9_]{1,100}\.py")
+_AUTO_MAP_TARGET = re.compile(r"(modeling_[A-Za-z0-9_]{1,100})\.[A-Za-z_][A-Za-z0-9_]{0,120}")
+_AUTO_MAP_KEYS = ("AutoModelForCausalLM", "AutoModel")      # the entry that names the model's own modeling module, in this order
 _FAMILY_SUFFIXES = ("ForConditionalGeneration", "ForCausalLM", "ForSequenceClassification", "ForTokenClassification",
                     "ForQuestionAnswering", "TextModel", "Model")
 _NAME = re.compile(rf"[A-Za-z_][A-Za-z0-9_]{{0,{port_facts.MAX_KEY_CHARS - 1}}}")
@@ -78,10 +88,11 @@ class Excerpts:
     classes: list = field(default_factory=list)
     left_out: list = field(default_factory=list)
     reason: str = ""
+    source: str = ""            # "transformers" for the installed module, else the snapshot file the config's auto_map named
 
     def summary(self) -> dict:
         """What the facts file says about the excerpts: small and bounded whatever the file holds."""
-        return {"file": FILE_NAME, "bytes": len(self.text.encode("utf-8")),
+        return {"file": FILE_NAME, "bytes": len(self.text.encode("utf-8")), "source": self.source if _SOURCE.fullmatch(self.source) else "",
                 "classes": [c for c in self.classes if _NAME.fullmatch(c)][:SUMMARY_CLASSES],
                 "classes_total": len(self.classes),
                 "left_out": [x[:SUMMARY_CHARS] for x in self.left_out[:SUMMARY_LEFT_OUT]],
@@ -304,8 +315,9 @@ def _section(name: str, why: str, cls: ast.ClassDef, funcs: dict, lines: list, h
     return f"## {name}\n\nWhy: {why}. Source lines {cls.lineno}-{cls.end_lineno}.\n\n```python\n{_clean(body)}\n```\n"
 
 
-def build(config, source) -> Excerpts:
-    """The excerpts for a config from the text of the reference modeling module. Never raises; an empty result carries its reason."""
+def build(config, source, origin: str = "transformers") -> Excerpts:
+    """The excerpts for a config from the text of the reference modeling module. `origin` is "transformers" or the name of the snapshot file
+    the text came from. Never raises; an empty result carries its reason."""
     if not isinstance(config, dict):
         return Excerpts(reason="the config is not an object")
     if not isinstance(source, str) or not source.strip():
@@ -348,7 +360,10 @@ def build(config, source) -> Excerpts:
         """The file text with a header that describes the sections kept now and everything left out so far."""
         shown = left_out[:MAX_LEFT_OUT_LISTED]
         header = ["# Reference excerpts", "",
-                  "Source text of the classes this model uses, copied from the installed `transformers` modeling module for its model type. "
+                  "Source text of the classes this model uses, copied from "
+                  + ("the installed `transformers` modeling module for its model type. " if origin == "transformers" else
+                     f"`{origin}`, the modeling file that ships with the model (the config's `auto_map` names it; it was read and not run). ")
+                  + 
                   "Each class shows its constructor signature, its `forward` method and the small helper functions `forward` calls. "
                   "Constructor bodies are elided: a default in a signature can differ from the value the model uses, so check `effective_construction.txt` "
                   "(next to this file, when it exists) for the values the constructors resolved. "
@@ -365,17 +380,49 @@ def build(config, source) -> Excerpts:
         left_out.append(f"{names.pop()}: not included, the total cap of {MAX_TOTAL_BYTES} bytes would be passed")
         sections.pop()
         text = render()                                             # rebuilt, so the header lists the class just removed
-    return Excerpts(text=text, classes=names, left_out=left_out)
+    return Excerpts(text=text, classes=names, left_out=left_out, source=origin)
 
 
-def for_root(root, config) -> Excerpts:
-    """The excerpts for `config` from the modeling module under the transformers directory `root` (None: no reference). Never raises."""
+def own_modeling_source(snapshot, config) -> tuple:
+    """(the text of the modeling file the config's `auto_map` names, its file name, "") or (None, "", a fixed reason). The file is read from
+    the snapshot's top directory only, through `safeio`, and is not run. The reason never quotes the config or the file."""
+    auto_map = config.get("auto_map") if isinstance(config, dict) else None
+    if snapshot is None or not isinstance(auto_map, dict):
+        return None, "", "the reference modeling module was not found or could not be read"
+    target = next((auto_map[k] for k in _AUTO_MAP_KEYS if k in auto_map), None)
+    match = _AUTO_MAP_TARGET.fullmatch(target) if isinstance(target, str) else None
+    if match is None:
+        return None, "", "the config's auto_map does not name a plain modeling file in the snapshot"
+    name = f"{match.group(1)}.py"
+    path = safeio.resolved_inside(Path(snapshot) / name, snapshot)
+    if path is None:
+        return None, "", "the config's auto_map names a modeling file that is missing or leads outside the snapshot"
     try:
-        if root is None or not isinstance(config, dict):
+        data = safeio.read_bytes(path, max_bytes=port_facts.SOURCE_MAX)
+    except safeio.SafeReadError:
+        return None, "", "the config's auto_map names a modeling file that could not be read within the bounds"
+    return data.decode("utf-8", "replace"), name, ""
+
+
+def for_root(root, config, snapshot=None) -> Excerpts:
+    """The excerpts for `config` from the modeling module under the transformers directory `root` (None: no reference). When the installed
+    transformers has no module for the model type and `snapshot` is given, the modeling file the config's `auto_map` names is read from the
+    snapshot instead (issue 781). Never raises."""
+    try:
+        if not isinstance(config, dict):
             return Excerpts(reason="there is no reference interpreter or config to read the modeling module from")
         _, _, types = _config_names(config)
-        source = next((s for s in (port_facts.reference_source(root, m, kind="modeling") for m in types) if s), None)
-        return build(config, source)
+        source = next((s for s in (port_facts.reference_source(root, m, kind="modeling") for m in types) if s), None) if root is not None else None
+        if source:
+            return build(config, source)
+        if snapshot is None:
+            if root is None:
+                return Excerpts(reason="there is no reference interpreter or config to read the modeling module from")
+            return build(config, source)
+        own, name, why = own_modeling_source(snapshot, config)
+        if own is None:
+            return Excerpts(reason=why)
+        return build(config, own, origin=name)
     except Exception as exc:         # advisory step: whatever goes wrong, the coder works without the file; the message may quote the source
         return Excerpts(reason=f"{exc.__class__.__name__}: an unexpected error while reading the reference modeling module")
 
