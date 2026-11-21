@@ -1,0 +1,3 @@
+target = "0.9.188"
+summary = "The stage 2 check's position cap is a recorded, validated setting (--port-check-positions, default 64): the record names the cap, the positions scored and the reference's length, the gate recomputes them, and the fidelity note says which limited the count."
+kind = "feature"
