@@ -49,7 +49,7 @@ class FakeRemoteConfig(FakeConfig):
     auto_map = {"AutoModelForCausalLM": "modeling_tiny_remote.TinyRemoteForCausalLM"}      # what a config with custom code carries
 
 
-def install_fakes(monkeypatch, *, refuse: bool, calls: list, fail_with=None):
+def install_fakes(monkeypatch, *, refuse: bool, calls: list, fail_with=None, config_error=None):
     """A `torch` with a `device` context and a `transformers` whose loaders refuse custom code unless trust_remote_code=True is passed. A call
     that passes no flag is recorded as None: the real transformers asks on the terminal for None, which must never happen in the script."""
     torch = types.ModuleType("torch")
@@ -65,6 +65,8 @@ def install_fakes(monkeypatch, *, refuse: bool, calls: list, fail_with=None):
         @staticmethod
         def from_pretrained(path, trust_remote_code=None):
             check("config", trust_remote_code)
+            if config_error is not None:
+                raise config_error
             return FakeRemoteConfig() if refuse else FakeConfig()
 
     class AutoModelForCausalLM:
@@ -132,12 +134,14 @@ def test_the_scratch_home_and_the_audit_are_not_written_beside_the_shipped_templ
     assert not Path(os.environ["HOME"]).is_relative_to(SHIPPED_TEMPLATES)
 
 
-def test_another_error_from_the_loader_is_not_taken_for_a_refusal(tmp_path, monkeypatch):
+def test_another_value_error_from_the_config_load_is_not_taken_for_a_refusal(tmp_path, monkeypatch):
     snap = snapshot_with_code(tmp_path)
-    install_fakes(monkeypatch, refuse=False, calls=[], fail_with=ValueError("some other problem"))
+    calls = []
+    install_fakes(monkeypatch, refuse=False, calls=calls, config_error=ValueError("some other problem"))
     script = load_script()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="some other problem"):
         script.build_model(str(snap))
+    assert calls == [("config", False)]                                   # no second load
     assert script.remote_code_report() is None and os.environ.get("HF_HUB_OFFLINE") != "1"
 
 
