@@ -1,3 +1,4 @@
 target = "0.9.188"
 summary = "The stage 2 CPU run's size limit is a share of the host's available memory (4 to 12 GiB, set with ORCHARD_CPU_RUN_MAX_BYTES), so a 2.3B bf16 checkpoint gets the CPU check, and the ledger names the limit and where it came from (issue 782)."
+pr = 784
 kind = "fix"
