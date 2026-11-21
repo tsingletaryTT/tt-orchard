@@ -334,9 +334,9 @@ def _is_rms_norm(cls, attrs) -> bool:
 
 def _eps(attrs: dict, default: float) -> float:
     for key in ("eps", "variance_epsilon", "epsilon", "layer_norm_eps", "norm_eps"):
-        v = _number(attrs.get(key))
+        v = _float_of(attrs.get(key))
         if v is not None and 0 < v < 1:
-            return float(v)
+            return v
     return default
 
 
@@ -1768,8 +1768,10 @@ def _rotary_plan(section: dict, hidden: int):
     rot = int(head_dim * factor)
     if rot < 2 or rot % 2:
         return None, f"the rotary width int({head_dim} * {factor}) is {rot}, which is not an even number of at least 2"
-    theta = _number(rope.get("rope_theta")) or _number(section.get("rope_theta")) or 10000.0
-    return {"head_dim": head_dim, "rot": rot, "theta": float(theta)}, None
+    theta = _float_of(_number(rope.get("rope_theta")) or _number(section.get("rope_theta")) or 10000.0)
+    if theta is None:
+        return None, "rope_theta is not a number that a float can hold"
+    return {"head_dim": head_dim, "rot": rot, "theta": theta}, None
 
 
 def _layer_rope_plan(section: dict, kcls: str):
@@ -1835,7 +1837,7 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
                       f"[hidden, heads * head_dim] for o (q_proj is {list(q.shape)}), so the head split is not the plain one")
     factor = _number(_rope_dict(section).get("partial_rotary_factor", section.get("partial_rotary_factor")))
     if factor is not None and factor != 1:
-        return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
+        return None, f"{kcls}: partial_rotary_factor is {_shown(factor)}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
     layer_rope = None
     if rope_keyed_by_layer_type(section):
@@ -1857,7 +1859,9 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
         if rope_type != "default":
             return None, f"{kcls}: rope_type is not default"
         theta = _number((rope or {}).get("rope_theta")) if isinstance(rope, dict) else None
-        theta = theta or _number(section.get("rope_theta")) or 10000.0
+        theta = _float_of(theta or _number(section.get("rope_theta")) or 10000.0)
+        if theta is None:
+            return None, f"{kcls}: rope_theta is not a number that a float can hold"
     for n in ("q_norm", "k_norm"):
         if n in kkids:
             ncls, nattrs = con.resolve(f"{kp}.{n}")
@@ -1865,8 +1869,10 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
             if not _is_rms_norm(ncls, nattrs) or w is None or w.shape != (head_dim,):
                 return None, f"{kcls}: {n} is not a plain RMSNorm over head_dim"
     scaling = _number(kattrs.get("scaling"))
-    rope_part = {"theta": float(theta)} if layer_rope is None else layer_rope          # one theta, or the layer types and one block each
-    settings = {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": float(scaling) if scaling else float(head_dim) ** -0.5,
+    if scaling and _float_of(scaling) is None:
+        return None, f"{kcls}: the attention scaling is not a number that a float can hold"
+    rope_part = {"theta": theta} if layer_rope is None else layer_rope          # one theta, or the layer types and one block each
+    settings = {"heads": heads, "kv_heads": kv, "head_dim": head_dim, **rope_part, "scale": _float_of(scaling) if scaling else head_dim ** -0.5,
                 "q_norm": "q_norm" in kkids, "k_norm": "k_norm" in kkids,
                 "norm_eps": norm_eps.get(f"{kp}.q_norm", default_eps)}
     if window:                          # the sliding layers attend over the last `window` positions only (the layer types name them)

@@ -80,6 +80,16 @@ EVIDENCE = HERE_DIR / "evidence"
 REMOTE_CODE = {"used": False, "files": {}, "scrubbed": []}
 HOME_SCRATCH = HERE_DIR / "remote_code_home"
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL|PASSPHRASE", re.IGNORECASE)
+# Names that hold a credential-like word and are not credentials. The pattern matches TOKEN anywhere, so it removed TOKENIZERS_PARALLELISM, a flag of the
+# tokenizers library whose value is `true` or `false` (the Aion run of 2026-11-21 listed it as scrubbed). The exception is the exact name and nothing wider:
+# a looser pattern such as `TOKEN(?!IZERS)` would also let a name like TOKENIZERS_API_TOKEN through. An environment name is case sensitive and the
+# library reads this exact spelling, so another spelling is still scrubbed.
+NOT_A_CREDENTIAL = frozenset({"TOKENIZERS_PARALLELISM"})
+
+
+def credential_names(environ) -> list:
+    """The names in `environ` that look like credentials and are not on the allowlist, sorted. Names only: a value is never read here."""
+    return sorted(k for k in environ if CREDENTIAL_NAME.search(k) and k not in NOT_A_CREDENTIAL)
 
 
 def bounded_sha256(path: Path, limit: int = 16 * 1024 * 1024, root: Path | None = None) -> str:
@@ -118,7 +128,7 @@ def allow_remote_code(snapshot: Path, scratch_home: Path | None = None) -> None:
     """Let the model's own code run, with the credentials this process can drop dropped: environment variables whose names look like secrets
     are removed (their names are recorded, never their values), the hub and transformers go offline, and HOME moves to an empty scratch
     directory so `~/.ssh` and `~/.config` are not where the code looks. Every .py file under the snapshot is listed with its sha256."""
-    scrubbed = sorted(k for k in os.environ if CREDENTIAL_NAME.search(k))
+    scrubbed = credential_names(os.environ)
     for k in scrubbed:
         del os.environ[k]
     os.environ["HF_HUB_OFFLINE"] = "1"
