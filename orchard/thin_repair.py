@@ -16,12 +16,21 @@ What. `run_round` (called by the supervisor's repair rounds when the run has `--
    contain) and writes the port;
 4. a refused reply gets one more request with the reason added and a cooler sampling profile; a second refusal hands the round to the agent loop.
 
+History (issue 783). Each spliced round is recorded in `thin_repair_history.json` in the stage directory: the function, the error the round was
+asked to fix, the failing line and the diff it spliced. A request after the first carries the last rounds (`history_section`), so the coder
+sees what was already tried. When the last two records are consecutive rounds on one function and their errors differ, each fix exposed another
+fault: a third request on that function is not sent. The round goes to the agent loop with a note that names the function and the functions that
+call it (`history_stop`). The stage directory is moved aside when an attempt escalates, so the history belongs to one attempt.
+
 Bounds: `MAX_ROUNDS` thin rounds per attempt, `REQUESTS_PER_ROUND` requests per round, a prompt-character cap per round, the stub token cap and the
 request timeout of orchard/thin_port.py. The result holds no reply text.
 """
 from __future__ import annotations
 
 import ast
+import difflib
+import hashlib
+import json
 import re
 import time
 from pathlib import Path
@@ -34,6 +43,18 @@ REQUESTS_PER_ROUND = 2            # the first request and one retry after a refu
 ROUND_PROMPT_CHARS_CAP = 200_000  # all requests of one round together (one request is about 20K characters)
 FAILED_LINE_MAX = 2_000
 PORT_NAME = thin_port.PORT_NAME
+
+HISTORY_NAME = "thin_repair_history.json"
+HISTORY_FILE_MAX = 1 << 20        # bytes read from the history file; a larger file counts as no history
+HISTORY_KEEP = 6                  # records kept in the file (the newest)
+HISTORY_IN_REQUEST = 4            # records a request carries (the newest of those kept)
+HISTORY_DIFF_MAX = 2_500          # characters of one diff
+HISTORY_CODE_MAX = 400            # characters of one failing line
+HISTORY_MESSAGE_MAX = 300         # characters of one error message
+HISTORY_SECTION_MAX = 9_000       # characters of the whole section: the oldest records are left out until it fits
+STOP_AFTER = 2                    # consecutive spliced rounds on one function, with a changed error, after which a third is not sent
+_IDENT = re.compile(r"[A-Za-z_]\w{0,119}")
+_ETYPE = re.compile(r"[A-Za-z_][\w.]{0,60}")
 
 # The check's failure text: `the port failed at '<op>': "[port_model.py:<line>: <code>] <ErrorType>: <message>"` (the quote is " or ').
 _FAILED = re.compile(r"^the port failed at '(?P<op>[A-Za-z_]\w{0,40})': (?P<q>[\"'])\[(?P<file>[\w./-]{1,80}\.py):(?P<line>\d{1,6}): "
@@ -131,6 +152,8 @@ class Round:
     prompt_chars: int = 0
     completion_tokens: int = 0
     reason: str = ""
+    note: str = ""                   # for the agent loop, when the history stopped the thin repair of a function
+    diff_sha256: str = ""            # sha256 of the diff a spliced round recorded; the ledger carries it
 
 
 def parse_failed(text) -> Failure | None:
@@ -222,6 +245,104 @@ def hint_for(failure: Failure, port_text: str) -> str | None:
     return None
 
 
+# ---- what earlier rounds did (issue 783) -----------------------------------------------------------------------------------------------
+
+def load_history(stage_dir) -> list:
+    """The records of the earlier thin rounds of this attempt, oldest first, with every text field cut to its cap. A file that is absent, too
+    large, invalid JSON, anything other than a list of records with the expected types, or longer than a run can have written counts as no history: the file
+    is advice to the coder, and a round without it works as before."""
+    try:
+        data = safeio.read_json(Path(stage_dir) / HISTORY_NAME, max_bytes=HISTORY_FILE_MAX, expect=list)
+    except (safeio.SafeReadError, OSError, ValueError, RecursionError):
+        return []
+    if not isinstance(data, list) or len(data) > 4 * HISTORY_KEEP:
+        return []
+    out = []
+    for rec in data:
+        if not isinstance(rec, dict) or set(rec) != {"round", "function", "error_type", "line", "code", "message", "diff"}:
+            return []
+        rnd, line = rec["round"], rec["line"]
+        if not all(isinstance(rec[k], str) for k in ("function", "error_type", "code", "message", "diff")):
+            return []
+        if any(isinstance(x, bool) or not isinstance(x, int) or not 0 <= x <= 1_000_000 for x in (rnd, line)):
+            return []
+        if not _IDENT.fullmatch(rec["function"]) or not _ETYPE.fullmatch(rec["error_type"]):
+            return []
+        out.append({"round": rnd, "function": rec["function"], "error_type": rec["error_type"], "line": line,
+                    "code": rec["code"][:HISTORY_CODE_MAX], "message": rec["message"][:HISTORY_MESSAGE_MAX], "diff": rec["diff"][:HISTORY_DIFF_MAX]})
+    return out[-HISTORY_KEEP:]
+
+
+def function_diff(before: str, after: str, function: str) -> str:
+    """A unified diff of the top-level function `function` between two versions of the port, cut at HISTORY_DIFF_MAX."""
+    old = stub_prompts.function_source(before, function).splitlines()
+    new = stub_prompts.function_source(after, function).splitlines()
+    text = "\n".join(difflib.unified_diff(old, new, "before", "after", lineterm="", n=2))
+    return text if len(text) <= HISTORY_DIFF_MAX else text[:HISTORY_DIFF_MAX - 12] + "\n... (cut)"
+
+
+def save_history(stage_dir, history: list, record: dict) -> None:
+    """Append `record` to the history file (the newest HISTORY_KEEP are kept). The port is already written when this runs, so a write that
+    fails loses the advice and nothing else."""
+    try:
+        data = json.dumps((history + [record])[-HISTORY_KEEP:], sort_keys=True, separators=(",", ":"))
+        safeio.atomic_write(Path(stage_dir) / HISTORY_NAME, data.encode("utf-8"), mode=0o644)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def history_section(history: list) -> str:
+    """The request text for the earlier rounds, or "" when there are none. The oldest records are left out until the text fits
+    HISTORY_SECTION_MAX."""
+    records = history[-HISTORY_IN_REQUEST:]
+    head = ("## What earlier thin repair rounds did\n"
+            "Each round below changed a function to fix the error shown, and the check then failed again. Do not repeat a change an earlier "
+            "round made. When the same function appears more than once, the cause may be an assumption the whole function makes about its "
+            "arguments: read it from its first line.\n")
+    while records:
+        parts = [head]
+        for r in records:
+            parts.append(f"Round {r['round']}: `{r['function']}` failed with {r['error_type']}: {r['message']}\n"
+                         f"Failing line (port_model.py:{r['line']}): `{r['code']}`\nThe change that round made:\n```diff\n{r['diff']}\n```\n")
+        text = "\n".join(parts)
+        if len(text) <= HISTORY_SECTION_MAX:
+            return text
+        records = records[1:]
+    return ""
+
+
+def callers_of(port_text: str, function: str) -> list[str]:
+    """Names of the top-level functions of the port that call `function` (at most eight)."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    out = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name != function:
+            if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == function for n in ast.walk(node)):
+                out.append(node.name)
+    return sorted(out)[:8]
+
+
+def history_stop(history: list, function: str, current_etype: str, port_text: str) -> tuple[str, str] | None:
+    """(reason, note for the agent loop) when the last STOP_AFTER records are consecutive rounds on `function` whose errors differ, else None."""
+    last = history[-STOP_AFTER:]
+    if len(last) < STOP_AFTER or any(r["function"] != function for r in last):
+        return None
+    if any(b["round"] != a["round"] + 1 for a, b in zip(last, last[1:])) or len({r["error_type"] for r in last}) < 2:
+        return None
+    first, second = last[0], last[-1]
+    reason = (f"thin repair stopped for {function}: rounds {first['round']} and {second['round']} both changed it and the error changed "
+              f"({first['error_type']}, then {second['error_type']}); the failure now is {current_etype}")
+    callers = callers_of(port_text, function)
+    where = (f"its callers {', '.join('`' + c + '`' for c in callers)}" if callers else "its callers (no other function in the port calls it)")
+    note = (f"Thin repair changed `{function}` in rounds {first['round']} and {second['round']}. The error changed from {first['error_type']} to "
+            f"{second['error_type']} and then to {current_etype}, so each fix exposed another fault. Read `{function}` together with {where} "
+            f"and correct them as one unit, starting from the first line of each.")
+    return reason, note
+
+
 def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model: str, sampling: dict, thinking: bool = False,
               sheet=None, clock=time.time) -> Round:
     """One thin repair round. Never raises for a coder or input problem; the status says what happened."""
@@ -251,6 +372,9 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
             return Round("fallback", function=function, etype=failure.etype,
                          reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
         via, function = function, callers[0]
+    history = load_history(stage_dir)
+    if stop := history_stop(history, function, failure.etype, text):
+        return Round("fallback", function=function, etype=failure.etype, reason=stop[0][:300], note=stop[1])
     try:
         if sheet is None:
             sheet = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
@@ -263,7 +387,8 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     except (op_cheats.SheetError, KeyError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
         return Round("fallback", function=function, etype=failure.etype, reason=f"the request cannot be built ({exc.__class__.__name__})")
     hint = hint_for(failure, text)
-    base_user = request["user"] + (f"\n\n## Hint for this error ({failure.etype})\n{hint}" if hint else "")
+    past = history_section(history)
+    base_user = request["user"] + (f"\n\n{past}" if past else "") + (f"\n\n## Hint for this error ({failure.etype})\n{hint}" if hint else "")
     base = {**sampling, "max_tokens": min(sampling.get("max_tokens", thin_port.STUB_MAX_TOKENS), thin_port.STUB_MAX_TOKENS)}
     url = endpoint.rstrip("/") + "/chat/completions"
     out = thin_port.Outcome("done")
@@ -294,7 +419,12 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
                 reason = str(exc)[:200]
         if new is not None:
             thin_port._write_port(port_dir, new)
-            return _round("spliced", out, function, failure, hint, "")
+            diff = function_diff(text, new, function)
+            save_history(stage_dir, history, {"round": k, "function": function, "error_type": failure.etype, "line": failure.line,
+                                               "code": failure.code[:HISTORY_CODE_MAX], "message": failure.message[:HISTORY_MESSAGE_MAX], "diff": diff})
+            done = _round("spliced", out, function, failure, hint, "")
+            done.diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+            return done
         refusal, was_capped = reason, reason == thin_port.CAPPED_REASON
     return _round("refused", out, function, failure, hint, refusal or "")
 
