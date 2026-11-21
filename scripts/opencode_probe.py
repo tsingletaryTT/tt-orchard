@@ -64,6 +64,13 @@ The instructions below are otherwise the same.
 SANDBOX_PATH_TAIL = "/usr/local/bin:/usr/bin:/bin"
 ETC_FILES = ("resolv.conf", "ssl", "ca-certificates", "passwd", "group", "hosts", "ld.so.cache", "ld.so.conf", "ld.so.conf.d",
              "localtime", "alternatives", "nsswitch.conf", "ca-certificates.conf")
+# Tools for the measured attempts. The pre-registration says the agent has file and shell tools only. Found with a logging proxy on 2026-11-21
+# (the request's tool list; see the run log): `tools.question`, `.subagent`, `.execute`, `.webfetch` and `.websearch` set to false remove those tools;
+# `tools.skill` does nothing; with `execute` off, eight `opencode_*` tools (sessions, worktrees, MCP resources) appear and a `permission` deny of
+# `opencode_*` removes seven of them. `skill` and `opencode_worktree_remove` stay in the list whatever is set, so they are denied by permission:
+# the model is offered them and a call is refused. No skills exist in the attempt's project, so `skill` has nothing to load.
+TOOLS_OFF = ("webfetch", "websearch", "question", "subagent", "execute")
+PERMISSION = {"opencode_*": "deny", "skill": "deny", "opencode_worktree_remove": "deny", "opencode_worktree_create": "deny"}
 FORBIDDEN_NAMES = ("tidepool",)          # a transcript that names a model outside the Tenstorrent provider is not a valid attempt
 
 
@@ -116,7 +123,7 @@ def build_env(adir: Path, meta: Path, sim: str | None) -> dict:
 
 
 def write_config(meta: Path, *, endpoint: str, model: str, temperature, top_p, steps: int, max_tokens: int, instructions: str,
-                 seed=None, skill_tool: bool = False, skill_paths=None) -> Path:
+                 seed=None, skill_tool: bool = False, skill_paths=None, tools_off=None, permission=None, agent_build_extra=None) -> Path:
     """opencode.json for one attempt: only the Tenstorrent provider is enabled, so there is no fallback to a hosted model."""
     ref = f"{PROVIDER}/{model}"
     # `temperature: true` is a capability flag: without it opencode sends no temperature to a model it does not know, whatever
@@ -149,8 +156,13 @@ def write_config(meta: Path, *, endpoint: str, model: str, temperature, top_p, s
         "share": "disabled", "update": "disable",
         # The orchard agent has shell, read_file and write_file. OpenCode adds grep, glob and edit (kept: they are its own toolset) and also
         # `question`, `subagent`, `execute` and `skill`, which are switched off so an attempt is one agent with file and shell tools.
-        "tools": {"webfetch": False, "websearch": False, "question": False, "subagent": False, "execute": False, "skill": bool(skill_tool)},
+        "tools": {**{name: False for name in (tools_off if tools_off is not None else TOOLS_OFF)}, **({"skill": True} if skill_tool else {})},
     }
+    perm = PERMISSION if permission is None else permission
+    if perm and not skill_tool:
+        cfg["permission"] = perm
+    if agent_build_extra:
+        cfg["agent"]["build"].update(agent_build_extra)
     if skill_paths:
         cfg["skills"] = list(skill_paths)
     path = meta / "home" / ".config" / "opencode" / "opencode.json"
@@ -200,7 +212,8 @@ def summarize(events: list) -> dict:
 
 def run_opencode(adir: Path, meta: Path, *, system: str, user: str, endpoint: str, model: str, temperature, top_p, seed,
                  steps: int, max_tokens: int, wall_deadline_s: float, control=None, title: str = "attempt",
-                 claude_config: bool = False, mapping: bool = True, skill_tool: bool = False, skill_paths=None) -> dict:
+                 claude_config: bool = False, mapping: bool = True, skill_tool: bool = False, skill_paths=None, tools_off=None,
+                 permission=None, agent_build_extra=None) -> dict:
     """One sandboxed `opencode run`. Returns a dict: exit code, wall seconds, why it stopped, paths of the raw output."""
     adir, meta = Path(adir).resolve(), Path(meta).resolve()
     meta.mkdir(parents=True, exist_ok=True)
@@ -223,7 +236,7 @@ def run_opencode(adir: Path, meta: Path, *, system: str, user: str, endpoint: st
     if not claude_config:
         env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
     write_config(meta, endpoint=endpoint, model=model, temperature=temperature, top_p=top_p, steps=steps, max_tokens=max_tokens,
-                 instructions=str(skill), seed=seed, skill_tool=skill_tool, skill_paths=skill_paths)
+                 instructions=str(skill), seed=seed, skill_tool=skill_tool, skill_paths=skill_paths, tools_off=tools_off, permission=permission, agent_build_extra=agent_build_extra)
     model_port = int(urlsplit(endpoint).port or 80)
     # The private server `run --standalone` starts needs a TCP bind, which the sandbox denies, so the server is started here as the
     # first sandboxed process (it may bind one port) and the client is a second one (it may connect to that port). The commands the

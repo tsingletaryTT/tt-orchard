@@ -198,8 +198,8 @@ What the transcripts show (read for harness traps; model behaviour is left alone
   kept in mind when reading `center` and `row_sum` pass counts as a measure of a harness.
 - The orchard `center` attempt (the control) is the same failure. The orchard `add` attempt wrote `kernel.py` twice (the second write after the
   automatic check output) and ran the check once itself.
-- No harness trap needed a change. The OpenCode step limit forces a final text at step 40, so a 40-step run always ends with `stop`; the runner labels
-  it `turns` (the count is compared with the limit).
+- The two transcripts showed no trap. One was found afterwards, from the tool list in the request (next section). The OpenCode step limit forces a final
+  text at step 40, so a 40-step run always ends with `stop`; the runner labels it `turns` (the count is compared with the limit).
 
 Changes after the pilot and before the batch, none touching what an attempt does: the driver takes the model server's counters (`/metrics`: prompt tokens
 from cache and computed, generated tokens, request prefill, decode and queue seconds, replies cut at the 4096 cap) and `/proc/loadavg` before and after every
@@ -211,6 +211,35 @@ attempts (14 pairs), the 10 pairs of the plan plus `center` 5 and 6 and `row_sum
 attempts took 4 to 5 minutes each, so the projection is more than the likely time. Start: a second suite (`suite-main-final`, started about 19:49Z, expected
 to end near 20:06Z) is running, so the batch waits for its end and no batch attempt overlaps it. The wait is used for the skill-discovery test, which
 compares no wall times. If another suite starts during the batch, its window is flagged on the attempts it overlaps.
+
+## Before the batch: the tool list OpenCode offered (found 2026-11-21 19:58Z, after the pilot, before any batch attempt)
+
+The plan says OpenCode's extra tools are switched off. The skill-discovery runs showed calls to tools I had not expected, so the request's tool list was
+read again through the logging proxy under the pilot's configuration. It held **15 tools**: `edit`, `glob`, `grep`, `read`, `shell`, `write`, `skill`
+and eight `opencode_*` tools (`opencode_list_mcp_resources`, `opencode_models`, `opencode_read_mcp_resource`, `opencode_session_move`,
+`opencode_session_rename`, `opencode_worktree_create`, `opencode_worktree_list`, `opencode_worktree_remove`). The earlier check of the tool list (10 tools:
+the six plus `question`, `subagent`, `skill`, `execute`) had been made before the switches were added, and the list was not read again after that. The two OpenCode
+pilot attempts ran with the 15; they used `read`, `glob`, `grep`, `write` and `shell` only.
+
+What each setting does to the list (one request each, proxy log, 2026-11-21 19:57Z to 20:00Z):
+
+| setting | tools sent |
+|---|---|
+| no `tools` key | the six, `skill`, `question`, `subagent`, `execute`, `webfetch`, `websearch` (12) |
+| `webfetch`, `websearch` off | the six, `skill`, `question`, `subagent`, `execute` (10) |
+| plus `skill` off | unchanged: `tools.skill: false` does nothing |
+| plus `question` off | `question` removed |
+| plus `question`, `subagent`, `execute` off | those removed, and the eight `opencode_*` tools appear (15 with `skill`) |
+| the line above plus a `permission` deny of `opencode_*`, `skill` and the two worktree tools | seven `opencode_*` tools removed; `skill` and `opencode_worktree_remove` remain (8) |
+| agent-level `tools` map or agent-level `permission`, or naming each tool in `permission` | no further change |
+
+With `execute` on, the `opencode_*` tools seem to be reached through it; with it off they are listed one by one. The batch setting is the last-but-one row
+(`webfetch`, `websearch`, `question`, `subagent`, `execute` off; `permission` deny of `opencode_*`, `skill`, `opencode_worktree_remove`,
+`opencode_worktree_create`): **8 tools offered**, `edit`, `glob`, `grep`, `read`, `shell`, `write`, `skill` and `opencode_worktree_remove`. Called on purpose, `skill`
+returns "Unable to load skill default" (the project has no skills) and `opencode_worktree_remove` returns "not a worktree of this project"; the permission deny
+does not stop the call from running, and neither tool can do anything in an attempt directory. `write` and `shell` work under this setting. Orchard's agent has three
+tools; OpenCode's has six working ones plus those two that only return errors. This replaces the "ten tools, four switched off" statement under Differences. The
+discovery test used its own setting (`skill` tool on); its tool counts include a few calls to tools that are not offered, which return errors.
 
 ## Batch
 
