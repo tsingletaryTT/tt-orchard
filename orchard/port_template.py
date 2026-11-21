@@ -1707,6 +1707,23 @@ def _rope_dict(section: dict) -> dict:
     return rope if isinstance(rope, dict) else {}
 
 
+def rope_keyed_by_layer_type(section: dict) -> bool:
+    """True when `rope_parameters` holds one rope block per layer type (`{"full_attention": {...}, "sliding_attention": {...}}`, the transformers 5
+    form that `microsoft/Aion-1.0-Instruct-2.3B` uses) and not one flat block. A flat block has plain values (`rope_type`, `rope_theta`, `factor`);
+    a layer-type-keyed one has only dict values. Read as a flat block it has no `rope_type` and no `rope_theta`, so the generator wrote the default
+    type with theta 10000.0 (issue 790)."""
+    rope = section.get("rope_parameters") if isinstance(section, dict) else None
+    return isinstance(rope, dict) and bool(rope) and all(isinstance(k, str) and isinstance(v, dict) for k, v in rope.items())
+
+
+def sliding_window_of(section: dict) -> int | None:
+    """The sliding window of the layers marked `sliding_attention`, or None when no layer is marked or the window is not a positive whole number. A
+    `sliding_window` in a config whose `layer_types` marks no layer as sliding does not limit any layer."""
+    layer_types = section.get("layer_types") if isinstance(section, dict) else None
+    window = _whole(section, "sliding_window")
+    return window if isinstance(layer_types, list) and "sliding_attention" in layer_types and window else None
+
+
 def _rotary_plan(section: dict, hidden: int):
     """({head_dim, rot, theta}, None) when the config gives the settings of the default rotary embedding, else (None, why). `rot` is the number of
     columns of each head that rotate: int(head_dim * partial_rotary_factor), the way the reference computes it. The factor is read from
@@ -1716,6 +1733,8 @@ def _rotary_plan(section: dict, hidden: int):
     if not head_dim:
         return None, "the config gives neither head_dim nor num_attention_heads"
     rope = _rope_dict(section)
+    if rope_keyed_by_layer_type(section):
+        return None, f"rope_parameters is keyed by layer type ({', '.join(sorted(rope))}); one rotary table for every layer would be wrong"
     rope_type = rope.get("rope_type", rope.get("type", "default")) if rope else "default"
     if rope_type != "default":
         return None, f"rope_type is {rope_type!r}, not the default"
@@ -1750,6 +1769,13 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     if factor is not None and factor != 1:
         return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
+    if rope_keyed_by_layer_type(section):
+        return None, (f"{kcls}: rope_parameters is keyed by layer type ({', '.join(sorted(rope))}); the generated attention builds one rotary table "
+                      "for every layer")
+    window = sliding_window_of(section)
+    if window:
+        return None, (f"{kcls}: layer_types lists sliding_attention with sliding_window {window}; the generated attention is causal over the whole "
+                      "prefix in every layer")
     rope_type = rope.get("rope_type", rope.get("type", "default")) if isinstance(rope, dict) else "default"
     if rope_type != "default":
         return None, f"{kcls}: rope_type is not default"
