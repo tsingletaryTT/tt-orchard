@@ -66,6 +66,8 @@ A config the generator cannot follow still leaves a named stub, and the reason n
   a port with no window, and the later tests failed on a stub).
 - A tiny port against a torch forward at 48 tokens, above the yarn original length of 16 and above a window of 8, on one and two chips, through two decode
   steps; and windows of 1, 2, 31, 40 and 64 at 40 tokens.
+- Test run: 15,354 passed and 60 skipped, 0 failed, over the 303 test files that mention the generator, the ratchets, the README, the version fragments or
+  the docs (about 18 minutes with `-n 4`). The full suite was not run.
 - Mutations (all caught): 3 on the refusals and the matchers, 13 on the tables, 13 on the window, 3 on the generated mark, 6 on hostile values and 6 on echoed
   values.
 
