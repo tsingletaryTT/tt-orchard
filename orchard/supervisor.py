@@ -860,8 +860,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
 PRECHECK_OUTPUT_MAX = 64 * 1024
 # The CPU run of the port against the torch stand-in of ttnn (issue 697, `port_check.py --cpu N`): load, one prefill and one decode step on a
-# checkpoint of at most 4 GiB (the template's CPU_RUN_MAX_BYTES). Ten minutes covers a cold torch import and a load of that size; a run that
-# takes longer gives no verdict and the board check runs.
+# checkpoint of at most the template's `cpu_run_limit` (a share of the host's available memory, between 4 and 12 GiB; issue 782). Ten minutes
+# covers a cold torch import and a load of that size; a run that takes longer gives no verdict and the board check runs.
 CPU_RUN_DEADLINE_S = 600.0
 CPU_RUN_NO_VERDICT = 3              # the template's CPU_NO_VERDICT
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
@@ -5825,7 +5825,8 @@ class Supervisor:
             text = ""
         line = next((ln for ln in reversed(text.splitlines()) if ln.startswith(("CPU run passed", "CPU run gave no verdict"))), "")
         if code == 0 and not timed_out:
-            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3))
+            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3),
+                               size_limit=port_repair.safe_text(line, self._homes())[:600])
         else:
             self.ledger.append("decision", n, decision="CPU run gave no verdict", returncode=code, timed_out=bool(timed_out),
                                reason=port_repair.safe_text(line, self._homes())[:600], note="the board check runs as it would have")
