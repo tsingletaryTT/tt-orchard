@@ -28,6 +28,13 @@ from orchard import model_config as mc
 TILE = 32
 EXPERT_MASK_LIMITS = (256, 512)
 VOCAB_PER_DIE_LIMIT = 65_536
+# What a generated port says about how its next token is chosen, and the stage 2 check's sentence when that makes the vocabulary check not
+# applicable. The generator (orchard/port_template.py) writes the constant; the check template (orchard/skills/full-port-templates/port_check.py)
+# and the gate (orchard/full_port.py) read it. The template holds literal copies because it runs where `orchard` cannot be imported, and a test
+# (tests/test_port_check_vocab_not_applicable.py) keeps the copies equal.
+TOKEN_CHOICE_HOST = "host-row"
+VOCAB_NOT_APPLICABLE_REASON = ("the port returns the whole vocabulary row to the host, and the check and the server choose the next token by "
+                               "argmax over that row there, so no per-die column index is used on this path")
 # A hidden size of this many tiles was rejected by a boundary kernel (issue 183, published Blackhole porting notes).
 REJECTED_HIDDEN_TILES = (3,)
 

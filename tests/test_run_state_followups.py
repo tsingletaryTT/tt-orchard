@@ -66,7 +66,7 @@ def pin_stage_2(tmp_path, orchard_dir):
     sd = run / "stages" / "2"
     sd.mkdir(parents=True)
     entries = []
-    stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(orchard_dir)),
+    stub = SimpleNamespace(port_check_positions=full_port.DEFAULT_POSITIONS, inputs={"model": str(run)}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(orchard_dir)),
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
     return stub, sd, entries

@@ -201,15 +201,37 @@ def write_references(adir: Path, references: list[dict]) -> list[dict]:
     return out
 
 
-def write_cheat_sheet(adir: Path) -> bool:
+def write_cheat_sheet(adir: Path, *, recipes: bool = False) -> bool:
     """Render the shipped TT-Lang cheat sheet (orchard/op_cheats.py) into the attempt directory. False when it cannot be read: the attempt
-    then runs without it and the prompt does not name it (`cheat_line`)."""
+    then runs without it and the prompt does not name it (`cheat_line`).
+
+    With `recipes` the sheet is followed by the recipes section (`--cheat-sheet-recipes on`); the sheet's own bytes are the same. A run
+    that asked for recipes and cannot have them stops: it raises ProbeBlocked, since an attempt that silently ran without them would
+    be a measurement of the other condition."""
     try:
-        text = op_cheats.render(op_cheats.load_sheet(op_cheats.TTLANG_SHEET))
+        sheet = op_cheats.load_sheet(op_cheats.TTLANG_SHEET)
+        text = op_cheats.render_with_recipes(sheet) if recipes else op_cheats.render(sheet)
         safeio.atomic_write(Path(adir) / CHEAT_NAME, text.encode("utf-8"), mode=0o644)
         return True
+    except op_cheats.RecipeError as exc:
+        if recipes:
+            raise ProbeBlocked(f"the cheat sheet's recipes cannot be used: {exc}") from None
+        return False
     except (op_cheats.SheetError, OSError, ValueError):
         return False
+
+
+def cheat_recipes_record() -> dict:
+    """What a run with recipes on records about them (the report header and each attempt's provenance): the recipe names, the sha256 of
+    the recipes file and of the verification records, and the records' date. Raises op_cheats.RecipeError when the recipes cannot be
+    used, so `main` can refuse before any attempt directory exists."""
+    data, verified = op_cheats.load_recipes(), op_cheats.load_verified()
+    problems = op_cheats.verified_problems(data, verified)
+    if problems:
+        raise op_cheats.RecipeError("; ".join(problems[:5]))
+    return {"on": True, "recipes": [r["name"] for r in data["recipes"]],
+            "data_sha256": _sha256(op_cheats.RECIPES), "verified_sha256": _sha256(op_cheats.RECIPES_VERIFIED),
+            "verified_date": verified.get("date")}
 
 
 def cheat_line(adir: Path) -> str:
@@ -226,7 +248,7 @@ def attempt_user_message(op: str, adir: Path) -> str:
 
 
 def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
-                    references: list[dict] | None = None) -> list[dict]:
+                    references: list[dict] | None = None, cheat_recipes: bool = False) -> list[dict]:
     """Fill an EMPTY attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env).
     Returns the reference files written, with their sha256 (write_references).
 
@@ -245,7 +267,7 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
     for name in TEMPLATE_FILES:
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
-    write_cheat_sheet(adir)
+    write_cheat_sheet(adir, recipes=cheat_recipes)
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     safeio.atomic_write(adir / "check_config.json", json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
                                                                 "tt_lang": facts}, indent=2) + "\n", mode=0o644)
@@ -608,13 +630,18 @@ def set_measures(sets: list) -> dict:
 
 
 def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None,
-               sampling: dict | None = None, references: list[dict] | None = None, skills: dict | None = None) -> dict:
+               sampling: dict | None = None, references: list[dict] | None = None, skills: dict | None = None,
+               cheat_recipes: dict | None = None) -> dict:
     """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for, the
-    reference files it was given (name, source, path and sha256 of each) and the skills freshness check (each
-    source's state and shas, and whether a stale source was allowed)."""
-    return {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
-            "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
-            "sampling": sampling, "references": references, "skills": skills}
+    reference files it was given (name, source, path and sha256 of each), the skills freshness check (each
+    source's state and shas, and whether a stale source was allowed) and, only when the cheat sheet carried recipes,
+    which recipes and the hashes of their files."""
+    block = {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
+             "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
+             "sampling": sampling, "references": references, "skills": skills}
+    if cheat_recipes is not None:
+        block["cheat_recipes"] = cheat_recipes
+    return block
 
 
 def _shipped_hashes(op: str) -> dict:
@@ -1121,7 +1148,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
                  tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
                  seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
                  coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None, hw_status=None,
-                 _box: dict | None = None) -> dict:
+                 cheat_recipes: bool = False, _box: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
     `hw_policy` (hwtool.HwPolicy) offers the agent the `hardware_check` tool, which runs its current kernel.py on one
     leased chip under the policy's limits with `shared_python`; None or a policy with 0 calls offers no tool. The calls
@@ -1132,7 +1159,8 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
     sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
     adir = Path(probe_dir) / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references)
+    copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references, cheat_recipes=cheat_recipes)
+    recipes_record = cheat_recipes_record() if cheat_recipes else None
     control = ProbeControl(wall_s=wall_s)
     ledger = Ledger(adir / "ledger.jsonl")
     hwcheck = None
@@ -1181,7 +1209,8 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         "agent_hw": hwcheck.summary() if hwcheck is not None else {"enabled": False},
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
-                                 sampling=dict(sampling), references=copied or None, skills=skills),
+                                 sampling=dict(sampling), references=copied or None, skills=skills,
+                                 cheat_recipes=recipes_record),
     }
     _save_attempt(adir, attempt)
     return attempt
@@ -2006,6 +2035,10 @@ def _reference_lines(header: dict) -> list[str]:
         lines += ["", f"Worked-kernel library mode: {lib.get('mode')}."]
         if lib.get("note"):
             lines.append(str(lib["note"]))
+    recipes = header.get("cheat_recipes")
+    if isinstance(recipes, dict) and recipes.get("on") is True:
+        lines += ["", f"Cheat sheet recipes: on ({', '.join(str(n) for n in recipes.get('recipes', []))}); recipes file sha256 "
+                      f"{recipes.get('data_sha256')}, records of {recipes.get('verified_date')} sha256 {recipes.get('verified_sha256')}."]
     return lines + [""] + ttlang_reference.report_lines(header)
 
 
@@ -2437,6 +2470,18 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             return refuse(f"--staged: no stage table for op {args.op!r}; the staged ops are {', '.join(kernelstaged.STAGES)}")
         if getattr(args, "phase", "sim") != "sim":
             return refuse("--staged runs the simulator only: use --phase sim")
+    recipes_arg = getattr(args, "cheat_sheet_recipes", None) or "off"
+    if recipes_arg not in ("on", "off"):
+        return refuse(f"--cheat-sheet-recipes takes on or off; {recipes_arg!r} is neither")
+    cheat_recipes = recipes_arg == "on"
+    recipes_record = None
+    if cheat_recipes:
+        if staged:
+            return refuse("--cheat-sheet-recipes on is not offered with --staged: the staged probe writes its own attempt directories")
+        try:
+            recipes_record = cheat_recipes_record()
+        except op_cheats.RecipeError as exc:
+            return refuse(f"--cheat-sheet-recipes on: the recipes cannot be used: {exc}")
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
@@ -2556,7 +2601,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     f"{attempts} attempts per temperature ({temps}): {attempts * n_temps} in total")
         say(f"kernel probe {probe_id}: op {args.op}, {how_many}, coder {model} at {safe_url(endpoint)}")
         records: list[dict] = []
-        attempt_fn, attempt_extra = run_attempt, {}
+        attempt_fn, attempt_extra = run_attempt, ({"cheat_recipes": True} if cheat_recipes else {})
         if staged:                                          # staged construction (orchard/kernelstaged.py, issue 176)
             attempt_fn = kernelstaged.run_attempt
             attempt_extra = {"stage_turns": getattr(args, "stage_turns", None),
@@ -2641,6 +2686,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["ttlang_consistency"] = consistency_record
             header["reference_source"] = reference_source
             header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
+            if recipes_record is not None:
+                header["cheat_recipes"] = recipes_record
             header["skills"] = skills_record
             header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}
             write_report(probe_dir, records, header)

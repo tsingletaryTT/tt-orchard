@@ -47,12 +47,14 @@ MIN_TOKENS = SWAP_MIN_TOKENS
 DEFAULT_POSITIONS = 64                # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; a run that names no cap uses it
 MIN_POSITIONS = MIN_TOKENS            # the gate refuses a record that compares fewer positions, so a lower cap could never pass
 POSITIONS_LIMIT = 8192                # choice: the Olmo-Hybrid-7B port scored 4,000 positions in under 6 minutes including its load (issue 731), so 8,192 is about
+MIN_FIDELITY_TOKENS = 16         # the lowest sampled reference stage 1 may be asked for; reference_gate.py FIDELITY_MIN, a test keeps them equal
                                       # 12 minutes, inside the hardware test's 1 hour deadline; the record then holds about 0.6 MB (ids and log-probabilities),
                                       # far below JSON_MAX. A larger cap needs its own measurement
 MIN_FREE_RUN_CHARS = 20              # choice: the same floor as the stock-runtime gate's free-run text
 MIN_FREE_RUN_WORDS = 4                # choice: a free run of one repeated word is not text
 REFERENCE_FILE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT_FILE = "stages/1/evidence/reference/prompt-ids.json"
+SAMPLED_FILE = "stages/1/evidence/reference/fidelity-ids.json"      # issue 789: stage 1's optional reference sampled at temperature 1, with a log-probability for each id
 PORT_DIR = "stages/2/port/"
 RECORD_FILE = "evidence/port-check.json"
 OUTPUT_FILE = "evidence/hw-test-output.txt"
@@ -197,6 +199,18 @@ def check_positions(value) -> int:
     return value
 
 
+def check_fidelity_tokens(value) -> int:
+    """The sampled reference length from `--fidelity-tokens` (issue 789): 0 (no sampled reference) or a whole number from MIN_FIDELITY_TOKENS to
+    POSITIONS_LIMIT, the highest cap the stage 2 check can score. A string of at most six digits is read as a number; a boolean, a float or
+    anything else is refused."""
+    if isinstance(value, str) and value.strip().isdigit() and len(value.strip()) <= 6:
+        value = int(value)
+    if type(value) is not int or not (value == 0 or MIN_FIDELITY_TOKENS <= value <= POSITIONS_LIMIT):
+        raise ValueError(f"the fidelity reference length must be 0 or a whole number from {MIN_FIDELITY_TOKENS} to {POSITIONS_LIMIT}; "
+                         f"got {_shown(value)!r}")
+    return value
+
+
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, stage: int = 2,
           expected_chips: int | None = None, entry: int | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 2 or stage 3 directory of a full port. No reasons means the result passes.
@@ -313,6 +327,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     if _ids(chip_ids) and chip_ids:
         _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
+        _sampled_fidelity_reasons(record, run_dir, stage_dir, reasons)
         _positions_reasons(record, stage_dir, ref_ids, len(chip_ids), reasons)
         _length_check_reasons(record, reasons)
         if _ids(record.get("reference_ids")) and len(record["reference_ids"]) == len(chip_ids):
@@ -525,8 +540,9 @@ def fidelity_value(ref_lp: list, chip_lp: list, scale: float = 10.0) -> float:
 
 
 def _lps(v, n: int) -> bool:
+    """`v` is a list of `n` log-probabilities: numbers a float can hold (an int of 10**400 is refused here, not at the arithmetic) and at most 0."""
     return (isinstance(v, list) and len(v) == n
-            and all(safeio.is_finite_number(x) and x <= 1e-6 for x in v))
+            and all(safeio.fits_float(x) and x <= 1e-6 for x in v))
 
 
 def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list) -> None:
@@ -546,7 +562,9 @@ def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list
     value = block.get("value")
     if block.get("tokens") != positions:
         reasons.append(f"fidelity tokens {block.get('tokens')!r} differs from the {positions} positions the record compares")
-    if not _num(value) or abs(value - fidelity_value(ref_lp, chip_lp, float(block.get("scale") or 10.0))) > FIDELITY_TOLERANCE * max(1.0, abs(value)):
+    if block.get("scale") != 10.0:
+        reasons.append(f"fidelity scale must be 10.0, got {_shown(block.get('scale'))!r}")
+    if not safeio.fits_float(value) or abs(value - fidelity_value(ref_lp, chip_lp)) > FIDELITY_TOLERANCE * max(1.0, abs(value)):
         reasons.append(f"fidelity value {value!r} differs from the {fidelity_value(ref_lp, chip_lp):.6f} the gate recomputed from the record's log-probabilities")
     f = _inside(run_dir, TOP5_FILE)
     if f is None:
@@ -561,6 +579,59 @@ def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list
     if on_disk != ref_lp:
         reasons.append(f"fidelity reference_logprobs are not the first log-probabilities of the stage 1 reference ({TOP5_FILE}): "
                        "the score was made against numbers the reference did not produce")
+
+
+def _sampled_fidelity_reasons(record: dict, run_dir: Path, stage_dir, reasons: list) -> None:
+    """The record's report-only `sampled_fidelity` block (issue 789), when it has one. A skipped block must name its reason. A scored block is
+    recomputed from its own log-probabilities, must score the smaller of the cap and the stage 1 sampled file's length, must name the sha256 the
+    file has on disk now, and its reference log-probabilities must be the file's. It never fails a run for a low value; it fails a record that
+    disagrees with itself or with the stage 1 file, since that record is evidence."""
+    block = record.get("sampled_fidelity")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        reasons.append("sampled_fidelity must be an object")
+        return
+    if block.get("status") == "skipped":
+        if not isinstance(block.get("reason"), str) or not block["reason"]:
+            reasons.append("sampled_fidelity is skipped and must say why")
+        return
+    ref_lp, chip_lp, tokens = block.get("reference_logprobs"), block.get("chip_logprobs"), block.get("tokens")
+    if type(tokens) is not int or not _lps(ref_lp, tokens) or not _lps(chip_lp, tokens) or tokens < 1:
+        reasons.append("sampled_fidelity reference_logprobs and chip_logprobs must each be `tokens` finite log-probabilities (at most 0)")
+        return
+    value = block.get("value")
+    if block.get("scale") != 10.0:
+        reasons.append(f"sampled_fidelity scale must be 10.0, got {_shown(block.get('scale'))!r}")
+    if not safeio.fits_float(value) or abs(value - fidelity_value(ref_lp, chip_lp)) > FIDELITY_TOLERANCE * max(1.0, abs(value)):
+        reasons.append(f"sampled_fidelity value {value!r} differs from the {fidelity_value(ref_lp, chip_lp):.6f} the gate recomputed from the record's log-probabilities")
+    source = block.get("source")
+    f = _inside(run_dir, SAMPLED_FILE)
+    if f is None:
+        reasons.append(f"sampled_fidelity: {SAMPLED_FILE} is not a file in the run directory, so the reference log-probabilities cannot be checked")
+        return
+    if not isinstance(source, dict) or source.get("path") != SAMPLED_FILE:
+        reasons.append(f"sampled_fidelity source.path must be {SAMPLED_FILE!r}")
+        return
+    if source.get("sha256") != _sha(f):
+        reasons.append(f"sampled_fidelity source.sha256 does not match {SAMPLED_FILE} as it is on disk")
+    try:
+        data = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict)
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{SAMPLED_FILE} is not readable JSON: {exc.reason}")
+        return
+    lps = data.get("logprobs")
+    if not isinstance(lps, list) or not all(safeio.fits_float(x) for x in lps):
+        reasons.append(f"{SAMPLED_FILE} holds no list of log-probabilities")
+        return
+    if source.get("length") != len(lps):
+        reasons.append(f"sampled_fidelity source.length {_shown(source.get('length'))} differs from the {len(lps)} log-probabilities in {SAMPLED_FILE}")
+    cap = _config_cap(stage_dir, [])
+    if cap is not None and tokens != min(len(lps), cap[0]):
+        reasons.append(f"sampled_fidelity tokens {tokens} is not the smaller of the cap {cap[0]} and the {len(lps)} sampled ids")
+    if lps[:tokens] != ref_lp:
+        reasons.append(f"sampled_fidelity reference_logprobs are not the first log-probabilities of the stage 1 sampled reference ({SAMPLED_FILE}): "
+                       "the score was made against numbers the sampled reference did not produce")
 
 
 def _config_cap(stage_dir, reasons: list):
@@ -735,9 +806,10 @@ def _vocab_cases(vocab: int, dies: int) -> list:
 def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
     """The vocabulary-per-die hazard's check (issue 183). The gate reads the vocabulary from the snapshot's own config.json, counts the
     chips in the record, and decides from those two whether the check applies: columns per die above the hazard scan's limit need a
-    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook) or `pass` with one row for each planted
-    column on each path, and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record
-    that says otherwise."""
+    `vocab_check` block. The block is `skipped` with a reason (the port has no `sample` hook), `not-applicable` (the port has no hook, declares
+    that its token is chosen on the host over the whole row, and the row it returned had the snapshot's vocabulary width: the gate checks the
+    declaration, the width, the template's sentence and the empty case list), or `pass` with one row for each planted column on each path,
+    and each row's id must equal the planted id. A wrong id fails the template run itself; the gate refuses a record that says otherwise."""
     vocab, chips = _snapshot_vocab(stage_dir), record.get("chips")
     if vocab is None or vocab <= hazards.VOCAB_PER_DIE_LIMIT:
         return                                  # one die holding the whole vocabulary is already within the limit
@@ -765,8 +837,20 @@ def _vocab_check_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: 
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 300 or cases != []:
             reasons.append(f"{name} with status skipped needs a reason of 1 to 300 characters and no cases")
         return
+    if status == "not-applicable":
+        choice, width = block.get("token_choice"), block.get("row_length")
+        if choice != hazards.TOKEN_CHOICE_HOST:
+            reasons.append(f"{name}.token_choice is {str(choice)[:40]!r}; status not-applicable needs {hazards.TOKEN_CHOICE_HOST!r}, the port's "
+                           "declaration that its token is chosen on the host over the whole row")
+        if type(width) is not int or width != vocab:
+            reasons.append(f"{name}.row_length is {str(width)[:40]!r}; status not-applicable needs a row of the snapshot's {vocab} columns")
+        if block.get("reason") != hazards.VOCAB_NOT_APPLICABLE_REASON:
+            reasons.append(f"{name}.reason is not the sentence the check writes for status not-applicable")
+        if cases != []:
+            reasons.append(f"{name}.cases must be empty for status not-applicable")
+        return
     if status != "pass":
-        reasons.append(f"{name}.status must be pass or skipped, got {status!r}")
+        reasons.append(f"{name}.status must be pass, skipped or not-applicable, got {str(status)[:40]!r}")
         return
     if not isinstance(cases, list) or len(cases) > 64 or not all(isinstance(r, dict) for r in cases):
         reasons.append(f"{name}.cases must be a list of at most 64 objects")

@@ -38,6 +38,7 @@ exits with code 3. The line holds the class name only: an exception message can 
 import importlib.util
 import inspect
 import math
+import os
 import re
 import sys
 import tempfile
@@ -188,12 +189,36 @@ def dense_shim(snapshot: str):
     return (shim, raw) if shim.needs_dense_shim(raw) else (None, None)
 
 
-_ROUTE = {"gate": None, "scratch": None}
+_ROUTE = {"gate": None, "scratch": None, "audit_dir": None}
+
+
+def atomic_write_json(path, data):
+    """Write `data` as JSON to `path` in one step: the text goes to a new file beside it (never following a link) and `os.replace` puts it in place,
+    so a kill at any moment leaves the old file or the whole new one and no half of a file. Mode 0o644. Standard library only: this script runs
+    under `python -I` in the reference interpreter, where `orchard.safeio` cannot be imported."""
+    import json
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        os.fchmod(fd, 0o644)                                  # the process umask can only take bits away; the mode is the same every time
+        os.write(fd, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
+    os.close(fd)
+    os.replace(tmp, path)
+    return path
 
 
 def remote_code_route():
     """Stage 1's reference gate loaded from the shipped template (the same file, so the same scrub, audit and hash rules), with its scratch
-    home and audit directory pointed at a temporary directory so nothing is written beside the shipped template. Loaded once."""
+    home pointed at a temporary directory so nothing is written beside the shipped template. Its audit of the model's files goes to the directory
+    named on the command line when there is one (the supervisor reads it afterwards, whatever became of this process) and else to the temporary
+    directory. The audit is written with `atomic_write_json`: stage 1's own writer is not atomic. Loaded once."""
     if _ROUTE["gate"] is None:
         path = Path(__file__).resolve().parent.parent / "reference-gate-templates" / "reference_gate.py"
         spec = importlib.util.spec_from_file_location("reference_gate_for_construction", path)
@@ -201,7 +226,8 @@ def remote_code_route():
         spec.loader.exec_module(gate)
         scratch = tempfile.TemporaryDirectory(prefix="orchard-construction-")
         gate.HOME_SCRATCH = Path(scratch.name) / "home"
-        gate.EVIDENCE = Path(scratch.name) / "evidence"
+        gate.EVIDENCE = Path(_ROUTE["audit_dir"]) if _ROUTE["audit_dir"] else Path(scratch.name) / "evidence"
+        gate.write_json = atomic_write_json
         _ROUTE.update({"gate": gate, "scratch": scratch})
     return _ROUTE["gate"]
 
@@ -271,9 +297,10 @@ def build_model(snapshot: str):
 
 def main(argv) -> int:
     import json
-    if len(argv) != 2:
-        print("usage: effective_construction.py SNAPSHOT_DIR", file=sys.stderr)
+    if len(argv) not in (2, 3) or (len(argv) == 3 and not os.path.isabs(argv[2])):
+        print("usage: effective_construction.py SNAPSHOT_DIR [ABSOLUTE_AUDIT_DIR]", file=sys.stderr)
         return 2
+    _ROUTE["audit_dir"] = argv[2] if len(argv) == 3 else None
     try:
         result = describe(build_model(argv[1]))
         report = remote_code_report()

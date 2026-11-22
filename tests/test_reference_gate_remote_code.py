@@ -100,6 +100,42 @@ def test_credentials_in_the_environment_are_scrubbed_and_named(tmp_path, monkeyp
     assert "hf_SECRET" not in repr(rg.REMOTE_CODE)           # names only, never values
 
 
+SCRUBBED_NAMES = ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_APIKEY", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD",
+                  "MY_CREDENTIALS", "SSH_PASSPHRASE", "hf_token", "My_Secret",
+                  # contain the word TOKEN next to a name that the allowlist holds, but they are not that name
+                  "TOKENIZERS_TOKEN", "TOKENIZERS_PARALLELISM_TOKEN", "MY_TOKENIZERS_PARALLELISM", "TOKENIZERS_PARALLELISM2",
+                  # an environment name is case sensitive and the tokenizers library reads this exact spelling
+                  "tokenizers_parallelism", "Tokenizers_Parallelism"]
+KEPT_NAMES = ["TOKENIZERS_PARALLELISM", "KEEP_ME", "PATH_TO_THINGS", "AUTHOR"]
+
+
+def test_credential_like_names_are_scrubbed_and_the_tokenizers_flag_is_not(tmp_path, monkeypatch):
+    """The pattern matches the word TOKEN anywhere, so it removed TOKENIZERS_PARALLELISM, a flag of the tokenizers library with the value `true`
+    or `false`, and listed it as a scrubbed credential (seen on the Aion run, 2026-11-21). An explicit allowlist of the one exact name keeps it:
+    loosening the pattern (for example `TOKEN(?!IZERS)`) would also let a name such as TOKENIZERS_API_TOKEN through."""
+    snap = snapshot_with_code(tmp_path)
+    for name in SCRUBBED_NAMES + KEPT_NAMES:
+        monkeypatch.setenv(name, "value-of-" + name)
+    rg.allow_remote_code(snap)
+    scrubbed = set(rg.REMOTE_CODE["scrubbed"])
+    for name in SCRUBBED_NAMES:
+        assert name in scrubbed and name not in os.environ, name
+    for name in KEPT_NAMES:
+        assert name not in scrubbed and os.environ[name] == "value-of-" + name, name
+    assert not any("value-of-" in n for n in scrubbed)                    # the names are recorded and never the values
+
+
+def test_the_tokenizers_flag_is_not_listed_in_the_audit_file(tmp_path, monkeypatch):
+    import json
+    snap = snapshot_with_code(tmp_path)
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
+    monkeypatch.setenv("HF_TOKEN", "x")
+    rg.allow_remote_code(snap)
+    audit = json.loads((rg.EVIDENCE / "remote-code-audit.json").read_text())
+    assert "HF_TOKEN" in audit["scrubbed"] and "TOKENIZERS_PARALLELISM" not in audit["scrubbed"]
+    assert os.environ["TOKENIZERS_PARALLELISM"] == "false"
+
+
 def test_the_hub_and_transformers_go_offline_and_home_moves_to_scratch(tmp_path):
     snap = snapshot_with_code(tmp_path)
     rg.allow_remote_code(snap, scratch_home=tmp_path / "home")

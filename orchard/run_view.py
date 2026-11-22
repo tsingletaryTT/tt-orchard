@@ -162,6 +162,7 @@ def port_check(run_dir, host=None) -> dict | None:
     if rec is None:
         return None
     fid = rec.get("fidelity") if isinstance(rec.get("fidelity"), dict) else {}
+    sampled = rec.get("sampled_fidelity") if isinstance(rec.get("sampled_fidelity"), dict) else {}      # issue 789: a skipped block has no value
     ties = rec.get("near_ties") if isinstance(rec.get("near_ties"), dict) else {}
     length = rec.get("length_check") if isinstance(rec.get("length_check"), dict) else {}
     ops = rec.get("device_ops") if isinstance(rec.get("device_ops"), dict) else {}
@@ -170,6 +171,7 @@ def port_check(run_dir, host=None) -> dict | None:
     all_agree = length.get("all_agree")
     return {"top1_agreement": _number(rec.get("top1_agreement")),
             "fidelity": _number(fid.get("value")), "fidelity_tokens": _number(fid.get("tokens")),
+            "sampled_fidelity": _number(sampled.get("value")), "sampled_fidelity_tokens": _number(sampled.get("tokens")),
             "near_ties": _number(ties.get("near_ties")), "near_tie_disagreements": _number(ties.get("disagreements")),
             "lengths_agree": all_agree if isinstance(all_agree, bool) else None, "lengths_checked": len(_dicts(length.get("lengths"))),
             "decode_matmul_calls": _number(ops.get("decode_matmul_calls_max")),

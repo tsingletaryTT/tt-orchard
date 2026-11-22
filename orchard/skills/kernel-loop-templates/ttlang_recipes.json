@@ -1,0 +1,535 @@
+{
+ "schema": "orchard-recipes/1",
+ "title": "Recipes by kind of op",
+ "intro": [
+  "Each recipe is a plan for a kind of op, with a skeleton that passed the unedited simulator check on a worked op. Change the shapes and the arithmetic for your op and keep the structure.",
+  "tt-lang has two forms. The check that judges your kernel (the unedited check) runs the simulator, and the simulator takes `ttl.block.broadcast`, `ttl.block.fill` and `ttl.math.reduce_sum(x, dims=..., shape=...)`. The package that compiles for the chip has no `ttl.block` namespace and no `shape` argument on `reduce_sum`: it has `ttl.math.broadcast`, `ttl.math.fill` and `ttl.math.reduce_sum(x, dims=...)`.",
+  "Write the simulator form to pass the check. Each recipe lists the lines that change for the chip. No recipe has been compiled on a chip: 0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205)."
+ ],
+ "recipes": [
+  {
+   "name": "row-reduce-spread",
+   "title": "Reduce each row to one value, then use it across the row",
+   "applies_to": "an op where every output value depends on a total over its row (a norm, a mean, a normalisation)",
+   "worked_op": "L2-normalise each row: out = x * rsqrt(sum of x squared over the row + 1e-6)",
+   "plan": [
+    "One buffer block is a whole row of tiles, shape (1, col_tiles). The data is read once, and the same block feeds the reduction and the finishing expression: a block can be used in several statements while its `with` stays open.",
+    "Reduce over the last dimension with shape (1, 1). The result is one value per row, in column 0 of a one-tile block.",
+    "A Python number is not an operand. Make a (1, 1) block with `ttl.block.fill(value, shape=(1, 1))` for a constant such as an epsilon or 1/N. Take N from `x.shape[1]`, which counts elements, before you divide.",
+    "Spread the per-row value back with `ttl.block.broadcast(v, dims=[-1], shape=(1, col_tiles))`. It copies column 0 across the values of the row and across its tiles.",
+    "Finish with one elementwise expression and one `store` into the output block."
+   ],
+   "units": "Buffer shapes and slices count tiles. `x.shape` counts elements.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def l2norm(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    # One block is a whole row of tiles, so the sum and the scaling use the same block.",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as out_blk:",
+    "                # The row sum of squares: one value per row, in column 0 of a (1, 1) block.",
+    "                total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
+    "                eps = ttl.block.fill(1e-6, shape=(1, 1))",
+    "                inv = ttl.math.rsqrt(total + eps)",
+    "                # Spread column 0 across the row's values and across its tiles.",
+    "                inv_row = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
+    "                out_blk.store(x_blk * inv_row)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "hardware_replace": [
+    [
+     "total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
+     "total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1])"
+    ],
+    [
+     "eps = ttl.block.fill(1e-6, shape=(1, 1))",
+     "eps = ttl.math.fill(1e-6, shape=(1, 1))"
+    ],
+    [
+     "inv_row = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
+     "inv_row = ttl.math.broadcast(inv, dims=[-1], shape=(1, col_tiles))"
+    ]
+   ],
+   "negatives": [
+    {
+     "name": "no scaling",
+     "replace": [
+      [
+       "out_blk.store(x_blk * inv_row)",
+       "out_blk.store(x_blk)"
+      ]
+     ],
+     "claim": "A kernel that skips the scaling fails the check."
+    }
+   ],
+   "spec": {
+    "op": "recipe_l2norm",
+    "description": "out = x * rsqrt(sum of x squared over the 256 elements of each row + 1e-6)",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_l2norm",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "column-reduce-accumulate",
+   "title": "Reduce down the rows, over more tile rows than one block holds",
+   "applies_to": "an op that totals each column (a column mean, a column sum, a variance down the rows)",
+   "worked_op": "the mean of each column of a (128, 256) input, written to row 0 of a (32, 256) output",
+   "plan": [
+    "Read the rows in blocks of R tile rows, shape (R, col_tiles). Reduce each block over dims=[0] with shape (1, col_tiles).",
+    "Keep a running total in a Python variable that starts as `ttl.block.fill(0.0, shape=(1, col_tiles))` and add each block's partial sum: `total += partial`. A block expression kept in a Python variable carries its value from one loop pass to the next.",
+    "Store once, after the loop, into the output block. Scale by 1/rows with a block of the same shape from `ttl.block.fill`.",
+    "After a reduction over dims=[0] the column totals are in row 0 of each result tile. In the simulator rows 1 to 31 of the tile are 0."
+   ],
+   "units": "The count to divide by is `x.shape[0]`, in elements. Block and slice shapes count tiles.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "ROWS_PER_BLOCK = 2",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def col_mean(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "    blocks = row_tiles // ROWS_PER_BLOCK",
+    "    # Python arithmetic on element counts runs when the kernel is built.",
+    "    inv_n = 1.0 / x.shape[0]",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(ROWS_PER_BLOCK, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for b in range(blocks):",
+    "            r0, r1 = b * ROWS_PER_BLOCK, (b + 1) * ROWS_PER_BLOCK",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[r0:r1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        with out_dfb.reserve() as out_blk:",
+    "            # First pass: a running total of the partial column sums. A block expression kept in a",
+    "            # Python variable carries its value from one loop pass to the next.",
+    "            total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+    "            for _ in range(blocks):",
+    "                with x_dfb.wait() as x_blk:",
+    "                    partial = ttl.math.reduce_sum(x_blk, dims=[0], shape=(1, col_tiles))",
+    "                    total += partial",
+    "            # Second step: scale the total by 1 / rows, with a block of the same shape.",
+    "            scale = ttl.block.fill(inv_n, shape=(1, col_tiles))",
+    "            out_blk.store(total * scale)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        with out_dfb.wait() as out_blk:",
+    "            tx = ttl.copy(out_blk, out[0:1, 0:col_tiles])",
+    "            tx.wait()"
+   ],
+   "hardware_replace": [
+    [
+     "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+     "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
+    ],
+    [
+     "partial = ttl.math.reduce_sum(x_blk, dims=[0], shape=(1, col_tiles))",
+     "partial = ttl.math.reduce_sum(x_blk, dims=[0])"
+    ],
+    [
+     "scale = ttl.block.fill(inv_n, shape=(1, col_tiles))",
+     "scale = ttl.math.fill(inv_n, shape=(1, col_tiles))"
+    ]
+   ],
+   "negatives": [
+    {
+     "name": "no scaling",
+     "replace": [
+      [
+       "out_blk.store(total * scale)",
+       "out_blk.store(total)"
+      ]
+     ],
+     "claim": "A kernel that stores the total without dividing by the row count fails the check."
+    }
+   ],
+   "spec": {
+    "op": "recipe_col_mean",
+    "description": "out[0, j] = the mean of column j of x over its 128 rows; the other 31 rows of out are 0",
+    "inputs": {
+     "x": [
+      128,
+      256
+     ]
+    },
+    "output": [
+     32,
+     256
+    ],
+    "reference": "recipe_col_mean",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "elementwise-with-operands",
+   "title": "An elementwise chain with a constant and a row of values reused for every row block",
+   "applies_to": "an op built from several inputs, a constant, and a small operand that is repeated down the rows",
+   "worked_op": "out = x * y * 0.5 + r, where the (32, 256) tensor r is repeated down the rows of x",
+   "plan": [
+    "A constant is a block: `ttl.block.fill(0.5, shape=(1, col_tiles))`, the same shape as the other operands.",
+    "An operand that is one row of tiles and is used for every row block is read again for each block: `ttl.copy(r[0:1, 0:col_tiles], r_blk)` inside the row loop. All its 32 rows differ, so use it as it is.",
+    "Do not broadcast such an operand down the rows. `ttl.block.broadcast` also spreads values inside each tile, and that destroys a tile whose rows differ.",
+    "The three threads loop the same number of times, and every `reserve` has a matching `wait`."
+   ],
+   "units": "Slices and buffer shapes count tiles.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def gated_bias(x, y, r, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, col_tiles), block_count=2)",
+    "    r_dfb = ttl.make_dataflow_buffer_like(r, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk, r_dfb.reserve() as r_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                ty = ttl.copy(y[row : row + 1, 0:col_tiles], y_blk)",
+    "                # r is one row of tiles whose 32 rows all differ and are used for every row block:",
+    "                # read the same slice again each pass. A broadcast would also spread values",
+    "                # inside each tile, which is wrong for an operand that varies by row.",
+    "                tr = ttl.copy(r[0:1, 0:col_tiles], r_blk)",
+    "                tx.wait()",
+    "                ty.wait()",
+    "                tr.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with (",
+    "                x_dfb.wait() as x_blk,",
+    "                y_dfb.wait() as y_blk,",
+    "                r_dfb.wait() as r_blk,",
+    "                out_dfb.reserve() as out_blk,",
+    "            ):",
+    "                # A Python number cannot be an operand: a constant is a block of the same shape.",
+    "                half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+    "                out_blk.store(x_blk * y_blk * half + r_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "hardware_replace": [
+    [
+     "half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+     "half = ttl.math.fill(0.5, shape=(1, col_tiles))"
+    ]
+   ],
+   "negatives": [
+    {
+     "name": "wrong sign on the row operand",
+     "replace": [
+      [
+       "out_blk.store(x_blk * y_blk * half + r_blk)",
+       "out_blk.store(x_blk * y_blk * half - r_blk)"
+      ]
+     ],
+     "claim": "A kernel that subtracts the row operand where the recipe adds it fails the check on the numbers."
+    },
+    {
+     "name": "broadcast the row operand",
+     "replace": [
+      [
+       "row_tiles = x.shape[0] // TILE_SIZE\n",
+       "row_tiles = x.shape[0] // TILE_SIZE // 2\n"
+      ],
+      [
+       "x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles)",
+       "x_dfb = ttl.make_dataflow_buffer_like(x, shape=(2, col_tiles)"
+      ],
+      [
+       "y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, col_tiles)",
+       "y_dfb = ttl.make_dataflow_buffer_like(y, shape=(2, col_tiles)"
+      ],
+      [
+       "out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles)",
+       "out_dfb = ttl.make_dataflow_buffer_like(out, shape=(2, col_tiles)"
+      ],
+      [
+       "x[row : row + 1, 0:col_tiles]",
+       "x[2 * row : 2 * row + 2, 0:col_tiles]"
+      ],
+      [
+       "y[row : row + 1, 0:col_tiles]",
+       "y[2 * row : 2 * row + 2, 0:col_tiles]"
+      ],
+      [
+       "out[row : row + 1, 0:col_tiles]",
+       "out[2 * row : 2 * row + 2, 0:col_tiles]"
+      ],
+      [
+       "half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+       "half = ttl.block.fill(0.5, shape=(2, col_tiles))\n                r_all = ttl.block.broadcast(r_blk, dims=[0], shape=(2, col_tiles))"
+      ],
+      [
+       "+ r_blk)",
+       "+ r_all)"
+      ]
+     ],
+     "claim": "A kernel that broadcasts the row operand down two tile rows, and does not read it again for each row block, fails the check (PCC 0.24 in the run that measured it)."
+    }
+   ],
+   "spec": {
+    "op": "recipe_gated_bias",
+    "description": "out = x * y * 0.5 + r, where the (32, 256) tensor r is repeated down the rows of x",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ],
+     "y": [
+      64,
+      256
+     ],
+     "r": [
+      32,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_gated_bias",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "running-total-down-rows",
+   "title": "A value carried from one row block to the next",
+   "applies_to": "an op where each row block depends on the blocks before it (a running total, a running update)",
+   "worked_op": "out tile row t = the sum of x tile rows 0 to t, elementwise",
+   "plan": [
+    "Start the carried value as `ttl.block.fill(0.0, shape=(1, col_tiles))` in a Python variable, before the loop and inside the compute thread.",
+    "In each pass: `total += x_blk`, then `out_blk.store(total)`. The variable keeps its value to the next pass.",
+    "The reader, the compute function and the writer loop the same number of times, once per row block."
+   ],
+   "units": "The loop runs over tile rows, `x.shape[0] // TILE_SIZE` times.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def running_sum(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        # The carried value: a block expression in a Python variable, started at zero.",
+    "        total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as out_blk:",
+    "                total += x_blk",
+    "                out_blk.store(total)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "hardware_replace": [
+    [
+     "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+     "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
+    ]
+   ],
+   "negatives": [
+    {
+     "name": "no carry",
+     "replace": [
+      [
+       "out_blk.store(total)",
+       "out_blk.store(x_blk)"
+      ]
+     ],
+     "claim": "A kernel that stores the block without the carried total fails the check."
+    }
+   ],
+   "spec": {
+    "op": "recipe_running_sum",
+    "description": "out tile-row t = the elementwise sum of x tile-rows 0 to t (a running sum down the rows of tiles, 32 rows per tile-row)",
+    "inputs": {
+     "x": [
+      128,
+      64
+     ]
+    },
+    "output": [
+     128,
+     64
+    ],
+    "reference": "recipe_running_sum",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  }
+ ]
+}

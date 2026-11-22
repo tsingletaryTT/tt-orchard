@@ -81,6 +81,12 @@ Optional hook, for the vocabulary-per-die hazard (issue 183):
         column. A port with no `sample` is recorded as skipped, with that reason, and the run goes on. A port that samples on the chip
         defines `sample` to call the same code its server runs.
 
+    TOKEN_CHOICE = "host-row"      (a module constant, optional)
+        Says: this port returns the whole vocabulary row to the host and the caller picks the token there, so no sampler runs on a die. The port
+        generator writes it. With no `sample` function, the check records the vocabulary check as `not-applicable` when the port
+        declares this and the last row it returned had exactly the vocabulary's width; a row of another width keeps `skipped`. A port that does
+        sample on a chip must not declare it.
+
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
 import collections
@@ -116,12 +122,18 @@ MAX_NUMEL = 2 ** 28              # choice: total elements saved (1 GiB as float3
 REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
+SAMPLED = "stages/1/evidence/reference/fidelity-ids.json"     # issue 789: stage 1's optional reference sampled at temperature 1 (reference_gate.py), with the log-probability of each id
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
 LENGTH_CHECK_LENGTHS = (2, 3, 4, 31, 32, 33)      # choice: the shortest prompts and the sizes at and around one tile of 32 tokens, where padding bugs sit
 VOCAB_PER_DIE_LIMIT = 65536                   # the hazard scan's limit (orchard/hazards.py VOCAB_PER_DIE_LIMIT; a test keeps the two equal): a sampler index wraps here
 VOCAB_MAX = 10 ** 7                           # choice: a vocabulary above this is not read (the largest real vocabularies are a few hundred thousand)
 VOCAB_MODES = (("greedy", 0.0, 1), ("sampled", 0.7, 1))      # (name, temperature, top_k): one candidate on the sampled path keeps its answer exact
 VOCAB_PLANTED = 10.0                          # the planted logit; every other logit is 0.0
+# What a generated port declares as `TOKEN_CHOICE`, and the sentence recorded when that makes the vocabulary check not applicable. Both are
+# orchard/hazards.py's TOKEN_CHOICE_HOST and VOCAB_NOT_APPLICABLE_REASON (this file runs where `orchard` cannot be imported; a test keeps them equal).
+TOKEN_CHOICE_HOST = "host-row"
+NOT_APPLICABLE_REASON = ("the port returns the whole vocabulary row to the host, and the check and the server choose the next token by "
+                         "argmax over that row there, so no per-die column index is used on this path")
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache; the cap when the config sets none
@@ -381,6 +393,26 @@ def argmax(logits) -> int:
         if v > best:
             best, at = v, i
     return int(at)
+
+
+def row_length(logits) -> int:
+    """The number of entries in whatever the port returned, read the way `argmax` reads it (list, numpy or torch): the width of the row the
+    token is chosen from."""
+    if hasattr(logits, "reshape") and hasattr(logits, "argmax"):
+        return int(logits.reshape(-1).shape[0])
+    return len(list(logits))
+
+
+LAST_ROW = {"n": None}               # the width of the row the port returned for its latest prefill or decode_step, for the vocabulary check
+
+
+def note_row(logits) -> None:
+    """Keep the width of the row the port just returned. A value `row_length` cannot read leaves None, which the vocabulary check never counts as
+    a whole row."""
+    try:
+        LAST_ROW["n"] = row_length(logits)
+    except Exception:
+        LAST_ROW["n"] = None
 
 
 def logprob(logits, token: int) -> float:
@@ -968,20 +1000,27 @@ def worker(read_fd: int, write_fd: int) -> int:
                 COUNTS.clear()
                 TRACE_REPLAYS.clear()
                 out = mod.prefill(model, [int(i) for i in req["ids"]])
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
+                token = argmax(out)
+                note_row(out)                # after argmax, so a one-shot iterable is read once by argmax and counts as no whole row here
+                reply({"ok": True, "id": token, OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "decode":
                 COUNTS.clear()
                 TRACE_REPLAYS.clear()
                 out = mod.decode_step(model, int(req["token"]), int(req["position"]))
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
+                token = argmax(out)
+                note_row(out)
+                reply({"ok": True, "id": token, OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
             elif op == "sample":         # optional, untimed: the vocabulary-per-die hazard's targeted test (see `vocab_check`)
                 fn = getattr(mod, "sample", None)
                 if not callable(fn):
-                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)"})
+                    choice = getattr(mod, "TOKEN_CHOICE", None)       # what the port declares: passed on only when it is the exact string, so no other object reaches the pipe
+                    reply({"ok": True, "skipped": "port_model defines no sample(model, logits, temperature, top_k)",
+                           "token_choice": choice if isinstance(choice, str) and choice == TOKEN_CHOICE_HOST else None,
+                           "row_length": LAST_ROW["n"]})
                 else:
                     logits = [0.0] * int(req["vocab"])
                     logits[int(req["planted"])] = VOCAB_PLANTED
@@ -1627,17 +1666,33 @@ def vocab_probe_cases(vocab: int, dies: int) -> list:
     return cases
 
 
+def without_hook(block: dict, reply: dict, vocab: int) -> dict:
+    """The block for a port with no `sample` function. `not-applicable` needs both facts: the port declares `TOKEN_CHOICE = "host-row"` (a generated
+    port does), and the last row it returned had exactly `vocab` entries, so the check and the server choose the token by argmax over the whole
+    row on the host and no per-die column index exists to wrap. A declaration with another width, or none, or any other value, is `skipped`; the
+    reason says why when a declaration was made. Both values come from the worker and are compared, never echoed."""
+    choice, width = reply.get("token_choice"), reply.get("row_length")
+    base = str(reply["skipped"])
+    if choice == TOKEN_CHOICE_HOST and type(width) is int:
+        if width == vocab:
+            return {**block, "status": "not-applicable", "reason": NOT_APPLICABLE_REASON, "token_choice": choice, "row_length": width, "cases": []}
+        base += (f"; the port declares {TOKEN_CHOICE_HOST} but its last row had {width} entries for a vocabulary of {vocab}, "
+                 "so the declaration is not used")
+    return {**block, "status": "skipped", "reason": base[:300], "cases": []}
+
+
 def vocab_check(w, vocab: int, dies: int) -> dict:
     """The vocabulary-per-die hazard's targeted test (issue 183): for each planted column, ask the port's `sample` hook on the greedy and on the
     sampled path for the id of a logits row whose only large value sits in that column. A wrong id, or an error in the hook, fails the run with a
-    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason."""
+    message that names the die, the column and the path. A port with no hook is recorded as skipped with the reason, or as not-applicable when it
+    declares that its token is chosen on the host over the whole row and the row it returned had the vocabulary's width (`without_hook`)."""
     block = {"flagged": True, "vocab_size": vocab, "dies": dies, "per_die": vocab_per_die(vocab, dies), "limit": VOCAB_PER_DIE_LIMIT,
              "status": "pass", "reason": "", "cases": []}
     for case in vocab_probe_cases(vocab, dies):
         for mode, temperature, top_k in VOCAB_MODES:
             got = w.ask(op="sample", vocab=vocab, planted=case["planted"], temperature=temperature, top_k=top_k)
             if "skipped" in w.last:
-                return {**block, "status": "skipped", "reason": str(w.last["skipped"])[:300], "cases": []}
+                return without_hook(block, w.last, vocab)
             row = {**case, "mode": mode, "got": got, "ok": got == case["planted"]}
             block["cases"].append(row)
             if not row["ok"]:
@@ -1648,15 +1703,17 @@ def vocab_check(w, vocab: int, dies: int) -> dict:
     return block
 
 
-def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None) -> dict:
+def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None,
+                   kind: str = "reference-greedy-text") -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
-    10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
-    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's.
-    Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note says which of the two
-    limited the count."""
+    10 * exp(mean(chip logprob) - mean(reference logprob)). With the default `kind` the text is the reference's greedy text, so the number is
+    not comparable with the sampled-text score of scripts/fidelity_score.py; with kind "reference-sampled-text" (issue 789) the text is the
+    reference's own sample at temperature 1, the kind of text that script scores. It shows how far the port's probabilities for those tokens
+    are from the reference's. Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note
+    says which of the two limited the count."""
     n = len(ref_lp)
     value = FIDELITY_SCALE * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
-    block = {"kind": "reference-greedy-text", "scale": FIDELITY_SCALE, "tokens": n, "value": value,
+    block = {"kind": kind, "scale": FIDELITY_SCALE, "tokens": n, "value": value,
              "reference_logprobs": ref_lp, "chip_logprobs": chip_lp}
     if n < FIDELITY_MIN_TOKENS:
         note = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
@@ -1670,6 +1727,67 @@ def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, referenc
     return block
 
 
+def sampled_reference(prompt: list) -> dict | None:
+    """Stage 1's sampled reference, as a dict with `ids`, `logprobs` and its sha256 and length, or None when stage 1 wrote none (the option was
+    not used). A file that exists and cannot be used gives {"status": "skipped", "reason": ...}: the check says why and goes on without it."""
+    path = RUN_DIR / SAMPLED
+    if not path.exists() and not path.is_symlink():
+        return None
+
+    def skipped(reason: str) -> dict:
+        return {"status": "skipped", "reason": f"{SAMPLED}: {reason}"[:300]}
+
+    if path.is_symlink() or not path.is_file():
+        return skipped("is a link or not a regular file")
+    try:
+        with open(path, "rb") as fh:      # hardening: ok the supervisor's own stage 1 file under the run directory (a link is refused just above); bounded read in a try
+            raw = fh.read(64 * 1024 * 1024)
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return skipped("is not readable JSON")
+    if not isinstance(data, dict):
+        return skipped("is not a JSON object")
+    ids, lps = data.get("ids"), data.get("logprobs")
+    if data.get("complete") is not True:
+        return skipped("is not complete (the stage 1 sampling stopped early)")
+    if data.get("temperature") != 1.0:
+        return skipped("was not sampled at temperature 1")
+    if data.get("prompt_ids_sha256") != hashlib.sha256(json.dumps(prompt, separators=(",", ":")).encode()).hexdigest():
+        return skipped("continues another prompt than stage 1's prompt-ids.json")
+    if not isinstance(ids, list) or not ids or not all(type(i) is int and i >= 0 for i in ids):
+        return skipped("holds no list of whole-number ids")
+    if not isinstance(lps, list) or len(lps) != len(ids):
+        return skipped("logprobs are not a list of the same length as ids")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e6 and v <= 1e-6 for v in lps):      # a NaN fails `abs(v) < 1e6`; a huge int is refused before any conversion
+        return skipped("log-probabilities are not finite numbers at most 0")
+    floats = [float(v) for v in lps]  # finite: ok each value is bounded by the check above
+    return {"ids": ids, "logprobs": floats, "sha256": hashlib.sha256(raw).hexdigest(), "length": len(ids)}
+
+
+def sampled_fidelity(w, prompt: list, cap: int, sampled: dict) -> dict:
+    """The second teacher-forced pass (issue 789): prefill, then each sampled id fed in with the next as target, over the smaller of the cap and
+    the sampled reference. Report-only. A reference that was skipped comes back as its skip record; a port that cannot give a log-probability, or
+    a request the port fails, is recorded as skipped with the reason (a worker that stopped answering still fails the run)."""
+    if "status" in sampled:
+        return sampled
+    n = min(sampled["length"], cap)
+    ids = sampled["ids"][:n]
+    try:
+        w.ask(op="prefill", ids=prompt, target=ids[0])
+        chip_lp = [w.last.get("lp")]
+        for i in range(1, n):
+            w.ask(op="decode", token=ids[i - 1], position=len(prompt) + i - 1, target=ids[i])
+            chip_lp.append(w.last.get("lp"))
+    except PortFailed as exc:
+        if "did not answer" in str(exc):
+            raise
+        return {"status": "skipped", "reason": f"the port failed the sampled pass: {str(exc)[:240]}"}
+    if not all(isinstance(v, float) for v in chip_lp):
+        return {"status": "skipped", "reason": "the port gave no log-probability for some sampled token"}
+    return {**fidelity_block(sampled["logprobs"][:n], chip_lp, cap, sampled["length"], "reference-sampled-text"),
+            "source": {"path": SAMPLED, "sha256": sampled["sha256"], "length": sampled["length"]}}
+
+
 def main() -> int:
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     model_dir = config["model_snapshot"]
@@ -1681,6 +1799,7 @@ def main() -> int:
     refuse_links()
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
     cap = positions_cap(config)
+    sampled = sampled_reference(prompt)
     n = min(len(reference), cap)
     ref = reference[:n]
     RECORD.parent.mkdir(parents=True, exist_ok=True)
@@ -1716,6 +1835,7 @@ def main() -> int:
             device_ops.add_decode(w.last.get(OPS_KEY))
             device_ops.add_traces(w.last.get(TRACES_KEY), decode=True)
         device_ops.check_decode()
+        sampled_block = sampled_fidelity(w, prompt, cap, sampled) if sampled is not None else None     # after the device checks: its steps are not counted in them
         # Free run: a fresh prefill, then the port's own greedy ids.
         free = [w.ask(op="prefill", ids=prompt)]
         for k in range(1, FREE_RUN_TOKENS):
@@ -1754,6 +1874,7 @@ def main() -> int:
               "top1_agreement": agreement,
               "positions": {"cap": cap, "scored": n, "reference_length": len(reference)},
               **({"fidelity": fidelity_block(ref_lp, chip_lp, cap, len(reference))} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
+              **({"sampled_fidelity": sampled_block} if sampled_block is not None else {}),
               **({"near_ties": ties} if ties is not None else {}),
               "length_check": lengths,
               **({"vocab_check": vocab_block} if vocab_block is not None else {}),
@@ -1784,6 +1905,10 @@ def main() -> int:
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)
+    sb = record.get("sampled_fidelity")
+    if sb is not None:
+        print((f"sampled fidelity {sb['value']:.3f} over {sb['tokens']} tokens (10 = predicts the reference's own sample at temperature 1 as the "
+               "reference does; reported not gated)") if "value" in sb else f"sampled fidelity: skipped, {sb['reason']}", flush=True)
     print("PORT_CHECK_SHA256", sha_bytes(data), flush=True)
     return 0
 

@@ -1,0 +1,282 @@
+{
+ "schema": "orchard-recipes-verified/1",
+ "date": "2026-11-21",
+ "simulator": "tt-lang-sim 1.1.10+gfec38c6",
+ "chip_package": "tt_lang-1.1.6",
+ "note": "Simulator passes and static name checks only. No recipe has been compiled on a chip.",
+ "records": {
+  "row-reduce-spread": {
+   "skeleton_sha256": "7435c14cdc58c771d3baae6238b2f2f0b13dc43ccb3e1963674ce4547e728f84",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 1.0,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "7435c14cdc58c771d3baae6238b2f2f0b13dc43ccb3e1963674ce4547e728f84",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "73378b541f77ccc96bf95720eeb5be5094488b097307fea6585f641a67b46a9e"
+   },
+   "negatives": [
+    {
+     "name": "no scaling",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: rel_l2 15.068114 above bar 0.01"
+    }
+   ],
+   "hardware_static": {
+    "ok": true,
+    "checked": [
+     {
+      "name": "ttl.operation",
+      "keywords": [
+       "grid"
+      ]
+     },
+     {
+      "name": "ttl.make_dataflow_buffer_like",
+      "keywords": [
+       "block_count",
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.datamovement",
+      "keywords": []
+     },
+     {
+      "name": "ttl.compute",
+      "keywords": []
+     },
+     {
+      "name": "ttl.copy",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.reduce_sum",
+      "keywords": [
+       "dims"
+      ]
+     },
+     {
+      "name": "ttl.math.fill",
+      "keywords": [
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.math.rsqrt",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.broadcast",
+      "keywords": [
+       "dims",
+       "shape"
+      ]
+     }
+    ],
+    "problems": []
+   }
+  },
+  "column-reduce-accumulate": {
+   "skeleton_sha256": "a78cef8c43a59e2158e6734076e9ae9b908f47e6823da0fa77616edd5aec8166",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999998807907104,
+   "rel_l2_max": 1.4023607787550488e-07,
+   "check_sha256": {
+    "kernel.py": "a78cef8c43a59e2158e6734076e9ae9b908f47e6823da0fa77616edd5aec8166",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "3bd70b50eea755c0cbb67ffcf17c82b5dff9b22369f0d874488b268682a1b0d8"
+   },
+   "negatives": [
+    {
+     "name": "no scaling",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: rel_l2 126.999998 above bar 0.01"
+    }
+   ],
+   "hardware_static": {
+    "ok": true,
+    "checked": [
+     {
+      "name": "ttl.operation",
+      "keywords": [
+       "grid"
+      ]
+     },
+     {
+      "name": "ttl.make_dataflow_buffer_like",
+      "keywords": [
+       "block_count",
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.datamovement",
+      "keywords": []
+     },
+     {
+      "name": "ttl.compute",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.fill",
+      "keywords": [
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.copy",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.reduce_sum",
+      "keywords": [
+       "dims"
+      ]
+     }
+    ],
+    "problems": []
+   }
+  },
+  "elementwise-with-operands": {
+   "skeleton_sha256": "25818ae53ba834f01f5ddd7c8aa37232b2b3517fc9bc29e7005ce67aab4b0040",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999998807907104,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "25818ae53ba834f01f5ddd7c8aa37232b2b3517fc9bc29e7005ce67aab4b0040",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "2f004138db4ac69a5cda3bd2e54006cfa9ca39cb495fd3b83a778201a8972d55"
+   },
+   "negatives": [
+    {
+     "name": "wrong sign on the row operand",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc -0.5961995720863342, finite True, bar 0.999"
+    },
+    {
+     "name": "broadcast the row operand",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc 0.2364761382341385, finite True, bar 0.999"
+    }
+   ],
+   "hardware_static": {
+    "ok": true,
+    "checked": [
+     {
+      "name": "ttl.operation",
+      "keywords": [
+       "grid"
+      ]
+     },
+     {
+      "name": "ttl.make_dataflow_buffer_like",
+      "keywords": [
+       "block_count",
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.datamovement",
+      "keywords": []
+     },
+     {
+      "name": "ttl.compute",
+      "keywords": []
+     },
+     {
+      "name": "ttl.copy",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.fill",
+      "keywords": [
+       "shape"
+      ]
+     }
+    ],
+    "problems": []
+   }
+  },
+  "running-total-down-rows": {
+   "skeleton_sha256": "0be00b251f4b7c35bb6c87c71dcb6850f885a1deef7ccb2605f068923cc38956",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999999403953552,
+   "rel_l2_max": 3.996238371603499e-08,
+   "check_sha256": {
+    "kernel.py": "0be00b251f4b7c35bb6c87c71dcb6850f885a1deef7ccb2605f068923cc38956",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "41b9a2f16e0fc1e215e7b0fe788a3db3e7573751f7c7c02aecc84847b75d724b"
+   },
+   "negatives": [
+    {
+     "name": "no carry",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc 0.6344476938247681, finite True, bar 0.999"
+    }
+   ],
+   "hardware_static": {
+    "ok": true,
+    "checked": [
+     {
+      "name": "ttl.operation",
+      "keywords": [
+       "grid"
+      ]
+     },
+     {
+      "name": "ttl.make_dataflow_buffer_like",
+      "keywords": [
+       "block_count",
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.datamovement",
+      "keywords": []
+     },
+     {
+      "name": "ttl.compute",
+      "keywords": []
+     },
+     {
+      "name": "ttl.math.fill",
+      "keywords": [
+       "shape"
+      ]
+     },
+     {
+      "name": "ttl.copy",
+      "keywords": []
+     }
+    ],
+    "problems": []
+   }
+  }
+ }
+}

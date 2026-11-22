@@ -1,0 +1,4 @@
+target = "0.9.188"
+summary = "The port generator reads rope_parameters keyed by layer type (a table pair per type, YaRN as transformers computes it) and writes a sliding-window mask for sliding layers; a config it cannot follow leaves a named stub, where it used to write a port with theta 10000 (issue 790)."
+kind = "fix"
+pr = 791

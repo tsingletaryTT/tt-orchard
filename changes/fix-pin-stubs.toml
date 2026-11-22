@@ -1,0 +1,4 @@
+target = "0.9.189"
+summary = "Seven test stand-ins for the supervisor carry port_check_positions, which PR 788 made _pin_full_port read; 16 tests failed on main without it."
+kind = "fix"
+pr = 792
