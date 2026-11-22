@@ -34,9 +34,11 @@ from orchard import cli
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "orchard" / "skills" / "kernel-loop-templates"
-# sha256 of the sheet `op_cheats.render` wrote for the TT-Lang sheet before recipes were added (142 lines). If this changes on
-# purpose, a run with recipes off is no longer comparable with the runs recorded before it: say so in the log.
-DEFAULT_SHEET_SHA256 = "f425cee86e425cb61197ad6cfa3836e5651f720307f5bbb75e8adde573b0d96b"
+# sha256 of the sheet `op_cheats.render` writes for the TT-Lang sheet with recipes off (133 lines). If this changes on purpose, a run
+# with recipes off is no longer comparable with the runs recorded before it: say so in the log. It changed on 2026-11-22 (issue 801: the
+# chip claims were corrected); the sheet before, 142 lines, had sha256 f425cee86e425cb61197ad6cfa3836e5651f720307f5bbb75e8adde573b0d96b,
+# and the A/B of 2026-11-21 ran with it.
+DEFAULT_SHEET_SHA256 = "bc9e27bc801f1a9d99728f0387d2b066acc1e42badcd24c554bffd77c9968c53"
 FAMILIES = ["row-reduce-spread", "column-reduce-accumulate", "elementwise-with-operands", "running-total-down-rows"]
 RECIPES_HEADING = "## Recipes by kind of op"
 

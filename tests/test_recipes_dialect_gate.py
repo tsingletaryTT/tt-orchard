@@ -32,7 +32,7 @@ from test_cli import _fake_probe_main
 from orchard import cli
 from test_ttlang_hwcompile import PAIR, SHARED, landlock_available
 
-DEFAULT_SHEET_SHA256 = "f425cee86e425cb61197ad6cfa3836e5651f720307f5bbb75e8adde573b0d96b"
+DEFAULT_SHEET_SHA256 = "bc9e27bc801f1a9d99728f0387d2b066acc1e42badcd24c554bffd77c9968c53"   # the plain sheet after issue 801 (see test_ttlang_recipes.py)
 FAMILIES = ["row-reduce-spread", "column-reduce-accumulate", "elementwise-with-operands", "running-total-down-rows"]
 REDUCTIONS = FAMILIES[:2]
 OTHER = {"package": "tt-lang", "version": "5.5.5", "compiler_sha256": "5" * 64}
