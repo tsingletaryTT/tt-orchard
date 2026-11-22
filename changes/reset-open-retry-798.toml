@@ -1,0 +1,4 @@
+target = "0.9.192"
+summary = "A reset refused because a device is open for a moment is tried again up to six times, four seconds apart, before the 4-chip test blocks; each refusal is in the ledger (issue 798, PR 799)."
+kind = "fix"
+pr = 799

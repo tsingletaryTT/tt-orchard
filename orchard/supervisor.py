@@ -127,7 +127,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from orchard.adapters import AdapterError, Lease
+from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
@@ -204,6 +204,9 @@ RUN_JSON_MAX = 16 * 1024 * 1024          # the largest JSON file of a run (a mar
 MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
+RESET_OPEN_TRIES = 6          # choice (issue 798): a reset refused because a device is open is tried this many times in all
+RESET_OPEN_WAIT_S = 4.0       # choice: seconds between those tries; a read-only tt-smi poll holds a device for about a second
+OPEN_DEVICE_MARK = "still open by"      # the words gozer's refusal of a reset uses when a process has the device open
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
 EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 STALL_CODE = "agent-stuck"     # the block code that leaves the coder up with --coder-keep-on-stall (issue 701)
@@ -6309,11 +6312,26 @@ class Supervisor:
         42 s per board, and a refused reset blocks. The order of two separate leases' resets matters (`reset_order`,
         issue 26): the lease whose chips have the lowest PCI address goes last. Whether stale state on the chips also
         plays a part is not isolated."""
-        try:
-            self.test_adapter.reset(lease)
-        except AdapterError as exc:
-            self._block(n, f"resetting the chips for the {test.chips}-chip test failed: {exc}",
-                        lease_id=lease.lease_id, config=test.chips)
+        attempt = 1
+        while True:
+            try:
+                self.test_adapter.reset(lease)
+                break
+            except AdapterError as exc:
+                # Issue 798: gozer refuses a reset while any process has a device of the lease open, and a read-only
+                # `tt-smi -s` poll (a monitor or a service) has one open for a moment. A refusal that says so is tried
+                # again a few times; it is never forced, so a real workload on the chips still blocks the run. Every
+                # other failure blocks at once.
+                if isinstance(exc, Refused) and OPEN_DEVICE_MARK in str(exc) and attempt < RESET_OPEN_TRIES:
+                    self.ledger.append("decision", n, decision="test chip reset refused", attempt=attempt,
+                                       of=RESET_OPEN_TRIES, reason=str(exc)[:500], lease_id=lease.lease_id,
+                                       config=test.chips)
+                    self.sleep(RESET_OPEN_WAIT_S)
+                    attempt += 1
+                    continue
+                self._block(n, f"resetting the chips for the {test.chips}-chip test failed"
+                               f"{f' (tried {attempt} times)' if attempt > 1 else ''}: {exc}",
+                            lease_id=lease.lease_id, config=test.chips)
         self.ledger.append("decision", n, decision="test chips reset", config=test.chips,
                            lease_id=lease.lease_id)
 
