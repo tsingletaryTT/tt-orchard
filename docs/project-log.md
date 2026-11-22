@@ -5897,5 +5897,5 @@ the byte-for-byte hash of the standard small decoder's generated text (the tiny 
 
 Not settled. No board has run this decode. The ops are those the Qwen4 cache already uses on a board (concat, slice, permute, an additive mask on SDPA with
 the query padded to 32 rows), but the fake accepts shapes a board may not (it accepted a reshape of the wrong size in one run before the grouped config was used).
-The speed is not measured; the expectation is in the PR. The chip run that closes this: the Aion port of aion-run3 on a leased board with this decode, decode
+The speed is not measured. On the fake one step issues 198 ops for three layers against 83 for a whole-sequence pass, so at a short context a step may not be faster; the gain should come with a long prompt. The chip run that closes this: the Aion port of aion-run3 on a leased board with this decode, decode
 speed over three runs, then top-1 agreement over the stage 2 reference and the 8,192-token passkey check, which must not change.
