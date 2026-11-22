@@ -6,7 +6,7 @@ What these tests keep true:
 - The default sheet is byte for byte what it was before recipes existed (a sha256 pin), so a run that does not ask for recipes
   has the same attempt directory as before.
 - A recipe reaches the coder tagged `[passes the simulator]` only when a verification record for exactly that skeleton says the
-  unedited check passed, every wrong variant failed, and the hardware-form calls exist in the chip package.
+  unedited check passed and every wrong variant failed. What a recipe says about the chip is in tests/test_recipes_dialect_gate.py.
 - `--cheat-sheet-recipes on` travels from the command line to the attempt directory and into the report; off changes nothing.
 
 Nothing here runs the simulator. The records are produced by scripts/verify_ttlang_recipes.py, which does.
@@ -96,7 +96,15 @@ def _bad(mutate):
     ("a very long skeleton line", lambda d: d["recipes"][0]["skeleton"].append("x" * 400), "long"),
     ("too many skeleton lines", lambda d: d["recipes"][0].update(skeleton=["x = 1"] * 200), "lines"),
     ("a plan that is not a list", lambda d: d["recipes"][0].update(plan="x"), "plan"),
-    ("a hardware pair of the wrong size", lambda d: d["recipes"][0].update(hardware_replace=[["only one"]]), "hardware_replace"),
+    ("the old chip line pairs", lambda d: d["recipes"][0].update(hardware_replace=[["a", "b"]]), "hardware_replace"),
+    ("no compile negative", lambda d: d["recipes"][0].update(compile_negatives=[]), "compile_negatives"),
+    ("compile negatives that are not a list", lambda d: d["recipes"][0].update(compile_negatives={"a": 1}), "compile_negatives"),
+    ("too many compile negatives", lambda d: d["recipes"][0].update(compile_negatives=d["recipes"][0]["compile_negatives"] * 7), "compile_negatives"),
+    ("a compile negative with no name", lambda d: d["recipes"][0]["compile_negatives"][0].pop("name"), "compile negative"),
+    ("two compile negatives with one name", lambda d: d["recipes"][0]["compile_negatives"].append(dict(d["recipes"][0]["compile_negatives"][0])), "name of its own"),
+    ("a compile negative with no claim", lambda d: d["recipes"][0]["compile_negatives"][0].update(claim=""), "claim"),
+    ("a compile negative with a very long claim", lambda d: d["recipes"][0]["compile_negatives"][0].update(claim="x" * 400), "claim"),
+    ("a compile negative pair of the wrong size", lambda d: d["recipes"][0]["compile_negatives"][0].update(replace=[["only one"]]), "replace"),
     ("a negative with no replacement", lambda d: d["recipes"][0].update(negatives=[{"name": "n", "claim": "c"}]), "negative"),
     ("a spec that is not an object", lambda d: d["recipes"][0].update(spec=[]), "spec"),
     ("a spec for another op", lambda d: d["recipes"][0]["spec"].update(op="other"), "spec"),
@@ -142,22 +150,28 @@ def test_each_skeleton_passes_the_checks_source_rules(tmp_path, name):
 
 
 @pytest.mark.parametrize("name", FAMILIES)
-def test_each_hardware_form_replaces_lines_that_exist_and_leaves_no_simulator_call(name):
+def test_each_compile_negative_changes_lines_that_exist_and_is_still_python(name):
     recipe = next(r for r in op_cheats.load_recipes()["recipes"] if r["name"] == name)
-    hardware = "\n".join(op_cheats.hardware_skeleton(recipe))
-    compile(hardware, f"{name}-hardware", "exec")                       # it is Python
-    assert "ttl.block." not in hardware                                  # the chip package has no ttl.block namespace
-    assert "reduce_sum(" not in hardware or "shape=" not in hardware.split("reduce_sum(")[1].split(")")[0]
+    for neg in recipe["compile_negatives"]:
+        wrong = op_cheats.apply_replacements(recipe, neg["replace"], "compile negative")
+        compile(wrong, f"{name}-wrong", "exec")
+        assert wrong != "\n".join(recipe["skeleton"])
 
 
-def test_a_hardware_replacement_that_does_not_occur_once_is_an_error():
+def test_no_recipe_carries_hand_written_chip_lines():
+    """Until 2026-11-22 each recipe said `for the chip, write ttl.math.fill`. Both chip compilers refuse that form, so no recipe may
+    carry hand-written chip lines again: what the sheet says about the chip comes from compile records only."""
+    for recipe in op_cheats.load_recipes()["recipes"]:
+        assert "hardware_replace" not in recipe
+        assert "ttl.math.fill" not in "\n".join(recipe["skeleton"]) and "ttl.math.broadcast" not in "\n".join(recipe["skeleton"])
+
+
+def test_a_replacement_that_does_not_occur_once_is_an_error():
     recipe = copy.deepcopy(op_cheats.load_recipes()["recipes"][0])
-    recipe["hardware_replace"] = [["a line the skeleton does not have", "x"]]
     with pytest.raises(op_cheats.RecipeError, match="once"):
-        op_cheats.hardware_skeleton(recipe)
-    recipe["hardware_replace"] = [["ttl", "ttl"]]                          # occurs many times
+        op_cheats.apply_replacements(recipe, [["a line the skeleton does not have", "x"]], "a compile negative")
     with pytest.raises(op_cheats.RecipeError, match="once"):
-        op_cheats.hardware_skeleton(recipe)
+        op_cheats.apply_replacements(recipe, [["ttl", "ttl2"]], "a compile negative")              # occurs many times
 
 
 # ---- the verification records ------------------------------------------------------------------------------------------
@@ -178,7 +192,16 @@ def _records():
     ("a pass on fewer than six input sets", lambda v: v["records"][FAMILIES[0]].update(sets=3), "sets"),
     ("a wrong variant that passed", lambda v: v["records"][FAMILIES[0]]["negatives"][0].update(failed=False), "wrong variant"),
     ("a wrong variant never run", lambda v: v["records"][FAMILIES[2]]["negatives"].pop(), "wrong variant"),
-    ("hardware calls not found in the chip package", lambda v: v["records"][FAMILIES[3]]["hardware_static"].update(ok=False), "hardware"),
+    ("compile entries that are not a list", lambda v: v["records"][FAMILIES[3]].update(compile="x"), "compile"),
+    ("a compile entry that is not an object", lambda v: v["records"][FAMILIES[3]]["compile"].append("x"), "compile entry"),
+    ("a compile entry with no record", lambda v: v["records"][FAMILIES[3]]["compile"][0].pop("record"), "compile record"),
+    ("a compile record that says compiled with no kernel source", lambda v: v["records"][FAMILIES[3]]["compile"][0]["record"].update(kernel_sources=[]), "kernel sources"),
+    ("a compile record that says compiled with no guard proof", lambda v: v["records"][FAMILIES[3]]["compile"][0]["record"].update(guard=[]), "shut out"),
+    ("a compile record whose flag and category disagree", lambda v: v["records"][FAMILIES[3]]["compile"][0]["record"].update(category="compile_error"), "compiled"),
+    ("a compile entry with no date", lambda v: v["records"][FAMILIES[3]]["compile"][0].pop("date"), "date"),
+    ("compile negatives of the wrong type", lambda v: v["records"][FAMILIES[3]]["compile"][0].update(negatives=[{"name": "n", "failed": "yes"}]), "negatives"),
+    ("a chip entry with no evidence", lambda v: v["records"][FAMILIES[3]].update(chip=[{"passed": True}]), "chip entry"),
+    ("too many compile entries", lambda v: v["records"][FAMILIES[3]].update(compile=v["records"][FAMILIES[3]]["compile"] * 5), "at most"),
     ("a record for a recipe that is not there", lambda v: v["records"].update(ghost=v["records"][FAMILIES[0]]), "ghost"),
     ("another schema", lambda v: v.update(schema="x"), "schema"),
 ])
@@ -205,19 +228,15 @@ def test_the_sheet_with_recipes_starts_with_the_default_sheet_and_then_the_recip
     assert full.startswith(default) and full[len(default):].lstrip("\n").startswith(RECIPES_HEADING)
 
 
-def test_the_recipes_section_says_what_the_coder_needs_to_choose_between_the_two_forms():
+def test_the_recipes_section_with_no_chip_package_tags_every_recipe_as_not_compiled():
     section = op_cheats.render_recipes(op_cheats.load_recipes(), op_cheats.load_verified())
-    assert section.count("[passes the simulator]") == len(FAMILIES)
-    assert section.count("[hardware form not verified on chip]") == len(FAMILIES)
-    evidence = "0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205)"
-    assert evidence in section
-    # Each recipe says it in its own words, beside its own chip-form lines; the intro's sentence does not stand in for them.
-    assert section.count(f"For the chip, change these lines. {evidence}.") == len(FAMILIES)
-    for must in ("the unedited check", "ttl.block.broadcast", "ttl.math.broadcast", "no `shape` argument"):
-        assert must in section, must
+    headings = [line for line in section.splitlines() if line.startswith("### ")]
+    assert len(headings) == len(FAMILIES)
+    assert all(h.endswith("[passes the simulator] [not compiled with a chip package]") for h in headings)
+    assert "compiles with" not in section and "The chip compiler refuses" not in section.split("###", 1)[1]
+    assert "the unedited check" in section
     for recipe in op_cheats.load_recipes()["recipes"]:
         assert recipe["title"] in section and recipe["skeleton"][0] in section
-        assert all(old != new and new in section for old, new in recipe["hardware_replace"])
 
 
 def test_the_recipes_headings_do_not_name_the_probes_target_ops():

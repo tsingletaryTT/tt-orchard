@@ -655,15 +655,27 @@ def show_entry(sheet: dict, name: str) -> list[str]:
 # run asks for them (`kernel-probe --cheat-sheet-recipes on`): `render` above is unchanged, so a run that does not ask has the sheet
 # it always had.
 #
+# What a recipe says about the chip is never written by hand. Until 2026-11-22 each recipe carried `hardware_replace` line pairs ("for the
+# chip, write ttl.math.fill") and a static check that found those names in the chip package's Python files. The chip package's compiler
+# refuses them (`ttl.math.fill is not available; use ttl.block.fill`): the names exist as Python functions and the compiler resolves kernel
+# calls by its own table. So the pairs are gone. A recipe now carries `compile_negatives` (forms the chip compiler must refuse), and its
+# record carries, per chip package, the result of compiling the skeleton and each of those forms with that package's own compiler and no
+# device (orchard/ttlang_hwcompile.py). The section is rendered for one chip package, the one the run would use, and every tag and every
+# "the chip compiler refuses" line comes from a record for exactly that package and exactly this skeleton.
+#
 # A recipe is shown only with a verification record (`ttlang_recipes.verified.json`, written by scripts/verify_ttlang_recipes.py) for
 # exactly that skeleton: the sha256 matches, the unedited check passed on all six input sets, every wrong variant failed the same check,
-# and every call of the chip form exists in the installed chip package. A recipe without such a record is refused, never shown untagged.
-# No record claims that a recipe compiled on a chip.
+# and every chip-compile entry in the record is well formed. A recipe without such a record is refused, never shown untagged. What a
+# record may say about a chip package has three levels, and the sheet prints the one the record supports: the package's compiler
+# accepted the skeleton with no device (`compile`), it refused it (`refused`), or the kernel ran on a chip under a lease (`chip`, an entry
+# only a chip run writes; none exists yet).
 
-RECIPES_SCHEMA = "orchard-recipes/1"
-VERIFIED_SCHEMA = "orchard-recipes-verified/1"
+RECIPES_SCHEMA = "orchard-recipes/2"
+VERIFIED_SCHEMA = "orchard-recipes-verified/2"
 RECIPES = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes.json"
 RECIPES_VERIFIED = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes.verified.json"
+RECIPES_CONTROL = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes_control.json"                 # same form and length, no recipe content
+RECIPES_CONTROL_VERIFIED = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes_control.verified.json"
 RECIPES_MAX_BYTES = 200_000
 MAX_RECIPES = 12
 MAX_SKELETON_LINES = 120
@@ -675,8 +687,11 @@ RECIPES_LINE_BUDGET = 260                  # the rendered recipes section stays 
 RECIPES_HEADING = "Recipes by kind of op"
 _RECIPE_NAME = re.compile(r"[a-z][a-z0-9-]{0,48}")
 TAG_SIM = "[passes the simulator]"
-TAG_HW = "[hardware form not verified on chip]"
-ISSUE_205 = "0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205)"
+TAG_NO_PACKAGE = "[not compiled with a chip package]"
+MAX_COMPILE_NEGATIVES = 6
+MAX_CLAIM = 300                            # characters in a compile negative's claim: it is printed as one line of the sheet
+MAX_TARGETS = 8                            # chip packages one recipe's record may carry results for
+LEVELS = ("chip", "compile", "refused", "none")
 
 
 class RecipeError(Exception):
@@ -751,7 +766,20 @@ def recipes_shape_problems(data) -> list[str]:
                 if len(line) > MAX_SKELETON_LINE:
                     problems.append(f"{where}: a skeleton line is longer than {MAX_SKELETON_LINE} characters")
                     break
-        _pairs(recipe.get("hardware_replace"), f"{where}: hardware_replace", problems)
+        if "hardware_replace" in recipe:
+            problems.append(f"{where}: hardware_replace is no longer read (the chip compiler refused those forms); use compile_negatives")
+        compile_negatives = recipe.get("compile_negatives")
+        if not isinstance(compile_negatives, list) or not 0 < len(compile_negatives) <= MAX_COMPILE_NEGATIVES:
+            problems.append(f"{where}: compile_negatives must list 1 to {MAX_COMPILE_NEGATIVES} forms the chip compiler must refuse")
+        else:
+            seen_names: set = set()
+            for n in compile_negatives:
+                if not (isinstance(n, dict) and isinstance(n.get("name"), str) and n["name"] and n["name"] not in seen_names):
+                    problems.append(f"{where}: each compile negative needs a name of its own")
+                    continue
+                seen_names.add(n["name"])
+                _prose(n.get("claim"), f"{where}: compile negative {n['name']!r} claim", problems, limit=MAX_CLAIM)
+                _pairs(n.get("replace"), f"{where}: compile negative {n['name']!r} replace", problems)
         negatives = recipe.get("negatives")
         if not isinstance(negatives, list) or not negatives:
             problems.append(f"{where}: negatives must list at least one wrong variant")
@@ -809,14 +837,16 @@ def apply_replacements(recipe: dict, pairs, what: str) -> str:
     return text
 
 
-def hardware_skeleton(recipe: dict) -> list[str]:
-    """The skeleton in the chip package's form: the recipe's `hardware_replace` pairs applied."""
-    return apply_replacements(recipe, recipe["hardware_replace"], "a hardware_replace").split("\n")
+def skeleton_text(recipe: dict) -> str:
+    """The skeleton as a kernel file: the bytes `skeleton_sha256` hashes, the simulator check runs and the chip compiler reads."""
+    return "\n".join(recipe["skeleton"]) + "\n"
 
 
 def verified_problems(data: dict, verified) -> list[str]:
     """Why the verification records do not cover every recipe in `data`. An empty list means each recipe's skeleton has a record that
-    matches it, passed the unedited check on every input set, failed every wrong variant, and found its chip-form calls in the package."""
+    matches it, passed the unedited check on every input set and failed every wrong variant, and that every chip-compile entry in a
+    record is well formed. Whether a recipe compiles for a chip package is a separate question (`compile_status`, `recipes_gate`): a
+    recipe with no compile result is still usable and is tagged as not compiled."""
     if not isinstance(verified, dict) or verified.get("schema") != VERIFIED_SCHEMA:
         return [f"the verification records must be an object with schema {VERIFIED_SCHEMA!r}"]
     records = verified.get("records")
@@ -844,46 +874,161 @@ def verified_problems(data: dict, verified) -> list[str]:
                 problems.append(f"{name}: wrong variant {wanted['name']!r} has no record")
             elif got.get("failed") is not True:
                 problems.append(f"{name}: wrong variant {wanted['name']!r} passed the check, so the check cannot tell it from the recipe")
-        hardware = rec.get("hardware_static")
-        if not (isinstance(hardware, dict) and hardware.get("ok") is True):
-            problems.append(f"{name}: the hardware-form calls were not all found in the chip package")
+        problems += [f"{name}: {p}" for p in _compile_entries_problems(rec)]
     problems += [f"{extra}: a record for a recipe the file does not have" for extra in sorted(set(records) - set(names))]
     return problems
+
+
+def _compile_entries_problems(rec: dict) -> list[str]:
+    """Type checks on the `compile` and `chip` lists of one recipe's record. A malformed entry is a problem and never a silent skip:
+    an entry that cannot be read must not turn into a missing tag or a passing one."""
+    from orchard import ttlang_hwcompile
+    problems = []
+    entries = rec.get("compile", [])
+    if not isinstance(entries, list) or len(entries) > MAX_TARGETS:
+        return [f"`compile` must be a list of at most {MAX_TARGETS} entries"]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            problems.append("a compile entry is not an object")
+            continue
+        problems += ttlang_hwcompile.record_problems(entry.get("record"))
+        if not isinstance(entry.get("date"), str) or len(entry["date"]) > 40:
+            problems.append("a compile entry has no date")
+        negatives = entry.get("negatives")
+        if not isinstance(negatives, list) or not all(
+                isinstance(n, dict) and isinstance(n.get("name"), str) and type(n.get("failed")) is bool
+                and isinstance(n.get("category"), str) and isinstance(n.get("first_line"), str) and len(n["first_line"]) <= 300
+                for n in negatives):
+            problems.append("a compile entry's negatives are malformed")
+    chips = rec.get("chip", [])
+    if not isinstance(chips, list) or len(chips) > MAX_TARGETS:
+        return problems + [f"`chip` must be a list of at most {MAX_TARGETS} entries"]
+    for entry in chips:
+        ok = (isinstance(entry, dict) and not ttlang_hwcompile.identity_problems(entry.get("target"))
+              and isinstance(entry.get("kernel_sha256"), str) and isinstance(entry.get("date"), str) and len(entry["date"]) <= 40
+              and isinstance(entry.get("evidence"), str) and 0 < len(entry["evidence"]) <= 200
+              and safeio.is_finite_number(entry.get("pcc_min")) and entry.get("passed") is True)
+        if not ok:
+            problems.append("a chip entry needs a target, the kernel's sha256, a date, an evidence path, a finite pcc_min and passed true")
+    return problems[:5]
+
+
+def compile_status(recipe: dict, rec: dict, target) -> dict:
+    """What the records show about `recipe` for the chip package `target` (an identity from ttlang_hwcompile.package_identity, or None).
+
+    `level` is one of LEVELS. `chip`: a chip entry for this package and this skeleton. `compile`: the package's compiler accepted this
+    skeleton with no device. `refused`: it refused it, and `first_line` is its message. `none`: there is no result for this package and
+    this skeleton (no entry, an entry for other bytes, or a check that did not finish, such as a timeout). `claims` are the compile
+    negatives the same compiler refused, each with the compiler's line; `negatives_open` names the ones it did not refuse."""
+    from orchard import ttlang_hwcompile
+    status = {"level": "none", "label": None, "first_line": "", "sources": 0, "date": None, "claims": [], "negatives_open": [], "chip": None}
+    if target is None or ttlang_hwcompile.identity_problems(target):
+        return status
+    status["label"] = ttlang_hwcompile.target_label(target)
+    sha = skeleton_sha256(recipe)
+    for entry in rec.get("compile", []):
+        record = entry["record"]
+        if not ttlang_hwcompile.same_target(record["target"], target) or record.get("kernel_sha256") != sha:
+            continue
+        status["date"] = entry["date"]
+        if record["category"] == "compile_error":
+            status.update(level="refused", first_line=record["first_line"])
+        elif record["compiled"]:
+            status.update(level="compile", sources=len(record["kernel_sources"]))
+            done = {n["name"]: n for n in entry["negatives"]}
+            for wanted in recipe["compile_negatives"]:
+                got = done.get(wanted["name"])
+                if got is not None and got["failed"] is True and got["category"] == "compile_error":
+                    status["claims"].append({"claim": wanted["claim"], "first_line": got["first_line"]})
+                else:
+                    status["negatives_open"].append(wanted["name"])
+        break
+    if status["level"] == "compile":
+        for entry in rec.get("chip", []):
+            if ttlang_hwcompile.same_target(entry["target"], target) and entry["kernel_sha256"] == sha:
+                status.update(level="chip", chip=entry)
+                break
+    return status
+
+
+def recipes_gate(data: dict, verified: dict, target) -> list[str]:
+    """Why the recipes may not be turned on without being asked for, for the chip package `target`. An empty list means the gate holds:
+    every recipe has a simulator record (as `verified_problems` checks), the compiler of exactly this package accepted exactly this
+    skeleton with no device, and it refused every one of the recipe's compile negatives, so the compile check is known to tell a wrong
+    form from the recipe. The gate says nothing about a chip run."""
+    problems = recipes_shape_problems(data) or verified_problems(data, verified)
+    if problems:
+        return problems[:5]
+    if target is None:
+        return ["no chip package was found for this run, so no recipe is known to compile for it"]
+    reasons = []
+    for recipe in data["recipes"]:
+        status = compile_status(recipe, verified["records"][recipe["name"]], target)
+        if status["level"] == "refused":
+            reasons.append(f"{recipe['name']}: the compiler of {status['label']} refused the skeleton ({status['first_line']})")
+        elif status["level"] == "none":
+            reasons.append(f"{recipe['name']}: no compile result for {status['label'] or 'this chip package'} and this skeleton "
+                           "(run scripts/verify_ttlang_recipes.py)")
+        elif status["negatives_open"]:
+            reasons.append(f"{recipe['name']}: the compiler did not refuse the wrong form {status['negatives_open'][0]!r}, so the compile "
+                           "check cannot tell it from the recipe")
+    return reasons
 
 
 def _verified_line(rec: dict, verified: dict) -> str:
     pcc = rec.get("pcc_min")
     shown = f", worst PCC {pcc:.4f}" if safeio.is_finite_number(pcc) else ""
-    return (f"Verified {verified.get('date', 'on an unrecorded date')}: the unedited check passed on {rec['sets']} of {rec['sets']} input sets"
+    return (f"Simulator, {verified.get('date', 'on an unrecorded date')}: the unedited check passed on {rec['sets']} of {rec['sets']} input sets"
             f"{shown}; {len(rec['negatives'])} wrong variant(s) failed it.")
 
 
-def render_recipes(data: dict, verified: dict) -> str:
-    """The Markdown section for the recipes. Raises RecipeError, naming the problems, when the file or a record is not usable."""
+def _chip_tag_and_line(status: dict) -> tuple[str, str]:
+    label = status["label"]
+    if label is None:
+        return TAG_NO_PACKAGE, "Chip compiler: no chip package was found for this run, so the skeleton was not compiled for one."
+    if status["level"] == "refused":
+        return (f"[refused by the compiler of {label}]",
+                f"Chip compiler ({label}, {status['date']}, no chip): refused the skeleton with `{status['first_line']}`. Do not expect this "
+                "structure to compile for that package.")
+    if status["level"] == "none":
+        return f"[not compiled with {label}]", f"Chip compiler ({label}): no result for this skeleton."
+    line = (f"Chip compiler ({label}, {status['date']}, no chip): accepted the skeleton and wrote {status['sources']} kernel source(s).")
+    if status["level"] == "chip":
+        chip = status["chip"]
+        return (f"[ran on a chip with {label}]",
+                line + f" Ran on a chip on {chip['date']}: worst PCC {chip['pcc_min']:.4f} ({chip['evidence']}).")
+    return f"[compiles with {label}, no chip]", line + " Not run on a chip."
+
+
+def render_recipes(data: dict, verified: dict, target=None) -> str:
+    """The Markdown section for the recipes, for the chip package `target` (None when the run has none). Raises RecipeError, naming the
+    problems, when the file or a record is not usable."""
     problems = recipes_shape_problems(data) or verified_problems(data, verified)
     if problems:
         raise RecipeError("; ".join(problems[:5]))
-    lines = [f"## {RECIPES_HEADING}", ""]
+    lines = [f"## {data['title']}", ""]
     for paragraph in data["intro"]:
         lines += [paragraph, ""]
     for recipe in data["recipes"]:
         rec = verified["records"][recipe["name"]]
-        lines += [f"### {recipe['title']} {TAG_SIM} {TAG_HW}", "", f"Applies to: {recipe['applies_to']}.", f"Worked op: {recipe['worked_op']}.",
-                  _verified_line(rec, verified), ""]
+        status = compile_status(recipe, rec, target)
+        tag, chip_line = _chip_tag_and_line(status)
+        lines += [f"### {recipe['title']} {TAG_SIM} {tag}", "", f"Applies to: {recipe['applies_to']}.", f"Worked op: {recipe['worked_op']}.",
+                  _verified_line(rec, verified), chip_line, ""]
         lines += [f"- {step}" for step in recipe["plan"]]
-        lines += [f"- Units: {recipe['units']}", "", *["    " + ln for ln in recipe["skeleton"]], "",
-                  f"For the chip, change these lines. {ISSUE_205}.", ""]
-        for old, new in recipe["hardware_replace"]:
-            lines += [f"    simulator: {old}", f"    chip:      {new}"]
-        lines.append("")
+        lines += [f"- Units: {recipe['units']}", "", *["    " + ln for ln in recipe["skeleton"]], ""]
+        for claim in status["claims"]:
+            lines.append(f"- The chip compiler refuses {claim['claim']} (`{claim['first_line']}`)")
+        if status["claims"]:
+            lines.append("")
     while lines and lines[-1] == "":
         lines.pop()
     return "\n".join(lines) + "\n"
 
 
-def render_with_recipes(sheet: dict, data=None, verified=None) -> str:
+def render_with_recipes(sheet: dict, data=None, verified=None, target=None) -> str:
     """`render(sheet)` unchanged, then the recipes section. The sheet's bytes come first, so a run with recipes differs from a run
     without them only by what is added after them."""
     base = render(sheet)
-    section = render_recipes(data if data is not None else load_recipes(), verified if verified is not None else load_verified())
+    section = render_recipes(data if data is not None else load_recipes(), verified if verified is not None else load_verified(), target)
     return base + "\n" + section
