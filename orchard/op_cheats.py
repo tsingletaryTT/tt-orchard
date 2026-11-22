@@ -644,3 +644,246 @@ def show_entry(sheet: dict, name: str) -> list[str]:
     if e.get("evidence"):
         out.append(f"    evidence: {e['evidence']}")
     return out
+
+
+# ---- recipes by kind of op ---------------------------------------------------------------------------------------------------
+#
+# The sheet above lists calls. A coder that writes a kernel for an op nobody wrote before also needs the plan: which buffers, how many
+# reads, where a reduction leaves its value, how a constant becomes an operand. A recipe is that plan for one kind of op, with a skeleton
+# that passed the unedited simulator check on a worked op that is not one of the probe's ops. The recipes live in their own data file
+# (`ttlang_recipes.json`), because a skeleton does not fit the 600-character field of a sheet entry, and they are rendered only when a
+# run asks for them (`kernel-probe --cheat-sheet-recipes on`): `render` above is unchanged, so a run that does not ask has the sheet
+# it always had.
+#
+# A recipe is shown only with a verification record (`ttlang_recipes.verified.json`, written by scripts/verify_ttlang_recipes.py) for
+# exactly that skeleton: the sha256 matches, the unedited check passed on all six input sets, every wrong variant failed the same check,
+# and every call of the chip form exists in the installed chip package. A recipe without such a record is refused, never shown untagged.
+# No record claims that a recipe compiled on a chip.
+
+RECIPES_SCHEMA = "orchard-recipes/1"
+VERIFIED_SCHEMA = "orchard-recipes-verified/1"
+RECIPES = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes.json"
+RECIPES_VERIFIED = HERE / "skills" / "kernel-loop-templates" / "ttlang_recipes.verified.json"
+RECIPES_MAX_BYTES = 200_000
+MAX_RECIPES = 12
+MAX_SKELETON_LINES = 120
+MAX_SKELETON_LINE = 200
+MAX_PLAN_STEPS = 10
+MAX_PROSE = 900                            # characters in an intro paragraph, a plan step or a title (the sheet's MAX_FIELD is 600)
+VERIFIED_SETS = 6                          # the check's input sets: 3 seeds, each with and without outliers
+RECIPES_LINE_BUDGET = 260                  # the rendered recipes section stays under this many lines (a test keeps it)
+RECIPES_HEADING = "Recipes by kind of op"
+_RECIPE_NAME = re.compile(r"[a-z][a-z0-9-]{0,48}")
+TAG_SIM = "[passes the simulator]"
+TAG_HW = "[hardware form not verified on chip]"
+ISSUE_205 = "0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205)"
+
+
+class RecipeError(Exception):
+    """The recipes or their verification records cannot be used. The message says why and names the file or recipe."""
+
+
+def _prose(value, what: str, problems: list, *, limit: int = MAX_PROSE) -> None:
+    if not isinstance(value, str) or not value.strip():
+        problems.append(f"{what} must be a non-empty string")
+    elif len(value) > limit or "\0" in value:
+        problems.append(f"{what} is over {limit} characters or holds a NUL")
+
+
+def _pairs(value, what: str, problems: list) -> None:
+    ok = isinstance(value, list) and all(isinstance(p, list) and len(p) == 2 and all(isinstance(t, str) and t for t in p) and p[0] != p[1]
+                                         and "\0" not in p[0] + p[1] for p in value)
+    if not ok:
+        problems.append(f"{what} must be a list of [old text, new text] pairs of two different non-empty strings")
+
+
+def recipes_shape_problems(data) -> list[str]:
+    """What is wrong with the recipes file's shape (types, bounds, names), without reading any verification record."""
+    if not isinstance(data, dict):
+        return ["the recipes file must be a JSON object"]
+    problems: list[str] = []
+    if data.get("schema") != RECIPES_SCHEMA:
+        problems.append(f"schema must be {RECIPES_SCHEMA!r}")
+    _prose(data.get("title"), "title", problems)
+    intro = data.get("intro")
+    if not isinstance(intro, list) or not intro or len(intro) > 6:
+        problems.append("intro must be a non-empty list of at most 6 paragraphs")
+    else:
+        for i, paragraph in enumerate(intro):
+            _prose(paragraph, f"intro paragraph {i}", problems, limit=MAX_PROSE + 300)
+    recipes = data.get("recipes")
+    if not isinstance(recipes, list) or not recipes or len(recipes) > MAX_RECIPES:
+        return problems + [f"recipes must be a non-empty list of at most {MAX_RECIPES} recipes"]
+    names: set = set()
+    for index, recipe in enumerate(recipes):
+        if not isinstance(recipe, dict):
+            problems.append(f"recipe {index} must be an object")
+            continue
+        name = recipe.get("name")
+        where = f"recipe {name!r}" if isinstance(name, str) else f"recipe {index}"
+        if not isinstance(name, str) or not _RECIPE_NAME.fullmatch(name):
+            problems.append(f"{where}: name must be lower-case words joined by hyphens")
+        elif name in names:
+            problems.append(f"{where}: the name appears twice")
+        else:
+            names.add(name)
+        for key in ("title", "applies_to", "worked_op", "units"):
+            _prose(recipe.get(key), f"{where} {key}", problems)
+        plan = recipe.get("plan")
+        if not isinstance(plan, list) or not plan or len(plan) > MAX_PLAN_STEPS:
+            problems.append(f"{where}: plan must be a non-empty list of at most {MAX_PLAN_STEPS} steps")
+        else:
+            for step in plan:
+                _prose(step, f"{where} plan step", problems)
+        skeleton = recipe.get("skeleton")
+        if not isinstance(skeleton, list) or not skeleton:
+            problems.append(f"{where}: skeleton must be a non-empty list of lines")
+        elif len(skeleton) > MAX_SKELETON_LINES:
+            problems.append(f"{where}: skeleton has more than {MAX_SKELETON_LINES} lines")
+        else:
+            for line in skeleton:
+                if not isinstance(line, str):
+                    problems.append(f"{where}: every skeleton line must be a string")
+                    break
+                if "\0" in line:
+                    problems.append(f"{where}: a skeleton line holds a NUL")
+                    break
+                if len(line) > MAX_SKELETON_LINE:
+                    problems.append(f"{where}: a skeleton line is longer than {MAX_SKELETON_LINE} characters")
+                    break
+        _pairs(recipe.get("hardware_replace"), f"{where}: hardware_replace", problems)
+        negatives = recipe.get("negatives")
+        if not isinstance(negatives, list) or not negatives:
+            problems.append(f"{where}: negatives must list at least one wrong variant")
+        else:
+            for n in negatives:
+                if not (isinstance(n, dict) and isinstance(n.get("name"), str) and isinstance(n.get("claim"), str)):
+                    problems.append(f"{where}: each negative needs a name and a claim")
+                else:
+                    _pairs(n.get("replace"), f"{where}: negative {n['name']!r} replace", problems)
+        spec = recipe.get("spec")
+        if not isinstance(spec, dict):
+            problems.append(f"{where}: spec must be an object")
+        elif not (isinstance(spec.get("op"), str) and spec["op"].startswith("recipe_") and spec.get("reference") == spec["op"]):
+            problems.append(f"{where}: spec op must start with recipe_ and name itself as its reference")
+    return problems
+
+
+def _read_recipe_file(path, what: str) -> dict:
+    try:
+        return safeio.read_json(path, max_bytes=RECIPES_MAX_BYTES, expect=dict)
+    except (safeio.SafeReadError, ValueError, RecursionError) as exc:
+        raise RecipeError(f"{Path(path).name}: {what} cannot be read: {exc}") from None
+
+
+def load_recipes(path=None) -> dict:
+    """The recipes file through the bounded reader, checked for shape. Raises RecipeError."""
+    path = path or RECIPES
+    data = _read_recipe_file(path, "the recipes file")
+    problems = recipes_shape_problems(data)
+    if problems:
+        raise RecipeError(f"{Path(path).name}: " + "; ".join(problems[:5]))
+    return data
+
+
+def load_verified(path=None) -> dict:
+    """The verification records through the bounded reader. Their content is judged by `verified_problems`. Raises RecipeError."""
+    return _read_recipe_file(path or RECIPES_VERIFIED, "the verification records")
+
+
+def skeleton_sha256(recipe: dict) -> str:
+    """sha256 of the skeleton as scripts/verify_ttlang_recipes.py writes it to kernel.py: its lines joined by newlines, one at the end."""
+    import hashlib
+    return hashlib.sha256(("\n".join(recipe["skeleton"]) + "\n").encode("utf-8")).hexdigest()
+
+
+def apply_replacements(recipe: dict, pairs, what: str) -> str:
+    """The skeleton text with each [old, new] pair applied once, in order. A pair whose old text is not in the skeleton exactly once is a
+    RecipeError: a replacement that silently matched nothing would leave the sheet's chip form equal to its simulator form."""
+    text = "\n".join(recipe["skeleton"])
+    for old, new in pairs:
+        if text.count(old) != 1:
+            raise RecipeError(f"recipe {recipe.get('name')!r}: {what} text must occur once in the skeleton, and {old[:60]!r} occurs "
+                              f"{text.count(old)} times")
+        text = text.replace(old, new)
+    return text
+
+
+def hardware_skeleton(recipe: dict) -> list[str]:
+    """The skeleton in the chip package's form: the recipe's `hardware_replace` pairs applied."""
+    return apply_replacements(recipe, recipe["hardware_replace"], "a hardware_replace").split("\n")
+
+
+def verified_problems(data: dict, verified) -> list[str]:
+    """Why the verification records do not cover every recipe in `data`. An empty list means each recipe's skeleton has a record that
+    matches it, passed the unedited check on every input set, failed every wrong variant, and found its chip-form calls in the package."""
+    if not isinstance(verified, dict) or verified.get("schema") != VERIFIED_SCHEMA:
+        return [f"the verification records must be an object with schema {VERIFIED_SCHEMA!r}"]
+    records = verified.get("records")
+    if not isinstance(records, dict):
+        return ["the verification records must hold an object `records`"]
+    problems: list[str] = []
+    names = [r["name"] for r in data["recipes"]]
+    for recipe in data["recipes"]:
+        name = recipe["name"]
+        rec = records.get(name)
+        if not isinstance(rec, dict):
+            problems.append(f"{name}: no verification record")
+            continue
+        if rec.get("skeleton_sha256") != skeleton_sha256(recipe):
+            problems.append(f"{name}: the skeleton differs from the text that was verified (run scripts/verify_ttlang_recipes.py)")
+        if rec.get("passed") is not True:
+            problems.append(f"{name}: the record's `passed` field is {rec.get('passed')!r}")
+        sets = rec.get("sets")
+        if type(sets) is not int or sets < VERIFIED_SETS:
+            problems.append(f"{name}: the check ran on {sets!r} input sets and {VERIFIED_SETS} are needed")
+        done = {n.get("name"): n for n in rec.get("negatives", []) if isinstance(n, dict)} if isinstance(rec.get("negatives"), list) else {}
+        for wanted in recipe["negatives"]:
+            got = done.get(wanted["name"])
+            if got is None:
+                problems.append(f"{name}: wrong variant {wanted['name']!r} has no record")
+            elif got.get("failed") is not True:
+                problems.append(f"{name}: wrong variant {wanted['name']!r} passed the check, so the check cannot tell it from the recipe")
+        hardware = rec.get("hardware_static")
+        if not (isinstance(hardware, dict) and hardware.get("ok") is True):
+            problems.append(f"{name}: the hardware-form calls were not all found in the chip package")
+    problems += [f"{extra}: a record for a recipe the file does not have" for extra in sorted(set(records) - set(names))]
+    return problems
+
+
+def _verified_line(rec: dict, verified: dict) -> str:
+    pcc = rec.get("pcc_min")
+    shown = f", worst PCC {pcc:.4f}" if safeio.is_finite_number(pcc) else ""
+    return (f"Verified {verified.get('date', 'on an unrecorded date')}: the unedited check passed on {rec['sets']} of {rec['sets']} input sets"
+            f"{shown}; {len(rec['negatives'])} wrong variant(s) failed it.")
+
+
+def render_recipes(data: dict, verified: dict) -> str:
+    """The Markdown section for the recipes. Raises RecipeError, naming the problems, when the file or a record is not usable."""
+    problems = recipes_shape_problems(data) or verified_problems(data, verified)
+    if problems:
+        raise RecipeError("; ".join(problems[:5]))
+    lines = [f"## {RECIPES_HEADING}", ""]
+    for paragraph in data["intro"]:
+        lines += [paragraph, ""]
+    for recipe in data["recipes"]:
+        rec = verified["records"][recipe["name"]]
+        lines += [f"### {recipe['title']} {TAG_SIM} {TAG_HW}", "", f"Applies to: {recipe['applies_to']}.", f"Worked op: {recipe['worked_op']}.",
+                  _verified_line(rec, verified), ""]
+        lines += [f"- {step}" for step in recipe["plan"]]
+        lines += [f"- Units: {recipe['units']}", "", *["    " + ln for ln in recipe["skeleton"]], "",
+                  f"For the chip, change these lines. {ISSUE_205}.", ""]
+        for old, new in recipe["hardware_replace"]:
+            lines += [f"    simulator: {old}", f"    chip:      {new}"]
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def render_with_recipes(sheet: dict, data=None, verified=None) -> str:
+    """`render(sheet)` unchanged, then the recipes section. The sheet's bytes come first, so a run with recipes differs from a run
+    without them only by what is added after them."""
+    base = render(sheet)
+    section = render_recipes(data if data is not None else load_recipes(), verified if verified is not None else load_verified())
+    return base + "\n" + section
