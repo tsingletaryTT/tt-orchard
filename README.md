@@ -104,7 +104,7 @@ What landed on `main` from 2026-11-10 to 2026-11-13 (pull requests 689 to 765; t
   seven telegraph four-process failures that were called flaky had one cause, a test that removed the repository from `sys.path` (PR 744). The supervisor
   test rig no longer reads the real device holders of the machine, which made one test fail whenever a real coder was running (PR 765, issue 761).
 - **In review at the time of writing:** a faster expert loop in the generator (one gather and one scatter for all slots, fused silu, LoFi matmuls), a
-  cached decode for the generated Qwen4 port (issue 759: today `decode_step` of a generated port runs the whole sequence again), probes 16 to 18 (trace
+  cached decode for the generated Qwen4 port (issue 759; merged as PR 762: a generated port of a standard decoder still ran the whole sequence again for every token until the cached decode of issue 805, PR 806, which has not run on a board), probes 16 to 18 (trace
   replay, five loop variants, DRAM-sharded matmuls) and a CPU op count of the generated layers.
 - **Counts.** The full parallel run on 2026-11-13 on the head of PR 765 passed 29,722 tests (see Tests below). As of 2026-11-13 the repository has 354
   merged pull requests and 106 open issues; the issue list was consolidated from 157 to about 104 on 2026-11-12.

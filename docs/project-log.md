@@ -5871,3 +5871,31 @@ Settled from the issue's list. Size: at 4,000 positions the sampled file is 64 K
 Not settled. The CPU time of a 4,000-token reference on a 2B and a 7B model was not measured: the suite was running and chips and the CPU stand-in were not to be touched, so the README says "not yet measured". The cached sampling loop was checked on a tiny random Qwen2 only (its log-probabilities equal an uncached forward pass to 5e-7); it was not run on a hybrid model such as Olmo-Hybrid-7B or Aion, whose caches may not return `past_key_values` the way the loop expects (the failure would be recorded as a skipped reference and the stage would not fail). The second chip pass was run against the fake `ttnn` only. If a sampled token is the end-of-sequence token the loop continues past it.
 
 Checks. 79 new tests (18 in `tests/test_reference_fidelity_tokens.py`, 43 in `tests/test_port_check_sampled_fidelity.py`, 12 in `tests/test_fidelity_tokens_option.py`, 1 in `tests/test_run_view.py`, 5 in `tests/test_port_check_fidelity.py`, plus helpers in `tests/port_check_fakes.py`); 41 mutations across the stage 1 script, the stage 2 template, the gate and the option wiring, all red once two weak tests were fixed (the cache test used a tolerance of 0.15 and let a loop with no cache pass; the gate's call site had no test through `gate_full_port`).
+
+## 2026-11-22: cached decode for the generated port of a standard decoder (issue 805, PR 806)
+
+Branch `generic-cached-decode`. Issue 759 was closed for the composed Qwen4 layers (PRs 762, 780). The port of a standard decoder (Qwen3 style, Aion with its
+sliding windows) still decoded by running the whole sequence again: the Aion port of run 3 decodes at about 8.3 tokens per second, 1.9% of the estimated floor,
+and each token costs a full pass over the prompt.
+
+The plan now has `attention_cached_decode`: the layers are all the standard pre-norm attention and MLP, the generator writes the attention, and there is no stub,
+no step before the first layer, no extra child of the text model and no block family. For such a port the generator writes `_attention_step` (one row: the
+projections, the per-head norm, the rotary at the row's own position, the new key and value appended to the kept ones, SDPA of the one query against all kept
+rows, padded to 32 query rows and a multiple of 32 keys with an additive mask on the padding), `_rope_row` and `_rotate_row`, the cache lines of `_attention`
+(the prompt keeps the keys after the rotary and the values of the n real rows; a sliding layer keeps its last `window` rows) and the cached `prefill` and
+`decode_step` that the Qwen4 cache already used. A step at another position than the next one runs the prompt again. `close` frees the kept tensors.
+The whole-sequence run is unchanged and is the reference of the tests.
+
+Tests (`tests/test_port_template_generic_decode.py`, written first): 26, on the fake ttnn. An Aion-like config (window 8, YaRN original length 16, three layers
+of two sliding and one full, four query heads on two key heads) decodes 20 steps after a 20-token prompt like the whole-sequence run (logits within 5% of the
+largest logit, same argmax) and like a plain torch forward within 2e-3; a plain Qwen-like config does the same for 18 steps; a mesh of two chips, a rewind and a
+new prompt after a decode are covered; the sliding layers hold exactly `window` rows and the full layer every row; no step calls `_forward`; `close` frees the
+kept tensors. 15 mutations each turn a test red for the intended reason: the window one row too long or too short, the rotary at position 0 or at the last row,
+the new key or value put before the cached ones, a new row not kept, padding rows kept, keys kept from before the rotary, the first rows of the prompt kept by a
+sliding layer, padding columns unmasked, the key heads taken as many as the query heads, either per-head norm skipped, the position not advanced. Two pins moved:
+the byte-for-byte hash of the standard small decoder's generated text (the tiny Qwen4 hash did not move). Targeted run of 70 test files: all passed.
+
+Not settled. No board has run this decode. The ops are those the Qwen4 cache already uses on a board (concat, slice, permute, an additive mask on SDPA with
+the query padded to 32 rows), but the fake accepts shapes a board may not (it accepted a reshape of the wrong size in one run before the grouped config was used).
+The speed is not measured; the expectation is in the PR. The chip run that closes this: the Aion port of aion-run3 on a leased board with this decode, decode
+speed over three runs, then top-1 agreement over the stage 2 reference and the 8,192-token passkey check, which must not change.
