@@ -1,0 +1,3 @@
+target = "0.9.192"
+summary = "OpenCode v2 against the orchard agent loop on kernel-probe tasks: a runner with a Landlock sandbox, the run log with its data, and the quality readout; no change under orchard/."
+kind = "docs"

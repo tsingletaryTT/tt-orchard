@@ -252,7 +252,12 @@ def server_row(rec: dict, process: dict) -> dict | None:
     row = dict(d)
     row["cache_hit_share_arithmetic"] = (d["prompt_tokens_cache_hit"] / prompt) if prompt else None
     row["host_and_tool_s_arithmetic"] = (wall - d["prefill_s"] - d["decode_s"] - d["queue_s"]) if wall is not None else None
-    row["requests_match"] = (int(d["requests"]) == int((process or {}).get("turns_or_steps") or -1))
+    steps = int((process or {}).get("turns_or_steps") or 0)
+    # The probe's decode-speed check sends one request before each attempt, so one more request than the harness made is expected; OpenCode's
+    # continuation after a reply cut at the cap adds up to two. A larger surplus is another client on the server.
+    row["extra_requests_arithmetic"] = int(d["requests"]) - steps - 1
+    row["other_client_suspected"] = row["extra_requests_arithmetic"] >= 3 or row["decode_s"] > ((wall or 0) + 1)
+    row["requests_match"] = not row["other_client_suspected"]
     return row
 
 
@@ -321,8 +326,12 @@ def main(argv: list) -> int:
             row["server"] = server_row(rec, row["process"])
             row["loadavg_start"], row["loadavg_end"] = rec.get("loadavg_start"), rec.get("loadavg_end")
             row["ended_on"] = "its own final answer" if att.get("status") == "done" else f"a limit or stop: {att.get('status')}"
-            kpath = adir / "kernel.py"
-            if att.get("passed_sim") and kpath.is_file():
+            # The kernel the probe judged: its own copy in the probe-owned verdict directory, matched against the sha256 in the attempt's provenance.
+            kpath = kernelprobe.verdict_dir(out, rec["op"], 1) / kernelprobe.CLEAN_DIR / "kernel.py"
+            want = (att.get("provenance") or {}).get("kernel_sha256")
+            if att.get("passed_sim") and kpath.is_file() and want and hashlib.sha256(kpath.read_bytes()).hexdigest() != want:
+                row["static_skipped"] = "the judged kernel's sha256 does not match the attempt's provenance"
+            elif att.get("passed_sim") and kpath.is_file():
                 kernel = kpath.read_text()
                 sheet = adir / "ttlang_cheat_sheet.md"
                 entries = sheet_entries(kernelprobe.TEMPLATES / "ttlang_cheat_sheet.json")
@@ -381,7 +390,7 @@ def render(rows: list, window: tuple) -> str:
         if sv:
             L.append(f"| {r['harness']} | {r['op']} | {r['n']} | {fmt(t.get('input'))} | {fmt(t.get('output'))} | {fmt(sv['prompt_tokens'])} | {fmt(sv['prompt_tokens_cache_hit'])} | "
                      f"{fmt(sv['prompt_tokens_computed'])} | {fmt(sv['cache_hit_share_arithmetic'], 3)} | {fmt(sv['generation_tokens'])} | "
-                     f"{fmt(sv['requests'])} / {fmt(p.get('turns_or_steps'))}{'' if sv['requests_match'] else ' (differ)'} | {fmt(sv['requests_hit_reply_cap'])} | {fmt(sv['prefill_s'])} | "
+                     f"{fmt(sv['requests'])} / {fmt(p.get('turns_or_steps'))}{'' if sv['requests_match'] else ' (OTHER CLIENT SUSPECTED, +' + str(sv['extra_requests_arithmetic']) + ')'} | {fmt(sv['requests_hit_reply_cap'])} | {fmt(sv['prefill_s'])} | "
                      f"{fmt(sv['decode_s'])} | {fmt(sv['queue_s'])} | {fmt(sv['host_and_tool_s_arithmetic'])} | {fmt(r['agent_wall_s'])} | {' '.join(r.get('loadavg_start') or [])} |")
         else:
             L.append(f"| {r['harness']} | {r['op']} | {r['n']} | {fmt(t.get('input'))} | {fmt(t.get('output'))} | not taken | - | - | - | - | - | - | - | - | - | - | {fmt(r['agent_wall_s'])} | - |")
