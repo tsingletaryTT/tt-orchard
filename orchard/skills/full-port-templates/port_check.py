@@ -122,6 +122,7 @@ MAX_NUMEL = 2 ** 28              # choice: total elements saved (1 GiB as float3
 REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
+SAMPLED = "stages/1/evidence/reference/fidelity-ids.json"     # issue 789: stage 1's optional reference sampled at temperature 1 (reference_gate.py), with the log-probability of each id
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
 LENGTH_CHECK_LENGTHS = (2, 3, 4, 31, 32, 33)      # choice: the shortest prompts and the sizes at and around one tile of 32 tokens, where padding bugs sit
 VOCAB_PER_DIE_LIMIT = 65536                   # the hazard scan's limit (orchard/hazards.py VOCAB_PER_DIE_LIMIT; a test keeps the two equal): a sampler index wraps here
@@ -1702,15 +1703,17 @@ def vocab_check(w, vocab: int, dies: int) -> dict:
     return block
 
 
-def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None) -> dict:
+def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, reference_length: int | None = None,
+                   kind: str = "reference-greedy-text") -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
-    10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
-    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's.
-    Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note says which of the two
-    limited the count."""
+    10 * exp(mean(chip logprob) - mean(reference logprob)). With the default `kind` the text is the reference's greedy text, so the number is
+    not comparable with the sampled-text score of scripts/fidelity_score.py; with kind "reference-sampled-text" (issue 789) the text is the
+    reference's own sample at temperature 1, the kind of text that script scores. It shows how far the port's probabilities for those tokens
+    are from the reference's. Below FIDELITY_MIN_TOKENS the block carries a note, and when the cap and the reference length are given the note
+    says which of the two limited the count."""
     n = len(ref_lp)
     value = FIDELITY_SCALE * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
-    block = {"kind": "reference-greedy-text", "scale": FIDELITY_SCALE, "tokens": n, "value": value,
+    block = {"kind": kind, "scale": FIDELITY_SCALE, "tokens": n, "value": value,
              "reference_logprobs": ref_lp, "chip_logprobs": chip_lp}
     if n < FIDELITY_MIN_TOKENS:
         note = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
@@ -1724,6 +1727,67 @@ def fidelity_block(ref_lp: list, chip_lp: list, cap: int | None = None, referenc
     return block
 
 
+def sampled_reference(prompt: list) -> dict | None:
+    """Stage 1's sampled reference, as a dict with `ids`, `logprobs` and its sha256 and length, or None when stage 1 wrote none (the option was
+    not used). A file that exists and cannot be used gives {"status": "skipped", "reason": ...}: the check says why and goes on without it."""
+    path = RUN_DIR / SAMPLED
+    if not path.exists() and not path.is_symlink():
+        return None
+
+    def skipped(reason: str) -> dict:
+        return {"status": "skipped", "reason": f"{SAMPLED}: {reason}"[:300]}
+
+    if path.is_symlink() or not path.is_file():
+        return skipped("is a link or not a regular file")
+    try:
+        with open(path, "rb") as fh:      # hardening: ok the supervisor's own stage 1 file under the run directory (a link is refused just above); bounded read in a try
+            raw = fh.read(64 * 1024 * 1024)
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return skipped("is not readable JSON")
+    if not isinstance(data, dict):
+        return skipped("is not a JSON object")
+    ids, lps = data.get("ids"), data.get("logprobs")
+    if data.get("complete") is not True:
+        return skipped("is not complete (the stage 1 sampling stopped early)")
+    if data.get("temperature") != 1.0:
+        return skipped("was not sampled at temperature 1")
+    if data.get("prompt_ids_sha256") != hashlib.sha256(json.dumps(prompt, separators=(",", ":")).encode()).hexdigest():
+        return skipped("continues another prompt than stage 1's prompt-ids.json")
+    if not isinstance(ids, list) or not ids or not all(type(i) is int and i >= 0 for i in ids):
+        return skipped("holds no list of whole-number ids")
+    if not isinstance(lps, list) or len(lps) != len(ids):
+        return skipped("logprobs are not a list of the same length as ids")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e6 and v <= 1e-6 for v in lps):      # a NaN fails `abs(v) < 1e6`; a huge int is refused before any conversion
+        return skipped("log-probabilities are not finite numbers at most 0")
+    floats = [float(v) for v in lps]  # finite: ok each value is bounded by the check above
+    return {"ids": ids, "logprobs": floats, "sha256": hashlib.sha256(raw).hexdigest(), "length": len(ids)}
+
+
+def sampled_fidelity(w, prompt: list, cap: int, sampled: dict) -> dict:
+    """The second teacher-forced pass (issue 789): prefill, then each sampled id fed in with the next as target, over the smaller of the cap and
+    the sampled reference. Report-only. A reference that was skipped comes back as its skip record; a port that cannot give a log-probability, or
+    a request the port fails, is recorded as skipped with the reason (a worker that stopped answering still fails the run)."""
+    if "status" in sampled:
+        return sampled
+    n = min(sampled["length"], cap)
+    ids = sampled["ids"][:n]
+    try:
+        w.ask(op="prefill", ids=prompt, target=ids[0])
+        chip_lp = [w.last.get("lp")]
+        for i in range(1, n):
+            w.ask(op="decode", token=ids[i - 1], position=len(prompt) + i - 1, target=ids[i])
+            chip_lp.append(w.last.get("lp"))
+    except PortFailed as exc:
+        if "did not answer" in str(exc):
+            raise
+        return {"status": "skipped", "reason": f"the port failed the sampled pass: {str(exc)[:240]}"}
+    if not all(isinstance(v, float) for v in chip_lp):
+        return {"status": "skipped", "reason": "the port gave no log-probability for some sampled token"}
+    return {**fidelity_block(sampled["logprobs"][:n], chip_lp, cap, sampled["length"], "reference-sampled-text"),
+            "source": {"path": SAMPLED, "sha256": sampled["sha256"], "length": sampled["length"]}}
+
+
 def main() -> int:
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     model_dir = config["model_snapshot"]
@@ -1735,6 +1799,7 @@ def main() -> int:
     refuse_links()
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
     cap = positions_cap(config)
+    sampled = sampled_reference(prompt)
     n = min(len(reference), cap)
     ref = reference[:n]
     RECORD.parent.mkdir(parents=True, exist_ok=True)
@@ -1770,6 +1835,7 @@ def main() -> int:
             device_ops.add_decode(w.last.get(OPS_KEY))
             device_ops.add_traces(w.last.get(TRACES_KEY), decode=True)
         device_ops.check_decode()
+        sampled_block = sampled_fidelity(w, prompt, cap, sampled) if sampled is not None else None     # after the device checks: its steps are not counted in them
         # Free run: a fresh prefill, then the port's own greedy ids.
         free = [w.ask(op="prefill", ids=prompt)]
         for k in range(1, FREE_RUN_TOKENS):
@@ -1808,6 +1874,7 @@ def main() -> int:
               "top1_agreement": agreement,
               "positions": {"cap": cap, "scored": n, "reference_length": len(reference)},
               **({"fidelity": fidelity_block(ref_lp, chip_lp, cap, len(reference))} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
+              **({"sampled_fidelity": sampled_block} if sampled_block is not None else {}),
               **({"near_ties": ties} if ties is not None else {}),
               "length_check": lengths,
               **({"vocab_check": vocab_block} if vocab_block is not None else {}),
@@ -1838,6 +1905,10 @@ def main() -> int:
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)
+    sb = record.get("sampled_fidelity")
+    if sb is not None:
+        print((f"sampled fidelity {sb['value']:.3f} over {sb['tokens']} tokens (10 = predicts the reference's own sample at temperature 1 as the "
+               "reference does; reported not gated)") if "value" in sb else f"sampled fidelity: skipped, {sb['reason']}", flush=True)
     print("PORT_CHECK_SHA256", sha_bytes(data), flush=True)
     return 0
 

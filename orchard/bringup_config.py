@@ -324,7 +324,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                     inputs: dict[str, str] | None = None, accept_credentials: bool = False,
                     graft_trial: bool = True, resume_aborted: bool = False,
                     sampling: str | None = None, full_port: bool = False, full_port_rehearsal: bool = False,
-                    model_kind: str | None = None, port_repair_rounds: int | None = None, port_check_positions: int | None = None,
+                    model_kind: str | None = None, port_repair_rounds: int | None = None, port_check_positions: int | None = None, fidelity_tokens: int | None = None,
                     telegraph_config: Path | None = None, tool_dedupe: bool = True,
                     weights_only_rehearsal: bool = False, thin_port: bool = False) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
@@ -386,6 +386,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--port-repair-rounds", str(port_repair_rounds)]      # only when named (0 is a value): a resume then keeps what the run recorded
     if port_check_positions is not None:
         argv += ["--port-check-positions", str(port_check_positions)]      # only when named: a resume then keeps what the run recorded (issue 731)
+    if fidelity_tokens is not None:
+        argv += ["--fidelity-tokens", str(fidelity_tokens)]      # only when named: a resume then keeps what the run recorded (issue 789)
     if telegraph_config is not None and cfg.telegraph.enabled:
         argv += ["--telegraph-config", str(telegraph_config)]     # only when the helper is on: a full-port stage 2 may phone it (orchard/phone_a_friend.py)
     if model_kind is not None:
