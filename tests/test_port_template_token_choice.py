@@ -24,7 +24,7 @@ from test_port_template_layer_rope import aion_rope_config, run_port
 # The pins of tests/test_port_template_layer_rope.py before this change: the generated text of the standard small decoder and of the tiny Qwen4
 # model, byte for byte as PR 791 left them.
 # OLD_STD moved once, when the generator began to write the cached decode of a standard decoder (issue 759); the tiny Qwen4 pin did not move.
-OLD_STD = "e7610fe96da618d96f885e6b07ba3440ab336237c2858595205f25a4da8b6785"
+OLD_STD = "b359b54b78c1b68861a9cf13580ee9176a478c0df9a693f1b7d115225d0ad7c3"
 OLD_QWEN4 = "21ff801d7aab080c0ef26c99f5481878d561ce0cc95acfb17c9760d5cdff36a0"
 
 

@@ -270,7 +270,7 @@ def test_a_flat_rope_model_is_generated_byte_for_byte_as_before():
     same without it). The standard small decoder's hash moved a second time when the generator began to write the cached decode of a standard decoder
     (issue 759: `_attention_step`, `_rope_row`, `_rotate_row`, the cache lines of `_attention` and `close`, the cached `prefill` and `decode_step`); the tiny
     Qwen4 hash did not move, so the composed layers' text is byte for byte as before."""
-    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "c22a1ce8eeb3f73546c990258d98b37833cf5ad77ea3300c22aa1480854b2ecf"
+    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "bec9114c87f3d22141e3527b5d1315526f7b42bc0c2d46ee8cd4c79fb872f6bf"
     assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "aa1dceb6c5204afce761ecba00ec2b0816d14736062f1baae86164738cf2c02d"
 
 

@@ -2002,6 +2002,30 @@ _ROPE_ROW_TEXT = '''def _rope_row(model, layer_type, pos):
     return pair
 
 
+def _step_zeros(model, heads, rows):
+    """A zero tensor [1, heads, rows, head_dim] TILE bf16 on the device, uploaded once and shared by every layer and every step (the padding of the query and of the keys)."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.setdefault("step_zeros", {})
+    if (heads, rows) not in held:
+        held[(heads, rows)] = _upload(model, torch.zeros(1, heads, rows, ATTENTION["head_dim"], dtype=torch.bfloat16), ttnn.TILE_LAYOUT)
+    return held[(heads, rows)]
+
+
+def _step_mask(model, n, T, total):
+    """The additive mask [1, 1, 32, total] TILE bf16 of a step at position n over T real rows: 0 on the first T columns, -30000 on the padding. The masks of one position are shared
+    by every layer (the sliding layers have one T, the full layers another) and freed when the position moves on."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.get("step_masks")
+    if held is None or held[0] != n:
+        for old in (held[1].values() if held is not None else ()):
+            ttnn.deallocate(old)
+        held = model["step_masks"] = (n, {})
+    if (T, total) not in held[1]:
+        row = torch.where(torch.arange(total) < T, 0.0, -30000.0)
+        held[1][(T, total)] = _upload(model, row.reshape(1, 1, 1, total).expand(1, 1, 32, total).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    return held[1][(T, total)]
+
+
 def _rotate_row(model, x, cos, sin):
     """Rotary in the HF layout on x [1, heads, 1, head_dim] with the tables of `_rope_row`: x * cos + rotate_half(x) * sin, rotate_half as one multiplication by a constant matrix."""
     # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
@@ -2041,14 +2065,14 @@ _ATTENTION_STEP_TEXT = '''def _attention_step(model, prefix, x, state, n, layer_
     total = -(-T // 32) * 32
     pad_keys, pad_values = keys, values
     if total > T:
-        zeros = _upload(model, torch.zeros(1, kv, total - T, hd, dtype=torch.bfloat16), ttnn.TILE_LAYOUT)
+        zeros = _step_zeros(model, kv, total - T)
         pad_keys, pad_values = ttnn.concat([keys, zeros], dim=2), ttnn.concat([values, zeros], dim=2)
-    q32 = ttnn.concat([q, _upload(model, torch.zeros(1, heads, 31, hd, dtype=torch.bfloat16), ttnn.TILE_LAYOUT)], dim=2)
-    mask = _upload(model, torch.where(torch.arange(total) < T, 0.0, -30000.0).reshape(1, 1, 1, total).expand(1, 1, 32, total).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    q32 = ttnn.concat([q, _step_zeros(model, heads, 31)], dim=2)
+    mask = _step_mask(model, n, T, total)
     out = ttnn.transformer.scaled_dot_product_attention(q32, pad_keys, pad_values, attn_mask=mask, is_causal=False, scale=ATTENTION["scale"])
     out = ttnn.slice(out, (0, 0, 0, 0), (1, heads, 1, hd))
     joined = ttnn.reshape(ttnn.permute(out, (0, 2, 1, 3)), (1, 1, 1, heads * hd))
-    for t in (q, k, v, q32, mask) + ((pad_keys, pad_values) if total > T else ()):
+    for t in (q, k, v, q32) + ((pad_keys, pad_values) if total > T else ()):
         ttnn.deallocate(t)
     return _linear(model, prefix + ".o_proj", joined)
 
@@ -2432,6 +2456,11 @@ def render(p: Plan) -> str:
               "            except Exception:      # noqa: BLE001 - a failed free must not stop the run",
               "                pass",
               '    model["cache"] = None',
+              '    for t in list((model.pop("step_masks", None) or (0, {}))[1].values()) + list(model.pop("step_zeros", {}).values()):',
+              "        try:",
+              "            ttnn.deallocate(t)",
+              "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "            pass",
               '    for t in [model.pop("rotate_half", None)] + [t for pair in (model.pop("rope_row", None) or (0, {}))[1].values() for t in pair]:',
               "        if t is not None:",
               "            try:",

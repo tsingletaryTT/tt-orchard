@@ -77,6 +77,8 @@ def run_steps(mod, model, ref, ids, n0, *, tol=0.05, window=None, types=None):
         assert (got - want).abs().max().item() <= tol * scale, (pos, (got - want).abs().max().item(), scale)
         assert int(got.argmax()) == int(want.argmax()), pos
         assert model["cache"]["n"] == pos + 1
+        if window:                     # the masks are shared by the layers and only those of the latest position are held: the sliding layers have one length, the full layers another
+            assert model["step_masks"][0] == pos and len(model["step_masks"][1]) <= 2, (pos, sorted(model["step_masks"][1]))
 
 
 # ---- the plan says when a port keeps a cache --------------------------------------------------------------------------------------------------
@@ -202,7 +204,8 @@ MUTATIONS = {
                                                           "    k_raw = k\n    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)\n"),
                                                          ('state["k"] = ttnn.slice(k, (0, 0, first, 0)', 'state["k"] = ttnn.slice(k_raw, (0, 0, first, 0)')],
     "a sliding layer keeps the first rows of the prompt, not the last": ('first = n - min(n, ATTENTION["window"])', "first = 0"),
-    "the padding columns are not masked": ("torch.where(torch.arange(total) < T, 0.0, -30000.0)", "torch.zeros(total)"),
+    "the padding columns are not masked": ("row = torch.where(torch.arange(total) < T, 0.0, -30000.0)", "row = torch.zeros(total)"),
+    "the masks of earlier positions are never freed": ("if held is None or held[0] != n:", 'if held is None or held[0] == -1:'),
     "the key heads are taken as many as the query heads": ('ttnn.reshape(_linear(model, prefix + ".k_proj", x), (1, 1, kv, hd))', 'ttnn.reshape(_linear(model, prefix + ".k_proj", x), (1, 1, heads, hd))'),
     "the per-head norm of the query is skipped on a step": ('q = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(q, (1, 1, heads, hd)), epsilon=ATTENTION["norm_eps"], weight=model["dev"][prefix + ".q_norm.weight"]), (1, heads, 1, hd))',
                                                             "pass"),

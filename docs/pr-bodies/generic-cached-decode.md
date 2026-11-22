@@ -20,14 +20,14 @@ The whole-sequence run is unchanged. It is the reference of every test and it is
 
 ## Evidence
 
-- Tests, written first (seen failing for the missing step function): `tests/test_port_template_generic_decode.py`, 26 tests on the fake ttnn.
+- Tests, written first (seen failing for the missing step function): `tests/test_port_template_generic_decode.py`, 27 tests on the fake ttnn.
   - An Aion-like config (window 8, YaRN original 16, two sliding layers and one full, four query heads on two key heads): 20 steps after a 20-token prompt match the
     whole-sequence run (within 5% of the largest logit, same argmax) and a plain torch forward (2e-3); the sliding layers hold exactly 8 rows and the full layer every row.
   - A plain Qwen-like config, a two-chip mesh, a rewind, a new prompt after a decode; no step calls `_forward`; `close` frees the kept tensors.
-  - 15 mutations, each red for the intended reason (the failure message of each was read): window one row too long or too short, rotary at position 0 or at the last row,
+  - 16 mutations, each red for the intended reason (the failure message of each was read): window one row too long or too short, rotary at position 0 or at the last row,
     new key or value put before the cached ones, a new row not kept, padding rows kept, keys kept from before the rotary, a sliding layer keeping the first rows of the prompt,
-    padding columns not masked, key heads taken as many as the query heads, either per-head norm skipped, the position not advanced.
-- Targeted run of 70 test files (the generator, the stub prompts, the thin repair, the gate, the hardening ratchet): all passed. The full suite was not run.
+    padding columns not masked, key heads taken as many as the query heads, either per-head norm skipped, the position not advanced, the masks of earlier positions never freed.
+- Targeted run of 67 test files (the generator, the stub prompts, the thin repair, the gate, the hardening ratchet, the port checks, the full-port stages): 2,241 passed, 2 skipped. The full suite was not run.
 - Two golden pins moved: the hash of the standard small decoder's generated text (two test files). The tiny Qwen4 hash did not move, so the composed layers are byte for byte as before.
 
 ## Hardening checklist
@@ -42,13 +42,14 @@ The whole-sequence run is unchanged. It is the reference of every test and it is
 8. Failure paths that leave state behind: replaced state tensors, padded copies and the rope row tables are freed; `close` frees the kept state (`test_close_frees_the_cached_tensors`).
 9. Numbers and sizes: windows of 1 to 40 in the earlier tests of the window; this change uses the window only to trim. The cache grows by one row per step for a full layer (no cap here).
 10. Secrets, paths and host names: none.
-11. Tests that do not test the claim: 15 mutations above; one mutation first survived because a sliding layer that keeps the whole prompt is trimmed on the first step anyway, so a row-count check after the prompt was added (it fails that mutation). The config uses four query heads on two key heads, because the first config (two on one) let a wrong key-head count pass on the fake.
+11. Tests that do not test the claim: 16 mutations above; one mutation first survived because a sliding layer that keeps the whole prompt is trimmed on the first step anyway, so a row-count check after the prompt was added (it fails that mutation). The config uses four query heads on two key heads, because the first config (two on one) let a wrong key-head count pass on the fake.
 12. Housekeeping: change fragment, project-log entry, README and CLAUDE.md sentences about the cached decode corrected, `scripts/version.py check`.
 
 ## What this does not show
 
 - No board has run it. The ops (`concat`, `slice`, `permute`, an additive mask on SDPA with the query padded to 32 rows) are those the Qwen4 cache already uses, but the fake accepted a reshape of the wrong size in one run, so the fake does not prove the shapes are legal on a board.
-- No speed was measured. Expectation, not a result: the whole-sequence run does O(prompt) work per token in every layer (about 8,000 rows at the passkey length), the step does O(1) rows of projections and one attention row against the kept keys, so the step cost should fall toward the cost of the weights read per token. The Aion decode floor estimate is about 450 tokens per second at 8.3 being 1.9% of it, so a few times 10 tokens per second is plausible once host work (the per-step table upload, the host-side sampling row) is counted, and a much higher figure would need the trace. Measure before using any number.
+- No speed was measured, and the op counts say a speedup is not certain. On the fake, one step of the three-layer test port issues 198 ops (about 66 per layer: 37 reshapes, 28 linears, 15 concats, 13 norms) and one whole-sequence pass issues 83 (about 28 per layer). Where the device is bound by the launch of each op (a short context, eager mode), the step can cost more per token than the whole-sequence pass; it wins when the whole-sequence pass becomes compute-bound by the number of rows, so the gain should grow with the context length (about 8,000 rows at the passkey length) and may be small or negative at a few hundred tokens. I do not give a speed figure. The Aion port decodes at 8.3 tokens per second today, 1.9% of the estimated floor, and the measurement on a board is what decides.
+- Cheap savings already taken: the zero padding tensors and the step masks are uploaded once and shared by the layers (from_torch calls per step fell from 14 to 8 on the test port). The remaining ops are mostly the head split and join reshapes and the cache concats. A preallocated, padded cache updated in place, and the on-device head split of `nlp_create_qkv_heads`, would remove most of them; both need a board to check the shapes.
 - The kept keys and values live in DRAM and the step concatenates each time (a copy of the cache per layer per step). A preallocated cache with an in-place update is the next step if the concat shows up in a profile.
 
 ## Chip run that closes it
