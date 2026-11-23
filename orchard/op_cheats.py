@@ -11,8 +11,8 @@ entry against a source tree on the CPU. Nothing here imports ttnn, ttl or ttml: 
 
 How an entry is verified (`verify`):
 - The name is found in each root the entry claims (`in`). A root is a source tree. For TTNN it is the tt-metal tree at the pinned commit; for
-  TT-Lang it is one of `hardware` (the installed package that compiles for the chip), `tree` (the tt-lang checkout's compiler package) and `sim`
-  (the checkout's simulator).
+  TT-Lang it is one of `hardware` (the package the kernel probe's hardware phase compiles with: the managed pair), `shared` (the older tt-lang 1.1.6
+  in the shared venv, the fallback), `tree` (the tt-lang checkout's compiler package) and `sim` (the checkout's simulator).
 - A C++ binding is found by `bind_function<"name">(...)` and its argument names are the `nb::arg("...")` entries inside that call. A Python
   function is found with `ast`, and its argument names are its parameters. A name that is only a registered symbol (a layout, a unary
   or binary op bound by a template) is checked for existence, and its entry may not use keyword arguments.
