@@ -1,0 +1,2 @@
+target = "0.9.196"
+summary = "Speech models: the preflight names a Voxtral model's task and its published bundle where it used to treat the model as text, and tt-orchard speech-check tests a running speech-to-text or text-to-speech server (no chip used; chip run owed)."
