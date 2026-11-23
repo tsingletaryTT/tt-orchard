@@ -5858,6 +5858,16 @@ Checks. 57 tests in `tests/test_ttlang_recipes.py` (49 failed on the unchanged c
 
 Open. The skill (`orchard/skills/kernel-probe.md`) still teaches the simulator forms only; changing it is a second variable and waits for the A/B. `--ladder` copies the arguments per rung, so the switch applies there; the ladder's summary table does not list it.
 
+## 2026-11-22: a reset refused for a device that is open for a moment is retried before the run blocks (issue 798, branch `fix-798-reset-retry`)
+Prompt (operator, after Aion run 3 blocked at stage 3 and resumed on its own): file the stage 3 issue and resolve it.
+
+Finding. The supervisor resets the chips of a multi-board test in place (`Supervisor._reset_test_chips`). gozer refuses a reset while any process has a device of the lease open. On Aion run 3 that refusal named one pid, which no longer existed seconds later, and the run blocked as `hardware-unhealthy`. `fuser` on the device nodes right afterwards listed the supervisor's own `tt-smi -r` and two read-only `tt-smi -s` processes (a monitor and a service). So the likely holder was a telemetry poll. The holder's command line was gone before I looked, so this is inferred. The auto-retry restarted the coder (about 11 minutes) and the same reset passed.
+
+Change. A refusal whose text says `still open by` is tried again, up to `RESET_OPEN_TRIES` (6) tries in all, `RESET_OPEN_WAIT_S` (4 s) apart (about 20 s). Each refusal is a ledger decision `test chip reset refused` with the attempt and gozer's words, so the holders are named. The reset is never forced. After the last try the run blocks with the last refusal and the number of tries. Any other refusal, and any other failure, blocks at once as before.
+
+Verification. 5 tests in `tests/test_supervisor_reset_open_retry.py` (3 failed on the unchanged code; the 2 that pass pin the immediate block for other refusals). 6 mutations (retry any refusal, no retry, unbounded retry, no wait, no ledger entry, retry a failure that is not a refusal) each turn a test red; restored. 19 tests with the neighbouring reset tests pass.
+
+Not shown. No chips were used. gozer still counts read-only `tt-smi -s` opens as open; whether it should ignore them is a question for that project. The park's reset of the coder's board (`orchard/handoff.py`) has its own handling and is unchanged.
 ## 2026-11-22: what the recipes say about the chip is now compiled, and a gate decides `auto` (branch `recipes-dialect-gate`)
 Prompt (coordinator, from the operator): the recipes of PR 796 look more effective and risky: every pass is a simulator pass, the sheet grows, and the recipes were verified on the simulator only. Design and build the best answer to that risk; consider a dialect layer, dialect-aware verification, verified-on provenance, a compile path with no device, a length-controlled control arm, and a default that follows a hardware gate. CPU only: an Aion benchmark held the chips.
 
