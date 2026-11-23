@@ -59,6 +59,11 @@ fact needs explaining. You do not write a script.
         "model_snapshot": "<new model snapshot>",
         "python": "<the interpreter>"}
 
+   If the run facts list `fidelity reference tokens`, add `"fidelity_tokens": <that number>` to the same file (a whole number,
+   not a string). The script then also samples that many tokens at temperature 1 after the main prompt and writes
+   `evidence/reference/fidelity-ids.json`, which the stage 2 check scores the port against. It adds time (a few tokens a second on a
+   7B model, more on a smaller one) and does not change the four checks or the verdict. If the facts do not list it, leave the key out.
+
 3. Copy the template into your stage directory:
 
        cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/reference_gate.py stages/1/

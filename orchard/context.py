@@ -184,4 +184,6 @@ def facts_from(run_start: dict, run_dir) -> dict:
         facts[f"input {name}"] = path
     if run_start.get("required_chips"):
         facts["required chip configurations"] = ", ".join(str(c) for c in run_start["required_chips"])
+    if run_start.get("fidelity_tokens"):
+        facts["fidelity reference tokens"] = run_start["fidelity_tokens"]      # issue 789: the stage 1 agent copies it into reference_config.json
     return facts
