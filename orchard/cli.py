@@ -16,6 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
     tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
@@ -273,6 +274,9 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import plan as _plan
     sub.add_parser("plan", parents=[common, _plan.parser(add_help=False)],
                    help="what precision and placement a checkpoint needs on N chips, from its safetensors headers alone (read-only)")
+    from orchard import tier_plan as _tier_plan
+    sub.add_parser("tier-plan", parents=[common, _tier_plan.parser(add_help=False)],
+                   help="what precision and expert placement a mixture-of-experts model needs on 1, 2 or 4 chips, from its config alone (reads two small files, read-only)")
     sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
                    help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
     dwp = sub.add_parser("drop-watch", parents=[common],
@@ -1281,6 +1285,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         from orchard import plan as _plan_mod
         return _plan_mod.main([args.snapshot, "--chips", str(args.chips), "--chip-gib", str(args.chip_gib), "--weight-share", str(args.weight_share)]
                               + (["--json"] if args.json else []), out)
+    if args.cmd == "tier-plan":
+        from orchard import tier_plan as _tier_plan_mod
+        return _tier_plan_mod.run(args, out)
     if args.cmd == "drop-check":
         from orchard import drop_check
         try:

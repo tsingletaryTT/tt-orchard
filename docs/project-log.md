@@ -6016,3 +6016,22 @@ Prompt (operator): bring the open PRs together and make the text match the runs.
 - Recipes. No file in the README, CLAUDE.md, `docs/` (outside the dated log entries), `docs/pr-bodies` or `orchard/skills` says the recipes help. The README `--cheat-sheet-recipes` paragraph (rewritten by PR 802) keeps the default `off` and says no recipe has run on a chip. The only text that says the recipes' effect is open is `docs/pr-bodies/recipes-dialect-gate.md`, which is correct.
 - Chip forms. Every remaining mention of `ttl.math.fill` and `ttl.math.broadcast` in `orchard/skills` is either a wrong-form example with the line "write `ttl.block.fill`" (the sheet's mistake entry, the recipes' wrong variants) or the compiler's refusal message in `ttlang_recipes.verified.json`. None teaches them as the chip form.
 - The opencode comparison now has a written result (PR 807, `docs/run-logs/2026-11-21-opencode-v2-vs-orchard-harness.md`). On `center`, OpenCode passed 0 of 6 and the orchard loop 1 of 6. On `row_sum`, OpenCode passed 3 of 6 and the orchard loop 1 of 6. No comparison has a Fisher exact p below 0.48, so neither harness is shown to be better. The earlier figures quoted above (1 of 6 against 0 of 6 on `center`, and 1 of 4 each on `row_sum`) were partial.
+
+## 2026-11-23: `tt-orchard tier-plan`, step 1 of issue 739 (branch fit-plan-739)
+
+Operator: "let's see about 739! start implementing." Step 1 of the issue is a plan command that works before any download. `tt-orchard plan` already
+priced a snapshot from its safetensors headers, so this adds the part that was missing: `tt-orchard tier-plan SOURCE` reads only `config.json` and the
+weight index (of a repository, a file or a directory), counts the parameter groups with `orchard/decode_floor.py`, and prints for 1, 2 and 4 chips and
+each format mix whether the model fits on the chips (replicated or with the experts split), fits with experts in host memory, or does not fit. A
+host-experts row gives the experts per layer that stay on the chips, the host memory needed (every expert pinned plus a 10 GiB margin, the rule in the
+issue) and the share of picks that would land on a resident expert, which is an estimate from the OLMoE-1B-7B skew (PR 746) unless `--skew` gives figures
+for the model. A second layout, whole layers on the chips with host memory only for the other layers, is printed beside it. Every number carries its source.
+Written test first (209 tests, 28 mutations each turned a test red). Two things the tests did not find and a live run did: the Hub answers a `resolve/`
+request with a redirect to `api/resolve-cache/models/<repo>/...`, which the drop-check reader refuses outside its one allowed organisation, so the
+command has its own reader that accepts a redirect only to the Hub's content hosts or to the same repository; and a first design that kept the same
+number of experts in every layer overstated MiniMax-M2.7's host memory three times against its card, so the whole-layer layout was added.
+The comparison with the MiniMax-M2.7, Inkling-Small and Ornith-1.5-397B cards is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`. Not
+done: expert-use skew on a 512-expert model (step 2), and the host-expert path in a port (step 3), which needs an operator decision because the earlier
+note said to wait for the llama.cpp backend while Tenstorrent now ships hybrid-offload bundles. Also seen, not changed: the `tt-orchard plan` wrapper in
+`orchard/cli.py` passes only `--chips`, `--chip-gib`, `--weight-share` and `--json` through, so `--fidelity-bfp4` and `--fidelity-tokens` are accepted
+by the parser and then ignored when the command runs through `tt-orchard`.
