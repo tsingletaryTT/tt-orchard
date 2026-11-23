@@ -5,10 +5,11 @@
 ttml, because importing them opens the device. Run it after a change to a sheet, and against the tree a new coder image is built from:
 
     python3 scripts/verify_cheat_sheet.py ttnn --root tt_metal=DIR
-    python3 scripts/verify_cheat_sheet.py ttlang --root hardware=DIR --root tree=DIR --root sim=DIR
+    python3 scripts/verify_cheat_sheet.py ttlang --root hardware=DIR --root shared=DIR --root tree=DIR --root sim=DIR
 
 `ttnn` and `ttlang` name the shipped sheets (orchard/skills/...); any other argument is the path of a sheet file. DIR for tt_metal is the
-directory that holds `ttnn/`. For TT-Lang, hardware is the installed package directory (`ttl/`), tree is the checkout's `python/ttl` and sim is its
+directory that holds `ttnn/`. For TT-Lang, hardware is the `ttl/` directory of the pair venv (the package the kernel probe compiles with), shared is the `ttl/` directory of the
+shared venv (tt-lang 1.1.6, the fallback), tree is the checkout's `python/ttl` and sim is its
 `python/sim`. A `--root` can also come from the variable ORCHARD_CHEAT_ROOT_<NAME> (upper case). Exit 0 when every entry and mistake check
 passes, 1 with one line per problem, 2 for a usage error.
 """

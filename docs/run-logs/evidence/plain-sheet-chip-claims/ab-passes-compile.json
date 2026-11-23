@@ -1,0 +1,200 @@
+{
+ "schema": "orchard-hwcompile-probe-passes/1",
+ "targets": [
+  {
+   "package": "tt-lang",
+   "version": "1.1.10.dev20261026+light",
+   "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  },
+  {
+   "package": "tt-lang",
+   "version": "1.1.6",
+   "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "run": "center-1-off",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-1-on",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "3e04cb97bb91896858408f368719dda4f90b4b4c24e7680017f3ae326d54d36d",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: <ast.Div object at 0x...> not implemented"
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "center-2-off",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-2-on",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-3-off",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-3-on",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "d0cf0ce6d62a69060c794b13dd3c0723651fa7ad5cf11ee5acde0563b3a0c155",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: <ast.Div object at 0x...> not implemented"
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "rmsnorm-1-off",
+   "op": "rmsnorm",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "rmsnorm-1-on",
+   "op": "rmsnorm",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "rmsnorm-2-off",
+   "op": "rmsnorm",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-1-off",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-1-on",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-2-off",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-2-on",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-3-off",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "softmax-3-on",
+   "op": "softmax",
+   "attempts": 1,
+   "recipes": "on",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "0633c438f96f612ac0d9cef86af35b215d47384061a1a8f731dc7ad0618a8324",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_max() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

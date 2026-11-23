@@ -88,6 +88,15 @@ def _port_repair_rounds_arg(text: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _fidelity_tokens_arg(text: str) -> int:
+    """argparse type of `--fidelity-tokens`: 0 or a whole number from full_port.MIN_FIDELITY_TOKENS to full_port.POSITIONS_LIMIT (the supervisor checks the same range)."""
+    from orchard import full_port
+    try:
+        return full_port.check_fidelity_tokens(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _port_check_positions_arg(text: str) -> int:
     """argparse type of `--port-check-positions`: a whole number from full_port.MIN_POSITIONS to full_port.POSITIONS_LIMIT (the supervisor checks the same range)."""
     from orchard import full_port
@@ -191,6 +200,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="a full-port stage 2 check scores the smaller of N positions and the length of the stage 1 reference (issue 731). Default 64, "
                         "from 16 to 8192. The check's record names the cap, the positions scored and the reference's length. The run records the "
                         "value when it is not the default; a resume keeps it and refuses another")
+    b.add_argument("--fidelity-tokens", type=_fidelity_tokens_arg, default=None, metavar="N",
+                   help="stage 1 also samples N tokens at temperature 1 from the main prompt, with the log-probability of each, for the stage 2 fidelity "
+                        "score (issue 789). 0 asks for none. Default 0, from 16 to 8192. Stage 2 scores the smaller of this and --port-check-positions. "
+                        "The run records the value when it is not 0; a resume keeps it and refuses another")
     b.add_argument("--no-tool-dedupe", action="store_true",
                    help="send the agent every repeat read in full (by default a repeat read of an unchanged file in the same step is answered with a "
                         "short note naming the turn that holds the text; docs/tool-result-dedupe.md). The run records the choice when it is off; a "
@@ -596,10 +609,13 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
-    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off"), default="off",
+    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off", "auto", "control"), default="off",
                     help="on: add the recipes by kind of op (orchard/skills/kernel-loop-templates/ttlang_recipes.json) after the "
-                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was. Each recipe "
-                         "was verified on a worked op that is not a probe op. The report records the setting. Not with --staged")
+                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was; auto: on only "
+                         "when every recipe compiles with the chip package of this run (checked with that package's compiler and no "
+                         "chip), else off with the reason; control: a section of the same form and length with four elementwise "
+                         "kernels and no recipe content, for an A/B. Each recipe is tagged with what was checked for the run's chip "
+                         "package. The report records the setting. Not with --staged")
     kp.add_argument("--staged", action="store_true",
                     help="build the kernel in stages, each ending at a simulator check against a reference for that step "
                          "(copy, one arithmetic step, the reduction, the broadcast back, the whole op); the verified "
@@ -1483,7 +1499,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
                                               weights_only_rehearsal=args.weights_only_rehearsal, thin_port=args.thin_port,
-                                              port_repair_rounds=args.port_repair_rounds, port_check_positions=args.port_check_positions, telegraph_config=cfg_path,
+                                              port_repair_rounds=args.port_repair_rounds, port_check_positions=args.port_check_positions, fidelity_tokens=args.fidelity_tokens, telegraph_config=cfg_path,
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.classify:

@@ -1,0 +1,816 @@
+{
+ "schema": "orchard-hwcompile-calibration/1",
+ "date": "2026-11-22",
+ "packages": [
+  {
+   "target": {
+    "package": "tt-lang",
+    "version": "1.1.10.dev20261026+light",
+    "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+    "files": [
+     "_src/ttl_ast.py",
+     "operators.py",
+     "ttl_api.py",
+     "_mlir_libs/libTTLangPythonCAPI.so"
+    ]
+   },
+   "chip_results": "docs/run-logs/evidence/ttlang-pair/results/pair-chip.jsonl"
+  },
+  {
+   "target": {
+    "package": "tt-lang",
+    "version": "1.1.6",
+    "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+    "files": [
+     "_src/ttl_ast.py",
+     "operators.py",
+     "ttl_api.py",
+     "_mlir_libs/libTTLangPythonCAPI.so"
+    ]
+   },
+   "chip_results": "docs/run-logs/evidence/ttlang-pair/results/116-chip.jsonl"
+  }
+ ],
+ "rows": [
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "smoke_eltwise_add",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "f32bfbc7bfa86fb1d70e55536ba19ccf31098e1edfc7d8aa571c59b11b070b26",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a6",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "7e63a787fe3a3a9a34bee9f294624ebde44c236da818f1a3af67fa401750e274",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a6",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "7e63a787fe3a3a9a34bee9f294624ebde44c236da818f1a3af67fa401750e274",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a7",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "405ff915bf319a764d2013ac01ee6c05695555a70c0ea7a5c8db8b473bad8581",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a7",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "405ff915bf319a764d2013ac01ee6c05695555a70c0ea7a5c8db8b473bad8581",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a9",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "c14c069d14de46e95266e8f47a6861d3cc5ea22ad8fc6f5ac0282d7c9dbba83e",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a9",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "c14c069d14de46e95266e8f47a6861d3cc5ea22ad8fc6f5ac0282d7c9dbba83e",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a10",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "fc996e96cd5c510c95f30620802eb83b26a3cf9432ff2eebe25182b054eebc05",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_r1_a10",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "fc996e96cd5c510c95f30620802eb83b26a3cf9432ff2eebe25182b054eebc05",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a1",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "815c3b6e65d32f0e5ce5dfe9b5b84147273924eb89a76b627bb7621fb6da84a3",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a1",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "815c3b6e65d32f0e5ce5dfe9b5b84147273924eb89a76b627bb7621fb6da84a3",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a2",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "ece572d0f82597eea9f5bf216971cc88bdd78bbced2a4ff7a5b0b69cf1a47c31",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a2",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "ece572d0f82597eea9f5bf216971cc88bdd78bbced2a4ff7a5b0b69cf1a47c31",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a3",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "e863761b565e150c5aa4db85a161db43fa9f53924d1cf91e4e25956c6041b7fd",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw1_a3",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "e863761b565e150c5aa4db85a161db43fa9f53924d1cf91e4e25956c6041b7fd",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a1",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "5e9ac9e4f874e38bee46115646ce0138384cd9dc38f543a473b4e3ee96c34fa7",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a1",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "5e9ac9e4f874e38bee46115646ce0138384cd9dc38f543a473b4e3ee96c34fa7",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a2",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "3102ab7003a3bb5a2c2a4e6e44b87cf18107704baf201fe42b8a61890b5a73f1",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a2",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "3102ab7003a3bb5a2c2a4e6e44b87cf18107704baf201fe42b8a61890b5a73f1",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a3",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "b871727d430b0138120c88b785c87eefcb65e0d726e6dee04001131e201a36c7",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a3",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "b871727d430b0138120c88b785c87eefcb65e0d726e6dee04001131e201a36c7",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a4",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "5fa6cb191f30102b0fe5075b29173cd58ebba54659c6ed878c5d1f79063cd8d4",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "readout_hw2_a4",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "5fa6cb191f30102b0fe5075b29173cd58ebba54659c6ed878c5d1f79063cd8d4",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "library_rmsnorm",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "a9326280dbb0c5324db73939b6af61b2eaf13d54f0418bb1069368879e745dc0",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "library_rmsnorm",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "a9326280dbb0c5324db73939b6af61b2eaf13d54f0418bb1069368879e745dc0",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_compute",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'",
+    "kernel_sha256": "24b92b5bb0b8642bf9950658588a0ce9d355f4d7e3b84e793a58910abcc650d2",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_datamovement",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'",
+    "kernel_sha256": "3af179e6b415b3ed7d8ad6aa6b79fac8d32c2159182d32fbd86a7b9c22732082",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_threads_only",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'",
+    "kernel_sha256": "809182b14e733409e44dde4b63147c156d667441c6852ceba9bef13a8fec8d79",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_call_compute",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "f1d3ddb54d6c7e20138378ce73f3d6aeac828a0b37646f5096e2799ed1570fcb",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_call_datamovement",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "e6cb943b7ebf61eccad28f33bdc96546916b58abf65ac432f61a5cd77584e120",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_use_compute",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "311e4e45e6734f5a8c888f2dd4f00cdfdd837cbc45888abe38f6128a2afb6eea",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.10.dev20261026+light",
+   "kernel": "gs_use_datamovement",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "2be91d3918e5aae8ce89ace982210ee43c89ff66e61215a222c49f185c70d4bd",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "smoke_eltwise_add",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": true,
+    "first_line": ""
+   },
+   "here": {
+    "category": "compiled",
+    "first_line": "",
+    "kernel_sha256": "f32bfbc7bfa86fb1d70e55536ba19ccf31098e1edfc7d8aa571c59b11b070b26",
+    "kernel_sources": 3
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "readout_r1_a10",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+    "kernel_sha256": "fc996e96cd5c510c95f30620802eb83b26a3cf9432ff2eebe25182b054eebc05",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "readout_r1_a10",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+    "kernel_sha256": "fc996e96cd5c510c95f30620802eb83b26a3cf9432ff2eebe25182b054eebc05",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "library_rmsnorm",
+   "shape": [
+    64,
+    128
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+    "kernel_sha256": "a9326280dbb0c5324db73939b6af61b2eaf13d54f0418bb1069368879e745dc0",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "library_rmsnorm",
+   "shape": [
+    3072,
+    128
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+    "kernel_sha256": "a9326280dbb0c5324db73939b6af61b2eaf13d54f0418bb1069368879e745dc0",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "gs_compute",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size",
+    "kernel_sha256": "24b92b5bb0b8642bf9950658588a0ce9d355f4d7e3b84e793a58910abcc650d2",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "gs_datamovement",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size",
+    "kernel_sha256": "3af179e6b415b3ed7d8ad6aa6b79fac8d32c2159182d32fbd86a7b9c22732082",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "gs_call_compute",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size",
+    "kernel_sha256": "f1d3ddb54d6c7e20138378ce73f3d6aeac828a0b37646f5096e2799ed1570fcb",
+    "kernel_sources": 0
+   },
+   "agree": true
+  },
+  {
+   "version": "1.1.6",
+   "kernel": "gs_call_datamovement",
+   "shape": [
+    256,
+    256
+   ],
+   "chip": {
+    "ok": false,
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size"
+   },
+   "here": {
+    "category": "compile_error",
+    "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size",
+    "kernel_sha256": "e6cb943b7ebf61eccad28f33bdc96546916b58abf65ac432f61a5cd77584e120",
+    "kernel_sources": 0
+   },
+   "agree": true
+  }
+ ],
+ "note": "Every chip failure in this evidence is a tt-lang compiler error. The comparison does not cover a kernel that tt-lang compiles and tt-metal fails to build, a kernel whose buffers do not fit the chip's free L1, or numbers on a chip."
+}
