@@ -157,7 +157,7 @@ def run(config_path) -> int:
 
 
 def _collect(cfg, result, stage: Path) -> None:
-    url, timeout = result["url"], float(cfg["timeout_s"])
+    url, timeout = result["url"], float(cfg["timeout_s"])      # finite: ok config_problems checked it with safeio.is_finite_number
     if cfg["task"] == "speech-to-text":
         results = speech_check.check_speech_to_text(url, [(c["path"], c["text"]) for c in cfg["clips"]], timeout=timeout)
         result["checks"] = [r.as_dict() for r in results]

@@ -22,12 +22,77 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 
 SCHEMA = 1
 MODES = ("asr", "score")
 MAX_NEW_TOKENS_LIMIT = 4096
 CONFIG_LIMIT = 1 << 20
+MAX_DEPTH = 32
+
+
+def read_config(path):
+    """The parsed config at `path`. Opened without following a link and without blocking on a pipe; a file that is not a regular file, is larger than CONFIG_LIMIT,
+    is not UTF-8 JSON or nests deeper than the parser allows raises ValueError, as does any OS error."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        raise ValueError(f"the config cannot be opened: {exc}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("the config is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            raw = f.read(CONFIG_LIMIT + 1)
+    except OSError as exc:
+        raise ValueError(f"the config cannot be read: {exc}") from None
+    finally:
+        os.close(fd)
+    if len(raw) > CONFIG_LIMIT:
+        raise ValueError(f"the config is larger than {CONFIG_LIMIT} bytes")
+    try:
+        doc = json.loads(raw.decode("utf-8"), parse_constant=_no_constant, parse_float=_finite_float, parse_int=_bounded_int)
+    except (ValueError, RecursionError) as exc:           # UnicodeDecodeError is a ValueError
+        raise ValueError(f"the config is not readable JSON: {exc}") from None
+    _shape_problem(doc)
+    return doc
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not allowed")
+
+
+def _finite_float(text):
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"the number {text} is not finite")
+    return value
+
+
+def _bounded_int(text):
+    if len(text.lstrip("-")) > 30:
+        raise ValueError("an integer has too many digits")
+    return int(text)
+
+
+def _shape_problem(doc) -> None:
+    """Raise ValueError for a config nested deeper than MAX_DEPTH or holding text that cannot be encoded as UTF-8 (a lone surrogate)."""
+    stack = [(doc, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_DEPTH:
+            raise ValueError(f"the config is nested more than {MAX_DEPTH} levels deep")
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("the config holds text that is not valid Unicode") from None
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                stack.append((key, depth + 1))
+                stack.append((value, depth + 1))
+        elif isinstance(item, list):
+            stack.extend((x, depth + 1) for x in item)
 
 
 def _config_problems(cfg) -> list[str]:
@@ -109,12 +174,8 @@ def main(argv=None) -> int:
         print(f"mode {args.mode!r} is not one of {MODES}", file=sys.stderr)
         return 2
     try:
-        with open(args.config, encoding="utf-8") as f:
-            raw = f.read(CONFIG_LIMIT + 1)
-        if len(raw) > CONFIG_LIMIT:
-            raise ValueError("the config is larger than 1 MiB")
-        cfg = json.loads(raw)
-    except (OSError, ValueError) as exc:
+        cfg = read_config(args.config)
+    except ValueError as exc:
         print(f"the config cannot be read: {exc}", file=sys.stderr)
         return 2
     problems = _config_problems(cfg)
@@ -135,7 +196,8 @@ def main(argv=None) -> int:
         print(f"transcription failed for {exc}", file=sys.stderr)
         return 1
     tmp = f"{args.out}.tmp{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump({"schema": SCHEMA, "engine": engine, "texts": texts}, f, indent=1, sort_keys=True)
         f.write("\n")
     os.replace(tmp, args.out)

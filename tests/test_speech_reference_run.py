@@ -5,6 +5,7 @@
 The tests put fake `transformers` and `torch` modules in sys.modules and call `main`, so they check the plumbing (what is loaded, what is passed, what is
 written) and not the model. No weights are read. The first run on real weights is owed (docs/run-logs/2026-11-23-speech-route.md)."""
 import json
+import os
 import sys
 import types
 
@@ -182,3 +183,47 @@ def test_a_file_that_the_model_cannot_transcribe_ends_with_code_1_and_names_it(t
     code, out = run(tmp_path, "asr", fake_libs)
     assert code == 1 and out is None
     assert "a.wav" in capsys.readouterr().err
+
+
+# ---- reading the config ---------------------------------------------------------------------------------------------------
+
+
+def test_a_config_that_is_a_link_is_refused(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text("{}")
+    (tmp_path / "link.json").symlink_to(real)
+    with pytest.raises(ValueError, match="cannot be opened"):
+        srr.read_config(str(tmp_path / "link.json"))
+
+
+def test_a_config_that_is_a_pipe_is_refused_without_blocking(tmp_path):
+    fifo = tmp_path / "pipe.json"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="regular file"):
+        srr.read_config(str(fifo))
+
+
+def test_a_config_over_the_size_limit_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(srr, "CONFIG_LIMIT", 10)
+    p = tmp_path / "c.json"
+    p.write_text('{"a": "' + "x" * 50 + '"}')
+    with pytest.raises(ValueError, match="larger"):
+        srr.read_config(str(p))
+
+
+@pytest.mark.parametrize("text", ["[" * 40 + "]" * 40, '{"a": NaN}', '{"a": 1e999}', '{"a": ' + "9" * 40 + "}", '"\\ud800"', "\xff"])
+def test_a_config_with_hostile_content_is_refused(tmp_path, text):
+    p = tmp_path / "c.json"
+    p.write_bytes(text.encode("utf-8", "surrogatepass") if text != "\xff" else b"\xff\xfe")
+    with pytest.raises(ValueError):
+        srr.read_config(str(p))
+
+
+def test_the_output_file_is_never_written_over_a_link(tmp_path, fake_libs):
+    c, out = cfg(tmp_path)
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    (tmp_path / f"out.json.tmp{os.getpid()}").symlink_to(target)
+    with pytest.raises(FileExistsError):
+        srr.main(["--mode", "asr", "--config", str(c), "--out", str(out)])
+    assert target.read_text() == "keep"

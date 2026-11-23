@@ -41,12 +41,6 @@ def test_only_the_first_run_start_decides():
     assert sr.selected(both) == "speech-to-text"
 
 
-def test_the_task_is_read_from_a_ledger_file(tmp_path):
-    (tmp_path / "ledger.jsonl").write_text(json.dumps(entries(speech_route="text-to-speech")[0]) + "\n")
-    assert sr.selection_from_run_dir(tmp_path) == "text-to-speech"
-    assert sr.selection_from_run_dir(tmp_path / "missing") is None
-
-
 # ---- the bundle and the licence -----------------------------------------------------------------------------------------
 
 

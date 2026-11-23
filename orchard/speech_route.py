@@ -88,21 +88,6 @@ def selected(entries) -> str | None:
     return None
 
 
-def selection_from_run_dir(run_dir) -> str | None:
-    """`selected` for the ledger file of a run directory (a gate is given only directories). None when the ledger cannot be read."""
-    entries = []
-    try:
-        with open(Path(run_dir) / "ledger.jsonl", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    entries.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        return None
-    return selected(entries)
-
-
 # ---- the bundle and the licence ------------------------------------------------------------------------------------------
 
 
