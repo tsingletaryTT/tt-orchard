@@ -1,0 +1,4 @@
+target = "0.9.194"
+summary = "Aion-1.0-Instruct-2.3B can: spec, ASGI adapter with the model's chat format, the port with a copying tensor reader, measurement and card scripts, card and records; not published."
+pr = 814
+kind = "feature"
