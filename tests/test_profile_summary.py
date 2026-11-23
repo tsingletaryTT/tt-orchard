@@ -746,8 +746,15 @@ def test_an_interrupt_gives_the_child_the_grace_time_before_it_is_killed(tmp_pat
         import _thread
         _thread.interrupt_main()
     threading.Thread(target=interrupt, daemon=True).start()
-    with pytest.raises(KeyboardInterrupt):
-        ps.run_group([sys.executable, "-c", script], timeout_s=60.0, log_path=tmp_path / "log", term_grace_s=10.0)
+    # `_thread.interrupt_main()` does nothing while SIGINT is ignored. A suite started in the background from a non-interactive shell
+    # (nohup, `&`, a CI step) inherits SIGINT as ignored, and the run then waited out its 60 s limit and failed with "DID NOT RAISE" (issue 679).
+    import signal
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            ps.run_group([sys.executable, "-c", script], timeout_s=60.0, log_path=tmp_path / "log", term_grace_s=10.0)
+    finally:
+        signal.signal(signal.SIGINT, previous)
     assert done.exists()
 
 
