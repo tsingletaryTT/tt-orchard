@@ -139,6 +139,31 @@ def shape(config) -> Shape:
                  expert_params=expert, layers=d.layers)
 
 
+def caveats(config) -> list[str]:
+    """One sentence for each feature the config names that the parameter count leaves out. The always-resident figure is then a lower bound.
+    Found by key name in the language model's settings (and `vision_config` at the top level); a key set to null or 0 does not count."""
+    try:
+        cfg = mc.text_config(config)
+    except mc.ModelConfigError:
+        return []
+    top = config if isinstance(config, dict) else {}
+
+    def has(*prefixes) -> bool:
+        return any(k.startswith(prefixes) and cfg[k] not in (None, 0, False, "", [], {}) for k in cfg)
+    out = []
+    if has("hc_"):
+        out.append("hyper-connections (hc_ keys): their weights are not counted")
+    if has("indexer_"):
+        out.append("the sparse-attention indexer (indexer_ keys): its weights are not counted")
+    if has("ngram_", "ple_", "heads_per_ngram", "make_ngram"):
+        out.append("a hashed n-gram embedding (ngram_ and ple_ keys): its table is not counted and can be large")
+    if has("mtp_num_hidden_layers", "num_nextn_predict_layers"):
+        out.append("a multi-token-prediction layer (mtp keys): its weights are not counted")
+    if top.get("vision_config") or cfg.get("vision_config"):
+        out.append("a vision tower (vision_config): only the language model is counted")
+    return out
+
+
 def budget_bytes(chip_gib: float, *, chips: int, reserve_gib: float, kv_gib: float) -> float:
     """Bytes of one chip that weights may use: the usable share of its DRAM, less the per-chip reserve and this chip's share of the KV cache
     allowance. Never negative."""
@@ -384,7 +409,8 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
             r["format_gate"] = weights_plan._worst(weights_plan.format_gate(other_fmt, scores), weights_plan.format_gate(expert_fmt, scores))
             rows.append(r)
     notes = [n for n in (checkpoint_note(s, index_total),) if n]
-    return {"source": where, "model": {"layers": s.layers, "moe_layers": s.moe_layers, "routed_experts_per_layer": s.experts,
+    cav = caveats(config)
+    return {"source": where, "caveats": cav, "always_resident_is_lower_bound": bool(cav), "model": {"layers": s.layers, "moe_layers": s.moe_layers, "routed_experts_per_layer": s.experts,
                                        "experts_per_token": s.top_k, "always_resident_params": s.always_params,
                                        "routed_expert_params_total": s.expert_params_total, "params_per_expert_index": s.expert_index_params},
             "inputs": inputs, "rows": rows, "notes": notes}
@@ -394,6 +420,8 @@ def render(res: dict) -> str:
     m = res["model"]
     lines = [f"{res['source']}: {m['layers']} layers, {m['moe_layers']} with {m['routed_experts_per_layer']} routed experts (top {m['experts_per_token']}); "
              f"{m['always_resident_params'] / 1e9:.2f} B always-resident and {m['routed_expert_params_total'] / 1e9:.2f} B routed-expert parameters [config-derived]"]
+    if res.get("caveats"):
+        lines.append("the always-resident figure is a lower bound: it leaves out " + "; ".join(res["caveats"]) + ". Every row below is optimistic by that much.")
     i = res["inputs"]
     lines.append(f"chip DRAM {i['chip_gib']['value']} GiB, {i['usable_fraction']['value']:.1%} usable, {i['reserve_gib']['value']} GiB reserve per chip, "
                  f"{i['kv_gib']['value']} GiB KV cache over the chips, host margin {i['host_margin_gib']['value']} GiB [assumed constant unless a flag was given; "

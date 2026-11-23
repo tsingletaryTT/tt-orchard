@@ -1076,7 +1076,9 @@ the published hybrid bundles, whole layers on the chips and only the other layer
 host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change the chip memory, the per-chip reserve and the KV cache allowance, and
 `--json` prints every number with its source (config-derived, assumed constant, estimate or the caller's flag). The command measures neither speed nor
 quality, and the host path for experts is not written yet (issue 739, step 3). A dense model is refused with a pointer to `tt-orchard plan`, and a
-model whose layers the parameter count does not know is reported as an unknown family.
+model whose layers the parameter count does not know is reported as an unknown family. When the config names hyper-connections, a sparse-attention indexer,
+a hashed n-gram embedding, a multi-token-prediction layer or a vision tower, the count leaves them out, the command says so, and the always-resident
+figure is printed as a lower bound.
 The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`.
 
 ### 4.1 Before you start

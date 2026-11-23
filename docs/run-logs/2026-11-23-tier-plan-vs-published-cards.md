@@ -51,3 +51,30 @@ Reading of the comparison:
 
 What this does not show: nothing here checks that a port with these layouts runs, how fast it decodes, or how the model's own router distributes its
 picks. The hit shares the plan prints for the all-pinned layout come from OLMoE-1B-7B (64 experts, top 8), and the plan labels them that way in every row.
+
+## A second reference: sunandbean/qwen3.8-flash-next-p100a (one p100a card and a 64 GB host)
+
+The operator asked for this bundle as a second validation reference. Its card and porting notes were read as data (nothing was run, no weight was
+downloaded). The command was run on the public `Qwen/Qwen3.8-Flash-Next` config.json with `--chips 1 --chip-gib 28`, the p100a's memory. The 0.934 usable
+fraction is a measurement on a p300 board (probe 14) and was not changed.
+
+What the plan can and cannot read of this config. The parameter counts come out right where the card states them: 48 layers, 512 routed experts, top 10,
+expert width 640, a shared expert, 36 gated-delta-net layers and 12 full-attention layers (the test counts the attention by hand: 2,495,447,040 values,
+and the router, shared expert, embedding and expert counts). The config also names five things the count leaves out, and the command prints them and marks
+every always-resident figure as a lower bound: hyper-connections (`hc_` keys), the sparse-attention indexer (`indexer_` keys), the hashed n-gram embedding
+(`ngram_` and `ple_` keys), the multi-token-prediction layer and the vision tower. The plan does not guess their size.
+
+| Quantity | Plan (`bfp8 + bfp4 experts`, 1 chip) | Card | Where they differ and why |
+| --- | --- | --- | --- |
+| Always-resident weights on the card | 4.02 GiB (4.3 GB) | about 5.3 GB of dense weights (BFP8 and BF16) | The plan is 19 percent lower. It leaves out the five features above, so a lower bound is expected. How much each one adds is not known from the config. |
+| Experts kept on the card | 122 of 512 per layer, 15.1 GiB (16.2 GB); `all bfp4` row: 137 of 512, 16.9 GiB | 8 GB by default (about 56 to 60 experts per layer at 132.7 MB per expert index in bfp4), 16 GB in `coder-fast` | The plan fills the memory that is left after its reserve and a 4 GiB KV allowance. Its 16.2 GB is within 1 percent of the 16 GB `coder-fast` profile. The default 8 GB leaves room for model-state slots for the prefix cache (4 at 8 GB, 2 at 16 GB) and the draft layer, which the plan does not model. |
+| Host memory | 73.3 GiB with every expert pinned (63.3 GiB of experts plus the 10 GiB margin); 58.8 GiB in the whole-layer layout | 64 GB host; 37.8 GB if every expert of `full` is touched | The plan is 1.6 to 1.9 times higher. The plan keeps the host copy in bfp4 (0.5625 bytes per value). The card reads the GGUF at IQ3_XXS (about 3 bits per value, 0.38 bytes) and keeps no host copy of the experts that are on the card. The plan has no input for the host format. |
+
+A check of that last row made after the card was read, with a host format the plan cannot take: 120.8 B expert values at 0.38 bytes are about 43 GiB, and
+removing the 11 to 12 percent that sit on the card leaves about 38 GiB, near the card's 37.8 GB. This arithmetic did not come from the plan and is not
+verified. It suggests a host-format flag for the next change, and the plan's host figure should be read as an upper bound for a port that reads a smaller
+quantization on the CPU.
+
+The Coder variant keeps 256 of the 512 experts in an IQ1_M file; the plan was not run on it, because the Coder has no Hugging Face config of its own to read.
+A single chip with a p100a's 28 GiB is not a board the constants were measured on (the 0.934 usable fraction and the 3 GiB reserve come from p300 boards): the
+card says 27.8 GiB is usable, the plan's figure for 28 GiB is 26.2 GiB before its reserve.

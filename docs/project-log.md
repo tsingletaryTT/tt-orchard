@@ -6035,3 +6035,4 @@ done: expert-use skew on a 512-expert model (step 2), and the host-expert path i
 note said to wait for the llama.cpp backend while Tenstorrent now ships hybrid-offload bundles. Also seen, not changed: the `tt-orchard plan` wrapper in
 `orchard/cli.py` passes only `--chips`, `--chip-gib`, `--weight-share` and `--json` through, so `--fidelity-bfp4` and `--fidelity-tokens` are accepted
 by the parser and then ignored when the command runs through `tt-orchard`.
+Addition (operator): `sunandbean/qwen3.8-flash-next-p100a` was added as a second reference (table in the run log). The count is right for the parts it reads, the config names five features it leaves out (hyper-connections, the indexer, the n-gram embedding, the draft layer, the vision tower), so the command lists them and marks the always-resident figure a lower bound. The plan's host figure for that port is 1.6 to 1.9 times the card's because the plan has no input for the host format.

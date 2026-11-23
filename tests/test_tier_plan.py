@@ -518,3 +518,57 @@ def test_a_hostile_number_on_the_command_line_is_exit_2(tmp_path, capsys, bad):
     for flag in ("--chip-gib", "--host-free-gib"):
         assert tier_plan.main([str(f), flag, bad]) == 2
     capsys.readouterr()
+
+
+# ---- features of the config the parameter count leaves out ----------------------------------------------------------------
+
+FLASH_NEXT_LIKE = dict(CFG, hc_count=4, hc_lowrank=320, indexer_n_heads=4, indexer_head_dim=128, ngram_vocab_size_base=20000000, ngram_size=3,
+                       ple_embed_dim=64, mtp_num_hidden_layers=1, vision_config={"hidden_size": 32})
+
+
+def test_a_config_with_features_the_count_leaves_out_says_which_and_marks_the_always_resident_figure_a_lower_bound():
+    cav = tier_plan.caveats(FLASH_NEXT_LIKE)
+    text = " ".join(cav)
+    for word in ("hyper-connections", "indexer", "n-gram embedding", "multi-token-prediction", "vision"):
+        assert word in text, word
+    res = tier_plan.plan(FLASH_NEXT_LIKE, chips_list=(1,), chip_gib=32.0, reserve_gib=3.0, kv_gib=4.0)
+    assert res["always_resident_is_lower_bound"] is True and res["caveats"] == cav
+    out = tier_plan.render(res)
+    assert "lower bound" in out and "hyper-connections" in out
+
+
+def test_a_config_with_nothing_left_out_has_no_caveats():
+    assert tier_plan.caveats(CFG) == []
+    res = tier_plan.plan(CFG, chips_list=(1,), chip_gib=32.0, reserve_gib=3.0, kv_gib=4.0)
+    assert res["always_resident_is_lower_bound"] is False and res["caveats"] == []
+    assert "lower bound" not in tier_plan.render(res)
+
+
+def test_a_feature_set_to_nothing_in_the_config_is_not_a_caveat():
+    cfg = dict(CFG, mtp_num_hidden_layers=0, hc_count=None, indexer_n_heads=None)
+    assert tier_plan.caveats(cfg) == []
+
+
+def test_the_text_config_of_a_multimodal_config_is_scanned_too():
+    cfg = {"model_type": "wrapper", "vision_config": {"x": 1}, "text_config": dict(CFG, hc_count=4)}
+    assert any("hyper-connections" in c for c in tier_plan.caveats(cfg)) and any("vision" in c for c in tier_plan.caveats(cfg))
+
+
+# ---- a real config: Qwen3.8-Flash-Next (copy of its public config.json), counted by hand ------------------------------------
+
+FLASH_NEXT = json.loads((ROOT / "tests/fixtures/tier-plan/qwen3.8-flash-next.config.json").read_text())
+
+
+def test_the_real_flash_next_config_counts_the_way_the_hand_calculation_does():
+    s = tier_plan.shape(FLASH_NEXT)
+    full_layer = 2560 * 24 * 256 + 2 * 2560 * 2 * 256 + 24 * 256 * 2560                  # q, k and v, output: 34,078,720
+    gdn_layer = 2560 * 10240 + 2560 * 6144 + 2560 * 96 + 10240 * 4 + 6144 * 2560          # q k v and z in, two scalars per head, conv, out: 57,958,400
+    assert s.attention_params == 12 * full_layer + 36 * gdn_layer == 2_495_447_040
+    assert s.router_params == 48 * 2560 * 512 and s.shared_params == 48 * 3 * 2560 * 640 and s.embedding_params == s.head_params == 248320 * 2560
+    assert (s.experts, s.top_k, s.moe_layers) == (512, 10, 48) and s.expert_index_params == 48 * 3 * 2560 * 640
+
+
+def test_the_real_flash_next_config_names_every_feature_the_count_leaves_out():
+    text = " ".join(tier_plan.caveats(FLASH_NEXT))
+    for word in ("hyper-connections", "indexer", "n-gram embedding", "multi-token-prediction", "vision"):
+        assert word in text, word
