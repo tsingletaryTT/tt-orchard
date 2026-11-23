@@ -154,7 +154,7 @@ def parse_skew(text: str) -> tuple:
             frac, share = (float(x) for x in part.split(":"))   # finite: ok the argument is a string, and the range check below refuses inf and nan
         except ValueError as exc:
             raise TierPlanError(f"a skew point is FRACTION:SHARE, for example 0.25:0.61; got {part!r}") from exc
-        if not (0 < frac < 1 and 0 < share <= 1 and frac == frac and share == share):
+        if not (0 < frac < 1 and 0 < share <= 1):
             raise TierPlanError(f"skew point {part!r}: the fraction must be between 0 and 1 and the share above 0 and at most 1")
         if share < frac:
             raise TierPlanError(f"skew point {part!r}: the busiest {frac:.0%} of the experts cannot take less than {frac:.0%} of the picks")

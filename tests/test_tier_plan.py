@@ -152,7 +152,7 @@ def test_the_default_skew_points_are_the_ones_in_the_committed_olmoe_measurement
         assert share == pytest.approx(data[f"top_{round(frac * 100)}pct_share"], abs=0.001)
 
 
-@pytest.mark.parametrize("text", ["0.25:0.10", "0.5:0.6,0.25:0.7", "0.25:0.5,0.5:0.4", "1.5:0.9", "a:b", "0.25", ""])
+@pytest.mark.parametrize("text", ["0.25:0.10", "0.5:0.6,0.25:0.7", "0.25:0.5,0.5:0.4", "1.5:0.9", "a:b", "0.25", "", "nan:0.5", "0.5:nan", "0.5:inf", "0.5:1e400", "0.25:" + "9" * 5000])
 def test_a_skew_that_cannot_be_true_is_refused(text):
     with pytest.raises(tier_plan.TierPlanError):
         tier_plan.parse_skew(text)
