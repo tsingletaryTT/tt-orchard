@@ -265,7 +265,8 @@ def test_a_transcript_at_the_limit_passes(clip):
         assert next(r for r in stt(f, clip, max_wer=0.2499) if r.name.startswith("transcribe")).status == "fail"
 
 
-@pytest.mark.parametrize("raw", [b"not json", b"[]", b'{"text": 5}', b"{}", b'{"text": null}', b"\xff\xfe"])
+@pytest.mark.parametrize("raw", [b"not json", b"[]", b'{"text": 5}', b"{}", b'{"text": null}', b"\xff\xfe", b'{"text": "x", "n": NaN}',
+                                 b'{"text": "x", "text": "y"}', b'{"text": "\\ud800"}', b'{"text": "x", "n": 1e999}', b"[" * 200 + b"]" * 200])
 def test_an_answer_that_is_not_a_transcript_fails(clip, raw):
     with Fake(transcript_raw=raw) as f:
         res = stt(f, clip)

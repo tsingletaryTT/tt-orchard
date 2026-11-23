@@ -6053,8 +6053,9 @@ running server: transcription of clips with a stated word error rule, speech req
 per character), optional streaming and optional transcription through a second server, and a 4xx check for malformed requests. The address needs a port,
 must be on this machine, and may not use 8000 or 8100 to 8103; redirects are not followed. It opens no device. No speech kind was added to
 `model_kind.py` or `audio_facts.py`: a speech model never reaches stage 0, so no record would be read.
-Test first: 201 tests (39 and 162). Sixty-one mutations each turned a test red; the first pass of 57 left five green (a dead guard, a test that could not
-fail, the timeout message, `--max-wer` validation, the JSON exit code), and each was fixed. The coder was asked once to review the new command; its six
+Test first: 206 tests (39 and 167). Sixty-three mutations each turned a test red; the first pass of 57 left five green (a dead guard, a test that could not
+fail, the timeout message, `--max-wer` validation, the JSON exit code), and each was fixed. The first full suite failed three repository checks (float ratchet,
+hostile-reader registry, README flag list); server answers are now parsed with `safeio.parse_json_bytes` and registered as hostile-input readers. The coder was asked once to review the new command; its six
 findings did not hold. Not done and owed: a run of `speech-check` against a real bundle on a chip (the fakes copy what the bundles' code does, and the
 duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.

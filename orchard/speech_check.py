@@ -193,11 +193,26 @@ def _request(host: str, port: int, method: str, path: str, *, body: bytes | None
         conn.close()
 
 
-def _json_answer(data: bytes):
+def _json_answer(data: bytes) -> dict | None:
+    """The answer as a JSON object, or None when it is not one. Parsed with `safeio.parse_json_bytes`: no NaN or Infinity, no repeated key, no lone
+    surrogate, no deep nesting, at most JSON_LIMIT bytes."""
     try:
-        return json.loads(data.decode("utf-8"))
-    except (ValueError, RecursionError):
+        return safeio.parse_json_bytes(data, max_bytes=JSON_LIMIT, expect=dict)
+    except safeio.SafeReadError:
         return None
+
+
+def transcript_of(data: bytes) -> str | None:
+    """The `text` of a transcription answer, or None when the answer is not a JSON object with a string `text`."""
+    doc = _json_answer(data)
+    return doc["text"] if doc is not None and isinstance(doc.get("text"), str) else None
+
+
+def model_ids_of(data: bytes) -> list[str]:
+    """The model ids listed by a `/v1/models` answer; empty when the answer is not the expected JSON."""
+    doc = _json_answer(data)
+    rows = doc.get("data") if doc is not None else None
+    return [r["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)] if isinstance(rows, list) else []
 
 
 def _clip(text: str, n: int = 300) -> str:
@@ -233,9 +248,7 @@ def _models(host, port, timeout) -> Result:
         status, _, data = _request(host, port, "GET", "/v1/models", timeout=timeout, limit=JSON_LIMIT)
     except _Failed as exc:
         return Result("models", "fail", f"GET /v1/models: {exc}")
-    doc = _json_answer(data)
-    rows = doc.get("data") if isinstance(doc, dict) else None
-    ids = [r["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)] if isinstance(rows, list) else []
+    ids = model_ids_of(data)
     if status != 200 or not ids:
         return Result("models", "fail", f"GET /v1/models answered {status} and listed {len(ids)} model ids", {"status": status, "ids": ids})
     return Result("models", "pass", "GET /v1/models lists " + ", ".join(ids), {"status": status, "ids": ids})
@@ -256,13 +269,13 @@ def _check_max_wer(value, default):
         return default
     if isinstance(value, bool) or not safeio.is_finite_number(value) or not 0 <= value <= 1:
         raise SpeechCheckError("--max-wer must be a number from 0 to 1")
-    return float(value)
+    return float(value)       # finite: ok the comparison above keeps the value between 0 and 1
 
 
 def _check_timeout(value):
     if isinstance(value, bool) or not safeio.is_finite_number(value) or not 0 < value <= 86400:
         raise SpeechCheckError("--timeout must be a number of seconds above 0 and at most 86400")
-    return float(value)
+    return float(value)       # finite: ok the comparison above keeps the value between 0 and 86400
 
 
 # ---- speech to text -------------------------------------------------------------------------------------------------
@@ -283,10 +296,10 @@ def _transcribe(host, port, content: bytes, filename: str, language, timeout) ->
     took = time.monotonic() - t0
     if status != 200:
         return None, f"POST /v1/audio/transcriptions answered {status}", took
-    doc = _json_answer(data)
-    if not isinstance(doc, dict) or not isinstance(doc.get("text"), str):
+    text = transcript_of(data)
+    if text is None:
         return None, "the answer is not JSON with a string `text`", took
-    return doc["text"], "", took
+    return text, "", took
 
 
 def _read_clip(path) -> bytes:

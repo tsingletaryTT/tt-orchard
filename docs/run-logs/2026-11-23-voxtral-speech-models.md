@@ -136,12 +136,15 @@ speech route (stages that compare a speech model with a reference) is a separate
 
 ## Tests
 
-`tests/test_speech_models.py` (39 tests) and `tests/test_speech_check.py` (162 tests) were written before the code they test; the speech-check tests
-run against fake servers on ports the system picks. Sixty-one mutations, each removing or weakening one guard, were applied one at a time and each
+`tests/test_speech_models.py` (39 tests) and `tests/test_speech_check.py` (167 tests) were written before the code they test; the speech-check tests
+run against fake servers on ports the system picks. Sixty-three mutations, each removing or weakening one guard, were applied one at a time and each
 turned at least one test red (recognition rule, bundle lookup, the base row and its hook, dry-classification stop, address rules, redirect and size
-limits, word error rate rule, clip reading through `safeio`, option pairing, the 4xx checks, each WAV rule, the stream rules and the exit codes). The
+limits, word error rate rule, clip reading through `safeio`, option pairing, the 4xx checks, each WAV rule, the stream rules, the strict parsing of server answers and the exit codes). The
 first pass of 57 mutations left five green (a dead guard in the bundle lookup, a test of the audio-track exclusion that could not fail, the timeout
-message, `--max-wer` validation, the JSON exit code); the dead guard was removed and the other four got tests, and the second pass is the 61 above.
+message, `--max-wer` validation, the JSON exit code); the dead guard was removed and the other four got tests. A full suite then failed three repository checks (the float ratchet, the hostile-reader registry and the
+README flag list), which led to parsing server answers with `safeio.parse_json_bytes`, two registered hostile-input readers (`speech_check.transcript_of`,
+`speech_check.model_ids_of`), two `# finite: ok` marks and three README flags; two more mutations cover that parsing. The final pass is the 63 above, run on the
+finished code.
 The coder (Qwen3-Coder-Next on the local server) was asked once to review `speech_check.py` for bugs. It gave six findings; none held (the file read it
 described as unhandled is handled, the size limit it said was missing is enforced in `_request`, and two findings said themselves that the code was
 correct). Nothing from it was used.

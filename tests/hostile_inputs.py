@@ -1174,6 +1174,16 @@ def _drop_check_hub_tokenizer_config(payload: bytes):
     return _drop_check_hub_file("tokenizer_config.json", payload)
 
 
+def _speech_check_transcript(payload: bytes):
+    from orchard import speech_check
+    return speech_check.transcript_of(payload)
+
+
+def _speech_check_model_ids(payload: bytes):
+    from orchard import speech_check
+    return speech_check.model_ids_of(payload)
+
+
 def _drop_check_index_shards(payload: bytes):
     from orchard import drop_check
     return drop_check.index_shards(payload)
@@ -1423,6 +1433,8 @@ READERS: list[Reader] = [
     Reader("drop_check.classify (hostile config.json from the Hub)", _drop_check_hub_config, feed="bytes", check=_drop_not_covered),
     Reader("drop_check.classify (hostile tokenizer_config.json from the Hub)", _drop_check_hub_tokenizer_config, feed="bytes"),
     Reader("drop_check.index_shards", _drop_check_index_shards, feed="bytes"),
+    Reader("speech_check.transcript_of (hostile server answer)", _speech_check_transcript, feed="bytes"),
+    Reader("speech_check.model_ids_of (hostile server answer)", _speech_check_model_ids, feed="bytes"),
     Reader("drop_check.run (hostile release info.json)", _drop_check_run_release, rel="release/info.json",
            setup=_drop_release_setup_without("info.json"), check=_drop_run_not_covered),
     Reader("drop_check.run (hostile release config.json)", _drop_check_run_release, rel="release/config.json",
