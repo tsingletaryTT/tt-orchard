@@ -150,7 +150,7 @@ def reference_problems(doc, stage_dir) -> list[str]:
         return ["reference.json is not a JSON object"]
     out = []
     if doc.get("schema") != SCHEMA:
-        out.append(f"schema is {doc.get('schema')!r}; {SCHEMA} is the one this version reads")
+        out.append(f"schema is {doc.get('schema')!r}; this code reads schema {SCHEMA}")
     task = doc.get("task")
     if task not in speech_models.TASKS:
         return out + [f"task {task!r} is not one of {speech_models.TASKS}"]
@@ -266,7 +266,7 @@ def result_problems(result, ref, stage_dir) -> list[str]:
     task = ref["task"]
     out = []
     if result.get("schema") != SCHEMA:
-        out.append(f"schema is {result.get('schema')!r}; {SCHEMA} is the one this version reads")
+        out.append(f"schema is {result.get('schema')!r}; this code reads schema {SCHEMA}")
     if result.get("task") != task:
         out.append(f"task is {result.get('task')!r}; stage 1's reference is for {task}")
     bundle = bundle_for_task(task, ref.get("model"))

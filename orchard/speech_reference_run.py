@@ -100,7 +100,7 @@ def _config_problems(cfg) -> list[str]:
         return ["the config is not a JSON object"]
     out = []
     if cfg.get("schema") != SCHEMA:
-        out.append(f"schema is {cfg.get('schema')!r}; {SCHEMA} is the one this version reads")
+        out.append(f"schema is {cfg.get('schema')!r}; this code reads schema {SCHEMA}")
     if not isinstance(cfg.get("model_id"), str) or not cfg["model_id"]:
         out.append("model_id must be a non-empty string")
     for key in ("model_dir", "language"):

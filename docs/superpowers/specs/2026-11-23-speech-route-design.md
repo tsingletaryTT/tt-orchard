@@ -12,7 +12,7 @@ PR 818 recognises a speech model in the preflight (`orchard/speech_models.py`), 
 
 A speech model whose weights a published bundle already serves has no port to write. The run has three questions to answer: does the bundle answer what a
 CPU reference answers, does it keep answering when started the way an operator starts it, and what are the licence terms the result is used under. That is
-the shape of the text-runtime route (`docs/text-runtime.md`), not of the scoring route: no coder boots, no stage reads a port module, and stages 3 to 5 have
+the shape of the text-runtime route (`docs/text-runtime.md`): no coder boots, no stage reads a port module, and stages 3 to 5 have
 nothing to do. The scoring route needs the coder's port as its subject, and a speech run has none.
 
 ## Choice: follow the text-runtime pattern

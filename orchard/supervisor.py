@@ -3294,7 +3294,7 @@ class Supervisor:
         return str(given) if given else str(Path(self.paths.operator_home) / "orchard-venvs" / "reference" / "bin" / "python")
 
     def _speech_body(self, spec, stage_dir: Path, resumed: bool):
-        """Stages 0, 1 and 2 of a speech run, as supervisor code. No model is asked anything, so no coder boots. Stage 2 uses the one-test hardware phase: a lease for
+        """Stages 0, 1 and 2 of a speech run, as supervisor code. No model is asked anything, so no coder boots. Stage 2 uses the hardware phase that runs a single test: a lease for
         one board, one command that serves the published bundle, checks it and stops it, the lease back. The route never packages or uploads a model's weights."""
         n = spec.number
         task = speech_route.selected(self.ledger.read())
@@ -3646,7 +3646,7 @@ class Supervisor:
 
     def _audio_body(self, spec, stage_dir: Path, resumed: bool):
         """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. The numeric work runs in the configured
-        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the one-test hardware phase
+        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the hardware phase that runs a single test
         of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
         from orchard import audio_plan, audio_remote
         from orchard.audio_plan import AudioStageError

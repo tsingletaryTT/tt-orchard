@@ -51,7 +51,7 @@ def config_problems(cfg) -> list[str]:
         return ["the config is not a JSON object"]
     out = []
     if cfg.get("schema") != SCHEMA:
-        out.append(f"schema is {cfg.get('schema')!r}; {SCHEMA} is the one this version reads")
+        out.append(f"schema is {cfg.get('schema')!r}; this code reads schema {SCHEMA}")
     task = cfg.get("task")
     if task not in speech_models.TASKS:
         out.append(f"task {task!r} is not one of {speech_models.TASKS}")
