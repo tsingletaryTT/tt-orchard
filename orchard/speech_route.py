@@ -12,10 +12,14 @@ audio and the transcripts (the word error rate is `speech_check.wer`). A recorde
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
+import shlex
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 from orchard import safeio, speech_check, speech_models
@@ -49,6 +53,11 @@ MAX_PROMPTS = 16
 EXPECTED_LIMIT = speech_check.TEXT_LIMIT
 SCORER_MODEL = "openai/whisper-large-v3-turbo"      # the scorer the Voxtral TTS card names for its word error rates
 PRODUCER = Path(__file__).with_name("speech_reference_run.py")
+HW_SCRIPT = Path(__file__).with_name("speech_hw.py")
+CONFIG_FILE = "speech_config.json"       # in stage 2's directory: the in-lease command's config
+SPEECH_ROUTE_SELECTED = "speech route selected"
+STDERR_TAIL = 2000
+PRODUCER_ENV_KEYS = ("PATH", "HF_HOME", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")      # nothing else reaches the reference interpreter; no token
 PRODUCER_MODES = ("asr", "score")
 
 REFERENCE_DEADLINE_S = 3600.0         # stage 1's CPU run (a 3B or 4B model and a Whisper scorer on the host's cores)
@@ -490,3 +499,77 @@ def build_reference(task, model_id, entries, engine, texts, prompts=None) -> dic
     doc["prompts"] = list(prompts or [])
     doc["calibration"] = rows
     return doc
+
+
+# ---- stage 2: around the in-lease command ----------------------------------------------------------------------------------
+
+
+def selection(entries) -> dict | None:
+    """The run's last `SPEECH_ROUTE_SELECTED` decision (written by stage 0: the task, the interpreter, the script hashes), or None."""
+    found = None
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("event") == "decision" and isinstance(e.get("data"), dict) and e["data"].get("decision") == SPEECH_ROUTE_SELECTED:
+            found = e["data"]
+    return found
+
+
+def hw_config(ref, ref_dir, stage_dir, *, serve_timeout_s=1800, timeout_s=600) -> dict:
+    """The config of orchard/speech_hw.py for a run whose stage 1 recorded `ref`. Clip paths point at stage 1's saved copies."""
+    task, model = ref.get("task"), ref.get("model")
+    bundle = bundle_for_task(task, model)
+    if bundle is None:
+        raise SpeechRouteError(f"for task {task}, no known bundle serves {model!r}")
+    cfg = {"schema": SCHEMA, "task": task, "bundle": bundle.bundle, "stage_dir": str(Path(stage_dir).resolve()), "serve_timeout_s": serve_timeout_s,
+           "timeout_s": timeout_s}
+    if task == "speech-to-text":
+        cfg["clips"] = [{"name": c["name"], "path": str((Path(ref_dir) / CLIP_DIR / c["name"]).resolve()), "text": c["text"]} for c in ref["clips"]]
+    else:
+        cfg["prompts"] = [{"id": p["id"], "text": p["text"]} for p in ref["prompts"]]
+    return cfg
+
+
+def hw_command(stage_dir) -> str:
+    """The one command the hardware phase runs under the lease."""
+    return shlex.join([sys.executable, str(HW_SCRIPT), "--config", str(Path(stage_dir).resolve() / CONFIG_FILE)])
+
+
+def score_config(result, stage_dir) -> dict:
+    """The producer config that scores the audio of a text-to-speech result with the scorer. Prompts without audio are left out."""
+    files = []
+    for p in result.get("prompts") or []:
+        audio = p.get("audio") if isinstance(p, dict) else None
+        if isinstance(audio, dict) and isinstance(audio.get("file"), str):
+            files.append({"name": Path(audio["file"]).name, "path": str((Path(stage_dir) / audio["file"]).resolve())})
+    if not files:
+        raise SpeechRouteError("the result holds no audio to score")
+    return producer_config(SCORER_MODEL, None, files, max_new_tokens=448)
+
+
+def merge_scores(result, texts) -> dict:
+    """A copy of `result` with each prompt's `heard` set from the scorer's {audio file name: transcript}. A prompt that has audio and no transcript is an error."""
+    out = copy.deepcopy(result)
+    for p in out.get("prompts") or []:
+        audio = p.get("audio")
+        if not isinstance(audio, dict):
+            continue
+        text = texts.get(Path(audio["file"]).name) if isinstance(texts, dict) else None
+        if not isinstance(text, str):
+            raise SpeechRouteError(f"the scorer gave no transcript for the audio of prompt {p.get('id')}")
+        p["heard"] = text
+    return out
+
+
+def producer_env(environ) -> dict:
+    """The environment for the reference interpreter: the keys in PRODUCER_ENV_KEYS that are set, and nothing else (no token, no home directory)."""
+    return {k: environ[k] for k in PRODUCER_ENV_KEYS if k in environ}
+
+
+def run_producer(argv, *, timeout_s, env) -> tuple[int | None, str]:
+    """(exit code or None, the end of stderr). None means the program could not start or ran past its deadline, and the text says which."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout_s, env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"the reference producer ran past its deadline of {timeout_s} s and was stopped"
+    except OSError as exc:
+        return None, f"the reference producer cannot be started: {exc}"
+    return proc.returncode, (proc.stderr or "")[-STDERR_TAIL:]
