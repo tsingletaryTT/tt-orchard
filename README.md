@@ -2975,6 +2975,18 @@ timeout and a shared 60-second budget.
 | tt-metal | `git describe` of the host tree | latest release |
 | tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag, else the `[project] version` in `pyproject.toml` on the default branch (the row says so) |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
+| SFPI | `dpkg-query` version of `sfpi` | apt candidate, plus the pin in the host tt-metal tree (`tt_metal/sfpi-version`) and the floor each installed tt-model bundle's ttnn declares |
+| tt-kmd (kernel driver) | `modinfo -F version tenstorrent` | apt candidate for `tenstorrent-dkms` |
+| tt-flash, tt-smi | the `.dist-info` folder of the venv that holds the script (no process is started) | public PyPI |
+| Firmware bundle on the chips | the driver's sysfs file `tt_fw_bundle_ver` (does not open the device; read in a thread with a 3-second wait) | newest release in the public Atom feed of tt-system-firmware (the older tt-firmware repository is archived) |
+| Reference venv: torch, transformers, tokenizers, safetensors, huggingface-hub | the `.dist-info` folders of the venv named by `reference_python` in the bringup config (or `--reference-python`) | public PyPI; a major-version jump is labelled `major: do not auto-upgrade` |
+
+The host rows never run tt-smi and never open a chip. On 2026-11-22 tt-smi calls queued behind the kernel driver's mutex while another process
+started a mesh, and a call stuck in the driver cannot be killed. The firmware version comes from the driver's sysfs file instead, in a daemon thread,
+so a driver that does not answer gives `unknown (not read: ...)` and the command goes on. The only commands the report runs are `dpkg-query -W -f=${Version}`
+and `apt-cache policy` for `sfpi` and `tenstorrent-dkms`, and `modinfo -F version tenstorrent`; any other argument raises `NotReadOnly`. The proposals for these rows
+are text: `sudo apt install ...`, `uv pip install ...` and a pointer to the firmware release notes. Their "ready to farm" line is always `unverified`, because no verification
+record covers host packages.
 
 To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. The flag `--updates-config` reads a different file.
 
@@ -2986,6 +2998,9 @@ and cites the rule.
 | R1 | tt-lang, tt-metal | A tt-lang commit builds against one tt-metal ref. A new tt-metal tag needs a tt-lang commit that builds on it (find it with `find-compatible-ttlang.sh` in the tt-lang repository). The verified pair is recorded in `orchard/ttlang_pin.py`. |
 | R2 | tt-metal, tt-model-manager, coder | Bundles carry a tt-metal build; host ttnn and the bundle must agree on the release. |
 | R3 | tt-model-manager, tt-cli | Upgrade together and rerun `tt doctor`. |
+| R4 | sfpi, tt-metal, tt-model-manager | The host tt-metal tree pins one SFPI version and a bundle's ttnn declares a floor that its `install.sh` enforces; the host SFPI must meet both. |
+| R5 | tt-kmd, firmware, tt-flash, tt-smi | No vendor table pairs these for newer releases (tt-metal's `INSTALLING.md` names floors only, read 2026-11-22). The report compares each with its newest release and invents no pairing. After a change, open a 1x4 mesh and run one port check. |
+| R6 | the reference venv's packages | A change to torch or transformers can move reference logits: pin a reference, upgrade a copy of the venv and compare first. |
 
 The "ready to farm" line says `verified` only when `config/verifications.json` (or `$ORCHARD_VERIFICATIONS`) holds a passing record
 whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is

@@ -38,12 +38,25 @@ CURRENT, BEHIND, CANDIDATE, UNKNOWN = "current", "behind", "newer-candidate", "u
 CALL_TIMEOUT_S = 12.0           # choice: one API call; a healthy one takes under a second
 BUDGET_S = 60.0                 # choice: all network calls of one run
 BODY_MAX = 2 * 1024 * 1024      # choice: the largest list answer is a few hundred KB
+PYPI_BODY_MAX = 8 * 1024 * 1024  # choice: PyPI's JSON for a package lists every release file; tokenizers' is 2.5 MB
 CACHE_HOURS = 6.0               # choice: operator request
 LIST_MAX = 300                  # most entries read from one list answer
 TEXT_MAX = 160                  # longest remote string kept
-HOSTS = ("huggingface.co", "api.github.com", "pypi.org", "pypi.eng.aws.tenstorrent.com")
+HOSTS = ("huggingface.co", "api.github.com", "pypi.org", "pypi.eng.aws.tenstorrent.com", "github.com")   # github.com: the public release Atom feed of tt-system-firmware
 VERSION_TOOLS = ("tt-model", "tt", "gozer")     # tt is the official CLI (tenstorrent/tt-cli); orchard only asks its version
 EXTRA_GIT = frozenset({"describe", "log", "show"})
+# Rows made by orchard/updates_host.py (kept here so with_rules needs no import of it) and what "ready to farm" means for them.
+HOST_KEYS = ("sfpi", "tt-kmd", "tt-flash", "tt-smi", "firmware",
+             "ref-torch", "ref-transformers", "ref-tokenizers", "ref-safetensors", "ref-huggingface-hub")
+HOST_READY = ("unverified: no verification record covers host packages. After a change, open a 1x4 mesh with the system python "
+              "and run one port check on a leased board")
+# Host-stack reads (orchard/updates_host.py): a fixed command for a fixed package or module name, nothing else.
+HOST_PACKAGES = ("sfpi", "tenstorrent-dkms")
+HOST_COMMANDS = {
+    "dpkg-query": lambda a: len(a) == 3 and a[0] == "-W" and a[1] == "-f=${Version}" and a[2] in HOST_PACKAGES,
+    "apt-cache": lambda a: len(a) == 2 and a[0] == "policy" and a[1] in HOST_PACKAGES,
+    "modinfo": lambda a: a == ["-F", "version", "tenstorrent"],
+}
 DEV_INDEX = "https://pypi.eng.aws.tenstorrent.com/tt-lang/"
 FIND_COMPATIBLE = "scripts/find-compatible-ttlang.sh in the tenstorrent/tt-lang repository"
 
@@ -59,6 +72,16 @@ RULES = (
              "release before a bundle is served next to host-side tests."},
     {"id": "R3", "members": ("tt-model-manager", "tt-cli"),
      "text": "tt-cli drives bundles that tt-model-manager installs; upgrade them in one step and rerun `tt doctor`."},
+    {"id": "R4", "members": ("sfpi", "tt-metal", "tt-model-manager"),
+     "text": "SFPI is the compiler for device kernels. The host tt-metal tree pins one SFPI version (its tt_metal/sfpi-version file) "
+             "and the ttnn inside a tt-model bundle declares a floor that the bundle's install.sh enforces. The host SFPI must meet both."},
+    {"id": "R5", "members": ("tt-kmd", "firmware", "tt-flash", "tt-smi"),
+     "text": "No vendor table pairs these for newer releases: tt-metal's INSTALLING.md names floors only (tt-kmd 2.8.0, firmware 19.8.1, "
+             "tt-smi 5.0.0; read 2026-11-22) and the firmware release notes name no required tt-flash or tt-kmd version. This report "
+             "compares each with its newest release and invents no pairing. After a change, open a 1x4 mesh and run one port check."},
+    {"id": "R6", "members": ("ref-torch", "ref-transformers", "ref-tokenizers", "ref-safetensors", "ref-huggingface-hub"),
+     "text": "The reference venv makes the CPU reference every comparison uses. A change to torch or transformers can move reference "
+             "logits: pin a reference, upgrade a copy of the venv and compare before the venv in use changes."},
 )
 
 DEFAULTS = {
@@ -168,17 +191,17 @@ class Tools:
             return None, "the network budget for this run is spent"
         return min(CALL_TIMEOUT_S, left), ""
 
-    def json(self, url: str):
-        """(value, why). `value` is the parsed JSON, `why` is "" on success."""
-        status, body, why = self.text(url, as_bytes=True)
+    def json(self, url: str, max_bytes: int = BODY_MAX):
+        """(value, why). `value` is the parsed JSON, `why` is "" on success. `max_bytes` raises the size limit for one call."""
+        status, body, why = self.text(url, as_bytes=True, max_bytes=max_bytes)
         if why:
             return None, why
         try:
-            return safeio.parse_json_bytes(body, max_bytes=BODY_MAX), ""
+            return safeio.parse_json_bytes(body, max_bytes=max_bytes), ""
         except safeio.SafeReadError as exc:
             return None, f"the answer was not usable JSON ({type(exc).__name__})"
 
-    def text(self, url: str, as_bytes: bool = False):
+    def text(self, url: str, as_bytes: bool = False, max_bytes: int = BODY_MAX):
         host = urlsplit(url)
         if host.scheme != "https" or host.hostname not in HOSTS:
             raise NotReadOnly(f"{clean(url, 80)} is not an allowed https host")
@@ -191,23 +214,26 @@ class Tools:
             headers["Authorization"] = f"Bearer {token}"
         self.calls += 1
         try:
-            status, body, err = self.get(url, headers, timeout, BODY_MAX)
+            status, body, err = self.get(url, headers, timeout, max_bytes)
         except Exception as exc:
             return 0, b"", f"{type(exc).__name__}"
         if err or status != 200:
             code = f"HTTP {status}" if status else ""
             return status, b"", clean(err or code or "no answer", 60)
-        if not isinstance(body, (bytes, bytearray)) or len(body) > BODY_MAX:
+        if not isinstance(body, (bytes, bytearray)) or len(body) > max_bytes:
             return status, b"", "the answer was larger than the limit"
         return status, (bytes(body) if as_bytes else bytes(body).decode("utf-8", "replace")), ""
 
     def cmd(self, argv) -> tuple[int, str, str]:
-        """Run `<tool> --version` or a read-only git command. Anything else raises NotReadOnly."""
+        """Run `<tool> --version`, a read-only git command or one of the fixed host-stack reads (HOST_COMMANDS). Anything else raises NotReadOnly."""
         argv = [str(a) for a in argv]
         prog = os.path.basename(argv[0]) if argv else ""
         if prog in VERSION_TOOLS:
             if argv[1:] != ["--version"]:
                 raise NotReadOnly(f"{prog} may only be run as `{prog} --version`")
+        elif prog in HOST_COMMANDS:
+            if not HOST_COMMANDS[prog](argv[1:]):
+                raise NotReadOnly(f"{prog} may only be run in the fixed forms orchard/updates_host.py uses")
         elif prog == "git":
             sub, rest = skillsfresh._git_subcommand(argv)
             if sub in EXTRA_GIT:
@@ -590,7 +616,9 @@ def with_rules(rows: list[Row], ver: verifications.Verifications, combo: dict) -
                 if r.key in rule["members"]:
                     others = [m for m in rule["members"] if m != r.key]
                     r.moves_with.append(f"{rule['id']}: moves with {', '.join(others)}. {rule['text']}")
-        if r.status in (BEHIND, CANDIDATE):
+        if r.key in HOST_KEYS and r.status in (BEHIND, CANDIDATE):
+            r.ready = HOST_READY
+        elif r.status in (BEHIND, CANDIDATE):
             rec = ver.match(dict(combo, **{r.key: r.upstream})) if r.key in combo else None
             if rec and rec.result == "pass":
                 r.ready = f"verified ({rec.date}, {rec.evidence})"
@@ -603,7 +631,7 @@ def with_rules(rows: list[Row], ver: verifications.Verifications, combo: dict) -
 
 
 def run_all(tools: Tools, cfg: dict, *, installed_path: Path, tt_metal_dir: Path, skills: list | None,
-            ver: verifications.Verifications) -> list[Row]:
+            ver: verifications.Verifications, host=None) -> list[Row]:
     """Every tracked item. A check that raises anything but NotReadOnly becomes an unknown row; NotReadOnly is a bug and
     propagates so a test sees it."""
     def guard(key, label, fn):
@@ -625,6 +653,9 @@ def run_all(tools: Tools, cfg: dict, *, installed_path: Path, tt_metal_dir: Path
     rows += guard("tt-gozer", "tt-gozer", lambda: check_tool(
         tools, cfg, "tt-gozer", "gozer", "tt-gozer (gozer)", "git -C <tt-gozer checkout> pull --ff-only   # then reinstall as its README says"))
     rows += guard("skills", "skills", lambda: check_skills(skills) if skills is not None else Row("skills", "tenstorrent/skills checkout", why="no skills check supplied"))
+    if host is not None:                    # the host-stack rows; None keeps the older callers (and their tests) off the machine
+        from orchard import updates_host
+        rows += updates_host.check_host(tools, host)
     combo = {"tt-lang": ttlang_pin.SHA, "tt-metal": next((r.installed.split("-")[0] for r in rows if r.key == "tt-metal" and r.installed != "-"), "")}
     return with_rules(rows, ver, combo)
 
@@ -743,8 +774,12 @@ def main(args, *, out=None, tools: Tools | None = None, skills=None, now: float 
         if skills is None and getattr(args, "skills_dirs", None):
             skills = skillsfresh.check_skills_dirs(args.skills_dirs, offline=offline,
                                                    cache=skillsfresh.Cache(write=False))
+        from orchard import updates_host
+        ref_py = getattr(args, "reference_python", None) or os.environ.get("ORCHARD_REFERENCE_PYTHON")
+        model_root = getattr(args, "tt_model_root", None) or home / ".cache" / "tt-model" / "models"
+        host = updates_host.HostEnv(tree=tree, bundle_root=Path(model_root), reference_python=Path(ref_py) if ref_py else None)
         rows = run_all(tools, cfg, installed_path=home / ".cache" / "tt-model" / "installed.json", tt_metal_dir=tree,
-                       skills=skills, ver=ver)
+                       skills=skills, ver=ver, host=host)
         for p in ver.problems:
             say(f"verifications: {clean(p, 200)}")
         if any(r.status != UNKNOWN for r in rows):
