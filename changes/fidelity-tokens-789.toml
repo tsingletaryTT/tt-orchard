@@ -1,0 +1,2 @@
+target = "0.9.191"
+summary = "Stage 1 can also sample a longer reference at temperature 1 (--fidelity-tokens N), and the stage 2 check scores the port on it in a report-only sampled_fidelity block (issue 789)."

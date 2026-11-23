@@ -97,8 +97,19 @@ import math as _math
 HONEST_LP = 1.0 - _math.log(_math.e + 199.0)
 
 
+def sampled_reference(ids=None, logprob: float = HONEST_LP, **over) -> dict:
+    """A stage 1 `fidelity-ids.json` as reference_gate.py writes it. The default ids count up by one from 100, so the honest port (its next id
+    is the last id plus one) gives each of them its peak probability."""
+    import hashlib
+    ids = list(range(100, 190)) if ids is None else list(ids)
+    doc = {"kind": "sampled-temperature-1", "temperature": 1.0, "seed": 7, "ids": ids, "logprobs": [logprob] * len(ids),
+           "prompt_ids_sha256": hashlib.sha256(json.dumps(PROMPT_IDS, separators=(",", ":")).encode()).hexdigest(),
+           "complete": True, "seconds": 1.0}
+    return {**doc, **over}
+
+
 def make_run(tmp_path: Path, port_src: str = HONEST, *, extra_files: dict | None = None, template_text: str | None = None,
-             reference_logprob: float | None = HONEST_LP):
+             reference_logprob: float | None = HONEST_LP, sampled: dict | None = None):
     """A run directory with the stage 1 reference, a snapshot with a tokenizer, stages/2/port/port_model.py, and the template and its config
     copied the way the supervisor copies them. Returns (run_dir, stage_dir, snapshot_dir)."""
     run = tmp_path / "run"
@@ -109,6 +120,8 @@ def make_run(tmp_path: Path, port_src: str = HONEST, *, extra_files: dict | None
     if reference_logprob is not None:             # a stage 1 reference made since issue 731 records the log-probability of each token it chose
         (ev / "top5-logits.json").write_text(json.dumps({"steps": [{"step": k, "chosen": t, "logprob": reference_logprob, "top5": []}
                                                                     for k, t in enumerate(REF_IDS)]}))
+    if sampled is not None:                        # issue 789: stage 1's optional sampled reference, written as the template writes it
+        (ev / "fidelity-ids.json").write_text(json.dumps(sampled))
     snap = tmp_path / "snapshot"
     snap.mkdir()
     tokenizer_json(snap / "tokenizer.json")
