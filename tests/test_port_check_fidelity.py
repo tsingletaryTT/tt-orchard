@@ -160,3 +160,19 @@ def test_the_template_leaves_out_a_reference_log_probability_that_is_not_a_finit
     run, stage, _ = make_run(tmp_path, reference_logprob=0.5)
     assert run_template(tmp_path, run, stage).returncode == 0
     assert "fidelity" not in record(stage)
+
+
+def test_the_gate_refuses_a_huge_integer_value_without_raising(honest):
+    # found while adding the sampled block (issue 789): `abs(10 ** 400 - 10.0)` raises OverflowError
+    run, stage, _ = honest
+    rec = record(stage)
+    rec["fidelity"]["value"] = 10 ** 400
+    assert any("recomputed" in r for r in fidelity_reasons(rec, run))
+
+
+@pytest.mark.parametrize("bad", [10 ** 400, "x", 5.0, [10]])
+def test_the_gate_refuses_a_scale_that_is_not_ten_without_raising(honest, bad):
+    run, stage, _ = honest
+    rec = record(stage)
+    rec["fidelity"]["scale"] = bad
+    assert any("scale must be 10.0" in r for r in fidelity_reasons(rec, run))

@@ -118,6 +118,16 @@ def test_results_read_the_stage_2_port_check_of_a_full_port(tmp_path):
     assert len(pc["free_run_text"]) == run_view.FREE_TEXT_CHARS
 
 
+def test_results_carry_the_sampled_fidelity_score_and_its_token_count_when_the_record_has_them(tmp_path):
+    rec = {**PORT_CHECK, "sampled_fidelity": {"kind": "reference-sampled-text", "value": 9.98, "tokens": 4000}}
+    pc = run_view.results(write_port_check(tmp_path, rec), [])["port_check"]
+    assert pc["sampled_fidelity"] == 9.98 and pc["sampled_fidelity_tokens"] == 4000
+    skipped = run_view.results(write_port_check(tmp_path / "s", {**PORT_CHECK, "sampled_fidelity": {"status": "skipped", "reason": "x"}}), [])["port_check"]
+    assert skipped["sampled_fidelity"] is None and skipped["sampled_fidelity_tokens"] is None
+    plain = run_view.results(write_port_check(tmp_path / "p", PORT_CHECK), [])["port_check"]
+    assert plain["sampled_fidelity"] is None
+
+
 def test_a_malformed_port_check_gives_empty_fields_and_no_error(tmp_path):
     run = write_port_check(tmp_path, {"top1_agreement": True, "fidelity": "high", "near_ties": [1], "length_check": {"all_agree": "yes", "lengths": 3},
                                       "device_ops": {"weights": 5, "decode_matmul_calls_max": None}, "free_run_text": 7, "chips": "2"})

@@ -127,7 +127,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from orchard.adapters import AdapterError, Lease
+from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
@@ -204,6 +204,9 @@ RUN_JSON_MAX = 16 * 1024 * 1024          # the largest JSON file of a run (a mar
 MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
+RESET_OPEN_TRIES = 6          # choice (issue 798): a reset refused because a device is open is tried this many times in all
+RESET_OPEN_WAIT_S = 4.0       # choice: seconds between those tries; a read-only tt-smi poll holds a device for about a second
+OPEN_DEVICE_MARK = "still open by"      # the words gozer's refusal of a reset uses when a process has the device open
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
 EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 STALL_CODE = "agent-stuck"     # the block code that leaves the coder up with --coder-keep-on-stall (issue 701)
@@ -230,6 +233,7 @@ def is_full_port_pause(reason) -> bool:
 
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
+_check_fidelity_tokens = full_port.check_fidelity_tokens
 _check_port_check_positions = full_port.check_positions      # the supervisor's __init__ has a `full_port` flag that hides the module there
 STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate reads a source file up to the same size, full_port.SOURCE_MAX)
 STAGE_3_SEED_ENTRIES = boundedwalk.PORT_ENTRIES   # the scan stops after this many entries of any kind (files, directories, links, caches): the file
@@ -931,7 +935,7 @@ class Supervisor:
                  keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
@@ -957,6 +961,9 @@ class Supervisor:
         # length). Written into port_check_config.json as `max_positions` and recorded in run_start, both only when it is not the default, so a run that
         # does not name the option has the files it had before. `build` hands over the recorded value on a resume.
         self.port_check_positions = _check_port_check_positions(port_check_positions)      # the module: __init__ has a `full_port` parameter
+        # `--fidelity-tokens` (issue 789): how many tokens stage 1 samples at temperature 1 for the stage 2 fidelity score; 0 asks for none. It travels as a
+        # run fact (the stage 1 agent writes reference_config.json), so it is recorded in run_start only when it is not 0. `build` hands over the recorded value on a resume.
+        self.fidelity_tokens = _check_fidelity_tokens(fidelity_tokens)
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
@@ -1346,6 +1353,7 @@ class Supervisor:
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"port_check_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {}),
+                               **({"fidelity_tokens": self.fidelity_tokens} if self.fidelity_tokens else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
@@ -6309,11 +6317,26 @@ class Supervisor:
         42 s per board, and a refused reset blocks. The order of two separate leases' resets matters (`reset_order`,
         issue 26): the lease whose chips have the lowest PCI address goes last. Whether stale state on the chips also
         plays a part is not isolated."""
-        try:
-            self.test_adapter.reset(lease)
-        except AdapterError as exc:
-            self._block(n, f"resetting the chips for the {test.chips}-chip test failed: {exc}",
-                        lease_id=lease.lease_id, config=test.chips)
+        attempt = 1
+        while True:
+            try:
+                self.test_adapter.reset(lease)
+                break
+            except AdapterError as exc:
+                # Issue 798: gozer refuses a reset while any process has a device of the lease open, and a read-only
+                # `tt-smi -s` poll (a monitor or a service) has one open for a moment. A refusal that says so is tried
+                # again a few times; it is never forced, so a real workload on the chips still blocks the run. Every
+                # other failure blocks at once.
+                if isinstance(exc, Refused) and OPEN_DEVICE_MARK in str(exc) and attempt < RESET_OPEN_TRIES:
+                    self.ledger.append("decision", n, decision="test chip reset refused", attempt=attempt,
+                                       of=RESET_OPEN_TRIES, reason=str(exc)[:500], lease_id=lease.lease_id,
+                                       config=test.chips)
+                    self.sleep(RESET_OPEN_WAIT_S)
+                    attempt += 1
+                    continue
+                self._block(n, f"resetting the chips for the {test.chips}-chip test failed"
+                               f"{f' (tried {attempt} times)' if attempt > 1 else ''}: {exc}",
+                            lease_id=lease.lease_id, config=test.chips)
         self.ledger.append("decision", n, decision="test chips reset", config=test.chips,
                            lease_id=lease.lease_id)
 
@@ -6495,6 +6518,14 @@ def _port_repair_rounds_arg(text: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _fidelity_tokens_arg(text: str) -> int:
+    """argparse type of `--fidelity-tokens`: 0 or a whole number from full_port.MIN_FIDELITY_TOKENS to full_port.POSITIONS_LIMIT."""
+    try:
+        return full_port.check_fidelity_tokens(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _port_check_positions_arg(text: str) -> int:
     """argparse type of `--port-check-positions`: a whole number from full_port.MIN_POSITIONS to full_port.POSITIONS_LIMIT."""
     try:
@@ -6612,6 +6643,11 @@ def parse(argv=None):
                         f"{full_port.DEFAULT_POSITIONS}, from {full_port.MIN_POSITIONS} to {full_port.POSITIONS_LIMIT}. The record names the cap, the "
                         f"positions scored and the reference's length. The ledger records the value when it is not the default and a resume keeps it; a "
                         f"resume that names another value is refused")
+    r.add_argument("--fidelity-tokens", type=_fidelity_tokens_arg, default=None, metavar="N",
+                   help=f"stage 1 also samples N tokens at temperature 1 from the main prompt, with the log-probability of each, for the stage 2 "
+                        f"fidelity score (issue 789). 0 asks for none. Default 0, from {full_port.MIN_FIDELITY_TOKENS} to {full_port.POSITIONS_LIMIT}. "
+                        f"Stage 2 scores the smaller of this and --port-check-positions. The ledger records the value when it is not 0 and a resume "
+                        f"keeps it; a resume that names another value is refused")
     r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
                    help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
@@ -6855,6 +6891,15 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what the run's stage 2 check scored)")
         check_positions = recorded_positions
     check_positions = full_port.DEFAULT_POSITIONS if check_positions is None else full_port.check_positions(check_positions)
+    fidelity_tokens = getattr(args, "fidelity_tokens", None)
+    if progress.started:                        # a resumed run keeps the sampled reference length it started with (a run that began before the option: none)
+        recorded_fidelity = full_port.check_fidelity_tokens((progress.run_start or {}).get("fidelity_tokens", 0))
+        if fidelity_tokens is not None and fidelity_tokens != recorded_fidelity:
+            raise ValueError(f"this run started with a fidelity reference of {recorded_fidelity} tokens; --fidelity-tokens {fidelity_tokens} differs. "
+                             "Leave the option out to resume with the recorded value, or move this run's directory aside and start a new run (the length is "
+                             "part of what stage 1 recorded)")
+        fidelity_tokens = recorded_fidelity
+    fidelity_tokens = 0 if fidelity_tokens is None else full_port.check_fidelity_tokens(fidelity_tokens)
     tool_dedupe = not getattr(args, "no_tool_dedupe", False)
     if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
         recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
@@ -6927,7 +6972,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,

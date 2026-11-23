@@ -174,6 +174,14 @@ THAI_PROMPT = "เขียนข้อความถึงเจ้าขอ�
 THAI_SAMPLE = "สวัสดีครับ ภาษาไทย"
 N_NEW = 32
 TOP_K = 5
+# Issue 789: an optional longer reference for the stage 2 fidelity score. `fidelity_tokens` in reference_config.json asks for that many tokens
+# sampled at temperature 1 from the main prompt, each with the model's log-probability of it. FIDELITY_MAX equals the stage 2 cap limit
+# (port_check.py POSITIONS_LIMIT; a test keeps them equal): a longer reference could never be scored.
+FIDELITY_MIN = 16
+FIDELITY_MAX = 8192
+FIDELITY_SEED = 20260721         # choice: fixed, so a rerun of stage 1 gives the same sampled text
+FIDELITY_FILE = "fidelity-ids.json"
+FIDELITY_SAVE_EVERY = 256        # a partial file (complete false) is rewritten this often, so an interrupted run leaves its progress on disk
 REASONING_STARTS = ("Let me", "We need", "<think")
 
 ROUNDTRIP_STRINGS = [
@@ -230,7 +238,19 @@ def load_config() -> dict:
     if os.path.commonpath([run_dir, str(HERE_DIR)]) != run_dir:
         fail(f"this script's directory {HERE_DIR} is not inside run_dir {run_dir}; copy it into "
              "the stage directory and run it from there")
+    fidelity_setting(cfg)
     return cfg
+
+
+def fidelity_setting(cfg: dict) -> int:
+    """The sampled reference length the config asks for: 0 (the key is missing or 0) means none. A value that is not a whole number, or is
+    outside FIDELITY_MIN to FIDELITY_MAX, stops the script before the model loads (exit 2)."""
+    if "fidelity_tokens" not in cfg:
+        return 0
+    value = cfg["fidelity_tokens"]
+    if type(value) is not int or not (value == 0 or FIDELITY_MIN <= value <= FIDELITY_MAX):
+        fail(f"reference_config.json fidelity_tokens must be 0 or a whole number from {FIDELITY_MIN} to {FIDELITY_MAX}; got {str(value)[:40]!r}")
+    return value
 
 
 def import_stack():
@@ -587,6 +607,52 @@ def decode(torch, model, tokenizer, prompt: str, tag: str) -> dict:
             "append_why": append_why, "seconds": round(time.time() - t0, 1)}
 
 
+def sample_reference(torch, model, prompt_ids: list, n: int, seed: int, writer=None) -> dict:
+    """Sample `n` tokens at temperature 1 after `prompt_ids`, with the model's log-probability of each (log-softmax over the whole vocabulary, as
+    the greedy record does). The key-value cache carries the prefix, so each step costs one token's forward pass; the greedy loop above runs the
+    whole sequence again at every step and could not reach thousands of tokens. `writer(doc)` receives the partial record every
+    FIDELITY_SAVE_EVERY tokens. A failure (a model whose cache does not work, a memory error) is returned in the record's `error` with the
+    tokens sampled so far, and `complete` is false: the stage 1 verdict does not depend on this reference."""
+    gen = torch.Generator().manual_seed(seed)
+    ids: list = []
+    logprobs: list = []
+    started = time.time()
+
+    def doc(error=None) -> dict:
+        out = {"kind": "sampled-temperature-1", "temperature": 1.0, "seed": seed, "ids": list(ids), "logprobs": list(logprobs),
+               "prompt_ids_sha256": prompt_sha(prompt_ids), "complete": error is None and len(ids) == n,
+               "seconds": round(time.time() - started, 1)}
+        if error is not None:
+            out["error"] = error
+        return out
+
+    try:
+        past, feed = None, list(prompt_ids)
+        with torch.inference_mode():
+            for k in range(n):
+                out = model(input_ids=torch.tensor([feed], dtype=torch.long), past_key_values=past, use_cache=True)
+                logits = getattr(out, "logits", None)
+                past = getattr(out, "past_key_values", None)
+                if logits is None or past is None:
+                    raise RuntimeError(f"{type(model).__name__} returned no {'logits' if logits is None else 'key-value cache'}")
+                logp = torch.log_softmax(logits[0, -1].float(), dim=-1)
+                token = int(torch.multinomial(logp.exp(), 1, generator=gen))
+                ids.append(token)
+                logprobs.append(round(float(logp[token]), 6))      # finite: ok a torch scalar from log_softmax
+                feed = [token]
+                if writer is not None and (k + 1) % FIDELITY_SAVE_EVERY == 0 and k + 1 < n:
+                    writer(doc())
+                    say(f"sampled reference: {k + 1}/{n} tokens ({time.time() - started:.1f} s so far)")
+    except Exception as exc:  # noqa: BLE001 - recorded, and the stage goes on without this reference
+        return doc(error=f"{type(exc).__name__}: {exc}"[:600])
+    return doc()
+
+
+def prompt_sha(prompt_ids: list) -> str:
+    """The sha256 of the prompt ids as compact JSON: ties a sampled reference to the prompt it continues."""
+    return hashlib.sha256(json.dumps(prompt_ids, separators=(",", ":")).encode()).hexdigest()
+
+
 def has_thai_tokens(tokenizer) -> bool:
     """True when some token of a Thai sample decodes to a whole Thai character."""
     ids = tokenizer(THAI_SAMPLE, add_special_tokens=False)["input_ids"]
@@ -686,6 +752,16 @@ def main() -> int:
     if not thai:
         say("the tokenizer has no token that decodes to a Thai character; no Thai decode")
 
+    fidelity_n = fidelity_setting(cfg)
+    fidelity_run = None
+    if fidelity_n:
+        say(f"sampling a {fidelity_n}-token reference at temperature 1 for the stage 2 fidelity score")
+        fidelity_run = sample_reference(torch, model, main_run["prompt_ids"], fidelity_n, FIDELITY_SEED,
+                                        writer=lambda d: write_json(REFERENCE / FIDELITY_FILE, d))
+        write_json(REFERENCE / FIDELITY_FILE, fidelity_run)
+        say(f"wrote evidence/reference/{FIDELITY_FILE} ({len(fidelity_run['ids'])} of {fidelity_n} tokens, "
+            f"{fidelity_run['seconds']} s)" + (f"; stopped: {fidelity_run['error']}" if "error" in fidelity_run else ""))
+
     card_ok, card_note = card_check(snapshot, main_run["text"])
     write_text(EVIDENCE / "card-check.txt",
                card_note + f"\n\ngenerated text: {main_run['text']!r}\n")
@@ -734,12 +810,17 @@ def main() -> int:
                "load_seconds": rep["seconds"], "decode_seconds": main_run["seconds"],
                "thai_tokens": thai, "thai_decode_seconds": thai_run["seconds"] if thai_run else None,
                "reasoning_start": reasoning_start(main_run["text"])}
+    if fidelity_run is not None:
+        summary["fidelity_reference"] = {"asked": fidelity_n, "tokens": len(fidelity_run["ids"]), "complete": fidelity_run["complete"],
+                                         "seconds": fidelity_run["seconds"], **({"error": fidelity_run["error"]} if "error" in fidelity_run else {})}
     write_json(EVIDENCE / "summary.json", summary)
     ref = {"verdict": verdict, "environment": env, "checks": checks,
            "draft": "written by reference_gate.py; the agent reviews each note",
            "reference_artifacts": {"prompt_ids": rel(REFERENCE / "prompt-ids.json"),
                                    "generated_ids": rel(REFERENCE / "generated-ids.json"),
                                    "top5_logits": rel(REFERENCE / "top5-logits.json")}}
+    if fidelity_run is not None:
+        ref["reference_artifacts"]["fidelity_ids"] = rel(REFERENCE / FIDELITY_FILE)
     write_json(HERE_DIR / "reference.json", ref)
     say(f"wrote evidence/summary.json and reference.json: verdict {verdict}")
     return 0

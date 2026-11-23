@@ -1,0 +1,4 @@
+target = "0.9.192"
+summary = "The generated port of a standard decoder (dense or grouped-key attention, sliding windows) decodes one row per token from kept keys and values instead of running the whole sequence again (issue 805)."
+pr = 806
+kind = "feature"
