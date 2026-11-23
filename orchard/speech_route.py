@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 
 from orchard import safeio, speech_check, speech_models
@@ -42,10 +44,21 @@ DEFAULT_PROMPTS = (
     "The expedition mapped the cave system for three long weeks.",
 )
 
+MAX_CLIPS = 8
+MAX_PROMPTS = 16
+EXPECTED_LIMIT = speech_check.TEXT_LIMIT
+SCORER_MODEL = "openai/whisper-large-v3-turbo"      # the scorer the Voxtral TTS card names for its word error rates
+PRODUCER = Path(__file__).with_name("speech_reference_run.py")
+PRODUCER_MODES = ("asr", "score")
+
 REFERENCE_DEADLINE_S = 3600.0         # stage 1's CPU run (a 3B or 4B model and a Whisper scorer on the host's cores)
 CHIP_DEADLINE_S = 3600.0              # stage 2's lease: the bundle's first start, the checks and the stop
 SCORE_DEADLINE_S = 1800.0
 STAGE_DISK_GB = 40
+
+
+class SpeechRouteError(ValueError):
+    """An input of the route that is refused, with a sentence that says what to change."""
 
 
 def _text(x) -> bool:
@@ -366,3 +379,114 @@ def _audio_problems(p, speech_check_result, text, stage_dir, where) -> list[str]
     if isinstance(recorded, bool) or not isinstance(recorded, (int, float)) or abs(recorded - got["seconds"]) > 1e-6:
         return [f"{where}the recorded seconds {recorded!r} differ from the saved audio's {got['seconds']:.4f}"]
     return []
+
+
+# ---- stage 1: assembling the reference -----------------------------------------------------------------------------------
+
+
+def discover_clips(directory) -> list[dict]:
+    """The operator's clips in `directory`: [{"name", "path", "expected"}] sorted by name. A file with a suffix in CLIP_SUFFIXES is a clip. NAME.txt next to
+    it, when there is one, holds the expected text. A link, a clip over CLIP_LIMIT and an expected text that is not UTF-8 text with words (at most EXPECTED_LIMIT
+    characters) are refused. Other files are ignored."""
+    d = Path(str(directory))
+    if os.path.islink(d) or not d.is_dir():
+        raise SpeechRouteError(f"the clips directory {d} is not a directory (a link is not followed)")
+    found = []
+    for entry in sorted(os.scandir(d), key=lambda e: e.name):
+        if Path(entry.name).suffix.lower() not in CLIP_SUFFIXES:
+            continue
+        st = os.lstat(entry.path)
+        if not stat.S_ISREG(st.st_mode):
+            raise SpeechRouteError(f"the clip {entry.name} is not a regular file (a link is not followed)")
+        if st.st_size > CLIP_LIMIT:
+            raise SpeechRouteError(f"the clip {entry.name} is {st.st_size} bytes, above the limit of {CLIP_LIMIT}")
+        found.append({"name": entry.name, "path": str(Path(entry.path)), "expected": _expected_for(d, entry.name)})
+    if not found:
+        raise SpeechRouteError(f"no clips in {d}: it needs files ending in {', '.join(CLIP_SUFFIXES)}")
+    if len(found) > MAX_CLIPS:
+        raise SpeechRouteError(f"{len(found)} clips in {d}; at most {MAX_CLIPS} are used")
+    return found
+
+
+def _expected_for(d: Path, clip_name: str):
+    txt = d / (Path(clip_name).stem + ".txt")
+    if not os.path.lexists(txt):
+        return None
+    try:
+        raw = safeio.read_bytes(txt, max_bytes=EXPECTED_LIMIT * 4)
+        text = raw.decode("utf-8").strip()
+    except (safeio.SafeReadError, OSError, ValueError) as exc:          # UnicodeDecodeError is a ValueError
+        raise SpeechRouteError(f"the expected text {txt.name} cannot be read as UTF-8 text ({exc})") from None
+    if not _text(text) or len(text) > EXPECTED_LIMIT:
+        raise SpeechRouteError(f"the expected text {txt.name} must have words and at most {EXPECTED_LIMIT} characters")
+    return text
+
+
+def save_clips(clips, stage_dir) -> list[dict]:
+    """Copy each clip into stage_dir/clips and return [{"name", "sha256", "bytes", "expected"}] for the reference record."""
+    out = []
+    target = Path(stage_dir) / CLIP_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    for c in clips:
+        try:
+            data = safeio.read_bytes(c["path"], max_bytes=CLIP_LIMIT)
+        except (safeio.SafeReadError, OSError, ValueError) as exc:
+            raise SpeechRouteError(f"the clip {c['name']} cannot be read: {exc}") from None
+        safeio.atomic_write(target / c["name"], data)
+        out.append({"name": c["name"], "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "expected": c.get("expected")})
+    return out
+
+
+def read_prompts(path) -> list[dict]:
+    """The prompts of a text-to-speech run: one per non-blank line of `path`, or DEFAULT_PROMPTS when `path` is None. Each is {"id", "text", "voice"}."""
+    if path is None:
+        lines = list(DEFAULT_PROMPTS)
+    else:
+        try:
+            lines = [ln.strip() for ln in safeio.read_bytes(path, max_bytes=EXPECTED_LIMIT * 16).decode("utf-8").splitlines() if ln.strip()]
+        except (safeio.SafeReadError, OSError, ValueError) as exc:
+            raise SpeechRouteError(f"the prompts file cannot be read as UTF-8 text ({exc})") from None
+    if not lines or not all(_text(ln) and len(ln) <= EXPECTED_LIMIT for ln in lines):
+        raise SpeechRouteError("the prompts must be lines of text with words, one prompt per line, and at least one")
+    if len(lines) > MAX_PROMPTS:
+        raise SpeechRouteError(f"{len(lines)} prompts; at most {MAX_PROMPTS} are used")
+    return [{"id": f"p{i}", "text": t, "voice": None} for i, t in enumerate(lines)]
+
+
+def producer_config(model_id, model_dir, files, *, language=None, max_new_tokens=512) -> dict:
+    """The config orchard/speech_reference_run.py reads. `files` is [{"name", "path"}]."""
+    return {"schema": SCHEMA, "model_id": model_id, "model_dir": model_dir, "files": [{"name": f["name"], "path": f["path"]} for f in files],
+            "language": language, "max_new_tokens": max_new_tokens}
+
+
+def producer_command(python, mode, config_path, out_path) -> list[str]:
+    """The argument list that runs the producer in `python` (the reference interpreter), isolated from the working directory and the user's site."""
+    if mode not in PRODUCER_MODES:
+        raise SpeechRouteError(f"producer mode {mode!r} is not one of {PRODUCER_MODES}")
+    return [str(python), "-I", str(PRODUCER), "--mode", mode, "--config", str(config_path), "--out", str(out_path)]
+
+
+def build_reference(task, model_id, entries, engine, texts, prompts=None) -> dict:
+    """The reference record of stage 1. `entries` come from save_clips, `texts` is the producer's {clip name: transcript}, `engine` its engine record. For text to
+    speech the texts are the scorer's and each clip must have an expected text, because the record states the scorer's word error rate on it."""
+    bundle = bundle_for_task(task, model_id)
+    if bundle is None:
+        raise SpeechRouteError(f"for task {task}, no known bundle serves {model_id!r}")
+    doc = {"schema": SCHEMA, "task": task, "model": model_id, "reference": dict(engine), "license": license_record(bundle)}
+    rows = []
+    for e in entries:
+        text = texts.get(e["name"]) if isinstance(texts, dict) else None
+        if not isinstance(text, str):
+            raise SpeechRouteError(f"the producer gave no transcript for the clip {e['name']}")
+        rows.append({"name": e["name"], "sha256": e["sha256"], "bytes": e["bytes"], "expected": e.get("expected"), "text": text})
+    if task == "speech-to-text":
+        doc["clips"] = rows
+        return doc
+    for r in rows:
+        if not _text(r["expected"]):
+            raise SpeechRouteError(f"the clip {r['name']} has no expected text (a NAME.txt next to it): the scorer is calibrated on it")
+        errors, n = speech_check.wer(r["expected"], r["text"])
+        r["wer"] = errors / n
+    doc["prompts"] = list(prompts or [])
+    doc["calibration"] = rows
+    return doc
