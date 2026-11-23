@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import legacy_telegraph as old
-from dbtools import CHILD, REPO, KILLED, make_history, reserve, run_child, settle, store_worker
+from dbtools import CHILD, REPO, KILLED, make_history, reserve, run_child, run_workers, settle, sleepy_worker, store_worker
 from ledger_io import cache_rows, database_bytes, ledger_lines, ledger_records, seed_ledger, tree_text
 from orchard import db as dbm
 from orchard import telegraph as tg
@@ -295,10 +295,8 @@ def test_four_processes_making_200_reservations_each_cannot_pass_a_cap(tmp_path,
     directory = tmp_path / "state"
     with dbm.Database(directory):
         pass
-    ctx = multiprocessing.get_context("spawn")
     args = [(str(directory), table(**caps), i, 200, problems, 1000, 0.25) for i in range(4)]
-    with ctx.Pool(4) as pool:
-        results = pool.starmap(store_worker, args)
+    results = run_workers(args)
     granted = [cid for r in results for cid, ok in r if ok]
     assert len(granted) == expected, (name, len(granted))
     assert len(set(granted)) == len(granted)                           # nothing granted twice
@@ -312,6 +310,27 @@ def test_four_processes_making_200_reservations_each_cannot_pass_a_cap(tmp_path,
         assert db.integrity_ok()
 
 
+def test_the_worker_runner_still_starts_workers_when_an_earlier_test_took_the_repository_off_sys_path(tmp_path, monkeypatch):
+    """Issue 679: on a suite worker whose sys.path had lost the repository root, every spawned worker died on `import orchard`
+    and `Pool.starmap` waited for a result that could not come, for the 600 s test timeout, once per test. The runner puts the
+    root back before it spawns."""
+    directory = tmp_path / "state"
+    with dbm.Database(directory):
+        pass
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if os.path.abspath(p or ".") != str(REPO)])
+    results = run_workers([(str(directory), table(max_calls=3, max_calls_per_problem=10, max_total_tokens=10**9), i, 2, ["a"], 1000, 0.25)
+                           for i in range(2)], timeout_s=60)
+    assert len([1 for r in results for _cid, ok in r if ok]) == 3
+
+
+def test_the_worker_runner_names_the_failure_when_the_workers_do_not_answer_in_time():
+    """Workers that never answer (or cannot start) used to leave the pool waiting for the full test timeout."""
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="did not answer within 3 s"):
+        run_workers([(1,), (2,)], timeout_s=3, worker=sleepy_worker)
+    assert time.monotonic() - started < 30
+
+
 def test_four_processes_whose_lock_wait_is_one_millisecond_still_cannot_pass_a_cap(tmp_path):
     """Issue 395, made deterministic: with a 1 ms lock wait the four processes meet the ledger's `LedgerUnavailable` answer all the time,
     as processes do when a loaded box keeps the lock holder from running for 30 s. Each worker asks again, so every reservation ends
@@ -319,10 +338,8 @@ def test_four_processes_whose_lock_wait_is_one_millisecond_still_cannot_pass_a_c
     directory = tmp_path / "state"
     with dbm.Database(directory):
         pass
-    ctx = multiprocessing.get_context("spawn")
     table_ = table(max_calls=40, max_calls_per_problem=10**6, max_total_tokens=10**9)
-    with ctx.Pool(4) as pool:
-        results = pool.starmap(store_worker, [(str(directory), table_, i, 50, ["a", "b"], 1000, 0.25, False, 1) for i in range(4)])
+    results = run_workers([(str(directory), table_, i, 50, ["a", "b"], 1000, 0.25, False, 1) for i in range(4)])
     assert all(len(r) == 50 for r in results)                           # every reservation got an answer
     granted = [cid for r in results for cid, ok in r if ok]
     assert len(granted) == 40 and len(set(granted)) == 40
@@ -410,10 +427,8 @@ def test_four_processes_that_also_settle_leave_one_settled_call_each_and_the_sam
     directory = tmp_path / "state"
     with dbm.Database(directory):
         pass
-    ctx = multiprocessing.get_context("spawn")
     table_ = table(max_calls=10**6, max_calls_per_problem=10**6, max_total_tokens=10**9)
-    with ctx.Pool(4) as pool:
-        results = pool.starmap(store_worker, [(str(directory), table_, i, 200, ["a", "b"], 1000, 0.25, True) for i in range(4)])
+    results = run_workers([(str(directory), table_, i, 200, ["a", "b"], 1000, 0.25, True) for i in range(4)])
     assert len([1 for r in results for _cid, ok in r if ok]) == 800
     records = tg._read_ledger_strict(directory)
     acct = tg.accounting(records)

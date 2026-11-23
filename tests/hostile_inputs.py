@@ -1000,6 +1000,16 @@ def _preflight_config_json(base: Path):
     return preflight._config_json(base / "input.json")
 
 
+def _updates_host_sfpi_pin(base: Path):
+    from orchard import updates_host
+    return updates_host.sfpi_pin(base / "input.json")
+
+
+def _updates_host_read_sysfs(base: Path):
+    from orchard import updates_host
+    return updates_host.read_sysfs(str(base / "input.json"), 2.0)
+
+
 def _preflight_index_problem(base: Path):
     from orchard import preflight
     return preflight._index_problem(base / "input.json")
@@ -1303,6 +1313,8 @@ READERS: list[Reader] = [
     Reader("tool_use.count", _tool_use_count, suffix=b"\n", rel="stages/2/log/prepare-00001.jsonl"),
     Reader("thin_repair.load_history", _thin_repair_load_history, rel="thin_repair_history.json"),
     Reader("preflight._config_json", _preflight_config_json),
+    Reader("updates_host.sfpi_pin", _updates_host_sfpi_pin),
+    Reader("updates_host.read_sysfs", _updates_host_read_sysfs),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
     Reader("ledger.read_entries",_ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),

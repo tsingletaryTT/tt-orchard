@@ -719,12 +719,14 @@ def test_a_multi_device_run_lists_only_the_summarys_device_in_its_top_ops(tmp_pa
     assert {t["device"] for t in s["top_ops"]} == {s["device"]["id"]}
 
 
-def test_an_interrupt_gives_the_child_the_grace_time_before_it_is_killed(tmp_path):
+@pytest.mark.parametrize("start_delay_s", [0, 6], ids=["child starts at once", "child starts slowly, as on a loaded box"])
+def test_an_interrupt_gives_the_child_the_grace_time_before_it_is_killed(tmp_path, start_delay_s):
     """Round 2, finding 2: Ctrl+C sent SIGKILL at once, so gozer could not release the lease and reset the chips. A child that handles SIGTERM must run its handler."""
     import sys
     done = tmp_path / "cleaned"
     ready = tmp_path / "ready"
     script = ("import signal, sys, time\n"
+              f"time.sleep({start_delay_s})\n"
               f"def h(*a):\n    time.sleep(0.5)\n    open({str(done)!r}, 'w').write('x')\n    sys.exit(0)\n"
               "signal.signal(signal.SIGTERM, h)\n"
               f"open({str(ready)!r}, 'w').write('r')\n"
@@ -733,15 +735,26 @@ def test_an_interrupt_gives_the_child_the_grace_time_before_it_is_killed(tmp_pat
     import time
 
     def interrupt():
-        for _ in range(100):
-            if ready.exists():
-                break
+        # Wait for the child to say its SIGTERM handler is installed. A child on a loaded box can take many seconds to start
+        # Python (issue 679: the old five-second limit interrupted a child that had no handler yet, and it died at once).
+        # If it never says so, do not interrupt: the run ends at its own 60 s limit and the assertions fail with that reason.
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
+        if not ready.exists():
+            return
         import _thread
         _thread.interrupt_main()
     threading.Thread(target=interrupt, daemon=True).start()
-    with pytest.raises(KeyboardInterrupt):
-        ps.run_group([sys.executable, "-c", script], timeout_s=60.0, log_path=tmp_path / "log", term_grace_s=10.0)
+    # `_thread.interrupt_main()` does nothing while SIGINT is ignored. A suite started in the background from a non-interactive shell
+    # (nohup, `&`, a CI step) inherits SIGINT as ignored, and the run then waited out its 60 s limit and failed with "DID NOT RAISE" (issue 679).
+    import signal
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            ps.run_group([sys.executable, "-c", script], timeout_s=60.0, log_path=tmp_path / "log", term_grace_s=10.0)
+    finally:
+        signal.signal(signal.SIGINT, previous)
     assert done.exists()
 
 

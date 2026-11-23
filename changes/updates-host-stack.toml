@@ -1,0 +1,4 @@
+target = "0.9.192"
+summary = "tt-orchard updates also reports SFPI, tt-kmd, tt-flash, tt-smi, the firmware bundle and the reference venv's packages, read only, with no tt-smi call (issue 809)."
+pr = 810
+kind = "feature"
