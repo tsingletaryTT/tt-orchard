@@ -273,7 +273,10 @@ class Run:
         self.audio_run = (run_dir / "stages" / "2" / "audio_result.json").is_file()
         # A text-runtime run (orchard/text_runtime.py) wrote stage 2's text_result.json and has the text stage table.
         self.text_run = (run_dir / "stages" / "2" / "text_result.json").is_file()
-        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run, text_runtime=self.text_run)
+        # A speech run (orchard/speech_route.py) wrote stage 2's speech_result.json and has the speech stage table.
+        self.speech_run = (run_dir / "stages" / "2" / "speech_result.json").is_file()
+        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run, text_runtime=self.text_run,
+                                             speech_route=self.speech_run)
                       for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
@@ -296,11 +299,11 @@ class Run:
         self.scan_file = s / "0" / "hazard-scan.json"
         self.scan = read_capped_json(self.scan_file)
         self.gguf, self.gguf_why = read_capped_json_why(s / "0" / "evidence" / "gguf-header.json")   # issue 440: None when stage 0 ignored no GGUF file
-        self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
+        self.reference = {} if (self.audio_run or self.text_run or self.speech_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
             spec = self.specs[n]
-            if spec.skip or not spec.gate_file or (self.audio_run and n == 2) or self.text_run:
+            if spec.skip or not spec.gate_file or (self.audio_run and n == 2) or self.text_run or self.speech_run:
                 continue            # an audio run's stage 2 file is the audio result, which the audio section reads
             rel = f"stages/{n}/{spec.gate_file}"
             self.results[n] = read_json(run_dir / rel, rel, required=self.result(n) == "pass")
@@ -357,6 +360,7 @@ class Run:
         # A stock-runtime run (orchard/stock_runtime.py) has the template's stock-check.json in stage 2's evidence (issue 93).
         self.stock = read_stock_json(run_dir)
         self.text = {name: read_json(run_dir / "stages" / str(n) / name, "", required=False) for n, name in TEXT_FILES}   # a text run's three result files
+        self.speech = {name: read_json(run_dir / "stages" / str(n) / name, "", required=False) for n, name in SPEECH_FILES} if self.speech_run else {}
         self.audio = load_audio(run_dir)    # stage 2's audio_result.json: None for a run without one (see "audio runs")
         self.audio_clips: list[dict] = []   # set by build() once the clips are copied
         self.cards = {}             # profile name -> (run-relative card path, text)
@@ -925,6 +929,9 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
                    "Evidence: `stages/2/audio_result.json`."]
         body[1] = ["The CPU reference runs (the model, its base as the control, and one run in the chip's interpreter) are listed in the section "
                    "Audio clip on a chip.", "", "Evidence: `stages/1/audio_reference.json`."]
+    if run.speech_run:
+        body[1] = [f"The CPU reference is described in the section {SPEECH_HEADING}.", "", "Evidence: `stages/1/speech_reference.json`."]
+        body[2] = [f"The bundle's answers and their comparison with the reference are in the section {SPEECH_HEADING}.", "", "Evidence: `stages/2/speech_result.json`."]
     if run.text_run:
         body[1] = [f"The CPU reference runs are described in the section {TEXT_HEADING}.", "", "Evidence: `stages/1/text_reference.json`."]
         body[2] = [f"The chip comparison is in the section {TEXT_HEADING}.", "", "Evidence: `stages/2/text_result.json`."]
@@ -1288,6 +1295,103 @@ def text_section(run: Run, redact: Redactor) -> list[str]:
         lines += ["", f"Floor, {txt(redact, name)}: {txt(redact, e.get('share_text'), 400)}"]
     lines += ["", "### What these numbers do not show", ""]
     lines += [f"- {txt(redact, x, 500)}" for x in as_list(res.get("limits")) + as_list(bench.get("limits"))] or ["- No limits are recorded."]
+    return lines
+
+
+# ---- speech runs (stage 1 and 2 result files) ------------------------------------------------------------------------------
+# A run on the speech route (orchard/speech_route.py) has stages/1/speech_reference.json and stages/2/speech_result.json. Only then does RESULTS.md get the "Speech
+# model on a chip" section and RISKS.md the "Speech run" section. The files are untrusted: a missing or wrongly typed field prints "not recorded". The licence line is
+# derived here from the bundle table (the record's own line is never printed), so a record that was edited cannot change what the bundle says about the licence.
+SPEECH_FILES = ((1, "speech_reference.json"), (2, "speech_result.json"))
+SPEECH_HEADING = "Speech model on a chip"
+
+
+def speech_facts(run: Run) -> dict:
+    """{task, model, bundle, line, recorded_ok, non_commercial}: what the bundle table says about the run's model, and whether stage 1's licence record agrees."""
+    from orchard import speech_route
+    ref = as_dict(run.speech.get("speech_reference.json"))
+    task, model = ref.get("task"), ref.get("model")
+    bundle = speech_route.bundle_for_task(task, model) if isinstance(task, str) and isinstance(model, str) else None
+    if bundle is None:
+        return {"task": task, "model": model, "bundle": None, "line": None, "recorded_ok": False, "non_commercial": False}
+    return {"task": task, "model": model, "bundle": bundle, "line": speech_route.license_line(bundle),
+            "recorded_ok": ref.get("license") == speech_route.license_record(bundle), "non_commercial": bundle.non_commercial}
+
+
+def speech_rows(run: Run, redact: Redactor, facts: dict) -> list[str]:
+    from orchard import speech_check
+    ref, res = as_dict(run.speech.get("speech_reference.json")), as_dict(run.speech.get("speech_result.json"))
+
+    def wer_text(want, heard) -> str:
+        try:
+            errors, n = speech_check.wer(want, heard)
+        except Exception:
+            return NOT_RECORDED
+        return f"{errors / n:.3f}"
+    if facts["task"] == "speech-to-text":
+        by_name = {c.get("name"): c for c in as_list(res.get("checks")) if isinstance(c, dict)}
+        rows = ["| Clip | Reference transcript | Bundle transcript | Word error rate against the reference | Against the expected text |", "|---|---|---|---|---|"]
+        for clip in as_list(ref.get("clips")):
+            clip = as_dict(clip)
+            heard = as_dict(as_dict(by_name.get(f"transcribe {clip.get('name')}")).get("data")).get("text")
+            vs_ref = wer_text(clip.get("text"), heard) if isinstance(clip.get("text"), str) and isinstance(heard, str) else NOT_RECORDED
+            vs_exp = wer_text(clip.get("expected"), heard) if isinstance(clip.get("expected"), str) and isinstance(heard, str) else "no expected text given"
+            rows.append(f"| {txt(redact, clip.get('name'))} | {txt(redact, clip.get('text'), 200)} | {txt(redact, heard, 200)} | {vs_ref} | {vs_exp} |")
+        return rows
+    rows = ["| Prompt | The scorer's transcript of the bundle's audio | Word error rate against the prompt | Audio seconds |", "|---|---|---|---|"]
+    prompts = {as_dict(p).get("id"): as_dict(p) for p in as_list(ref.get("prompts"))}
+    for p in as_list(res.get("prompts")):
+        p = as_dict(p)
+        want = as_dict(prompts.get(p.get("id"))).get("text")
+        heard = p.get("heard")
+        seconds = next((as_dict(c.get("data")).get("seconds") for c in as_list(p.get("checks")) if isinstance(c, dict) and c.get("name") == "speech"), None)
+        rate = wer_text(want, heard) if isinstance(want, str) and isinstance(heard, str) else NOT_RECORDED
+        rows.append(f"| {txt(redact, p.get('id'))}: {txt(redact, want, 120)} | {txt(redact, heard, 200)} | {rate} | {num(seconds, 3)} |")
+    return rows
+
+
+def speech_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Speech model on a chip" section of RESULTS.md. No lines for a run without speech_result.json."""
+    if not run.speech_run:
+        return []
+    facts = speech_facts(run)
+    ref, res = as_dict(run.speech.get("speech_reference.json")), as_dict(run.speech.get("speech_result.json"))
+    engine = as_dict(ref.get("reference"))
+    bundle = facts["bundle"]
+    lines = ["", f"## {SPEECH_HEADING}", "",
+             f"Task: {txt(redact, facts['task'])}. Model: {txt(redact, facts['model'])}. Bundle served: {txt(redact, bundle.bundle if bundle else None)} "
+             f"(started with `tt-model serve` under a lease and stopped afterwards). Evidence: `stages/1/speech_reference.json`, `stages/2/speech_result.json`. "
+             "Each number below is recomputed by the stage gate from the saved clips, the saved audio and the transcripts.", "",
+             facts["line"] or "No known bundle serves this model, so no licence line can be given.", "",
+             f"The CPU reference ran with transformers {txt(redact, engine.get('transformers'))} and torch {txt(redact, engine.get('torch'))} "
+             f"({txt(redact, engine.get('model_id'))}, {txt(redact, engine.get('decoding'))} decoding).", ""]
+    lines += speech_rows(run, redact, facts)
+    checks = [c for c in as_list(res.get("checks")) if isinstance(c, dict)] if facts["task"] == "speech-to-text" else \
+        [c for p in as_list(res.get("prompts")) for c in as_list(as_dict(p).get("checks")) if isinstance(c, dict)]
+    names = sorted({str(c.get("name")) for c in checks if not str(c.get("name")).startswith(("transcribe ", "speech"))})
+    lines += ["", "Server checks: " + (", ".join(f"{txt(redact, n)} {'passed' if all(c.get('status') == 'pass' for c in checks if c.get('name') == n) else 'did not pass'}"
+                                                 for n in names) or NOT_RECORDED) + ".",
+              "", "### What these numbers do not show", "",
+              "- No speed is measured here. The bundle's card states its own timings.",
+              "- Questions about audio through `/v1/chat/completions`, languages other than the clips' own, concurrency and long audio are not checked.",
+              "- The bars are provisional until a run on a chip has measured them (see RISKS.md)."]
+    return lines
+
+
+def speech_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Speech run" section of RISKS.md: the licence line first, then a record that disagrees with the bundle table, then the fixed limits."""
+    if not run.speech_run:
+        return []
+    facts = speech_facts(run)
+    lines = ["## Speech run", "", "- " + (facts["line"] or "No known bundle serves this model, so no licence line can be given.") + " Evidence: `stages/1/speech_reference.json`."]
+    if facts["bundle"] is not None and not facts["recorded_ok"]:
+        lines.append("- The licence recorded in stage 1 differs from the bundle table's, so the line above comes from the table. Evidence: `stages/1/speech_reference.json`.")
+    if facts["non_commercial"]:
+        lines.append(f"- The bundle's licence ({txt(redact, facts['bundle'].license)}) is non-commercial. Use of this model's output and of the bundle is under the licence's terms, "
+                     "as the bundle's card states them.")
+    lines += ["- The bars are provisional until a run on a chip has measured them: speech to text allows a word error rate of 0.05 against the CPU reference and 0.10 against the "
+              "expected text, and text to speech allows 0.15 between the scorer's transcript and the prompt. Evidence: `stages/2/speech_result.json`.",
+              "- The result covers the clips and prompts of this run only. Evidence: `stages/1/speech_reference.json`.", ""]
     return lines
 
 
@@ -1799,6 +1903,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
+    lines += speech_section(run, redact)
     lines += full_port_section(run, redact)
     lines += stock_section(run, redact)
     body = stage_results(run, redact)
@@ -2311,6 +2416,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
              "Every item names its evidence, relative to the run directory.", ""]
     lines += audio_risks(run, redact)
     lines += text_risks(run, redact)
+    lines += speech_risks(run, redact)
     lines += full_port_risks(run, redact)
     lines += stock_risks(run, redact)
     lines += ["## TODO numbers", ""]

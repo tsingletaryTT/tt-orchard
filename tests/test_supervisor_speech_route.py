@@ -350,3 +350,78 @@ def test_no_speech_stage_calls_the_packager_or_an_upload(asr_rig):
         text = json.dumps(e)
         for word in ("tt-orchard can", "hf upload", "tt-model push", "tt-model publish", "upload_file", "upload_folder"):
             assert word not in text, (word, e["event"])
+
+
+# ---- the operator bundle ----------------------------------------------------------------------------------------------------
+
+LICENCE_SENTENCES = {
+    "asr": "Voxtral-Mini-3B-2507 is used under its licence, apache-2.0, as the bundle's card states it. This run served the bundle "
+           "apande-TT/mistralai-voxtral-mini-3b-2507-tt and did not copy or republish any weights.",
+    "tts": "Voxtral-4B-TTS-2603 is used under its licence, cc-by-nc-4.0 (non-commercial use only), as the bundle's card states it. This run served the bundle "
+           "apande-TT/mistralai-voxtral-4b-tts-2603-tt and did not copy or republish any weights.",
+}
+
+
+def bundle_files(rig):
+    d = rig.run_dir / "stages" / "8" / "bundle"
+    return (d / "RESULTS.md").read_text(), (d / "RISKS.md").read_text()
+
+
+@pytest.mark.real_bundle
+def test_the_speech_to_text_bundle_holds_the_licence_line_in_results_and_in_risks(asr_rig):
+    r = asr_rig
+    assert r.run() == EXIT_READY
+    results, risks = bundle_files(r)
+    assert LICENCE_SENTENCES["asr"] in results and LICENCE_SENTENCES["asr"] in risks
+    assert "## Speech model on a chip" in results and "## Speech run" in risks
+    assert "mlk.wav" in results and SPOKEN in results
+    assert "stages/1/speech_reference.json" in results and "stages/2/speech_result.json" in results
+
+
+@pytest.mark.real_bundle
+def test_the_text_to_speech_bundle_holds_the_non_commercial_licence_line(tts_rig):
+    r = tts_rig
+    assert r.run() == EXIT_READY
+    results, risks = bundle_files(r)
+    assert LICENCE_SENTENCES["tts"] in results and LICENCE_SENTENCES["tts"] in risks
+    assert "non-commercial" in risks and "p0" in results and sr.DEFAULT_PROMPTS[0] in results
+
+
+@pytest.mark.real_bundle
+def test_the_bundle_says_the_bars_are_provisional_and_what_was_not_checked(asr_rig):
+    r = asr_rig
+    r.run()
+    results, risks = bundle_files(r)
+    assert "provisional" in risks and "What these numbers do not show" in results
+    assert "speed" in results and "/v1/chat/completions" in results
+
+
+def rebuild_bundle(run_dir, tmp_path):
+    """Run the real builder again on a finished run, as the supervisor's stage 8 does."""
+    import shutil
+    import subprocess
+    script = tmp_path / "build_bundle_copy.py"
+    checkout = Path(supervisor.__file__).resolve().parent.parent
+    shutil.copyfile(checkout / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
+    (tmp_path / "bundle_config_copy.json").write_text(json.dumps({"run_dir": str(run_dir), "orchard_dir": str(checkout)}))
+    stage8 = run_dir / "stages" / "8"
+    shutil.copyfile(tmp_path / "bundle_config_copy.json", stage8 / "bundle_config.json")
+    shutil.copyfile(script, stage8 / "build_bundle.py")
+    proc = subprocess.run([sys.executable, str(stage8 / "build_bundle.py")], cwd=run_dir, capture_output=True, text=True, timeout=300,
+                          env={"PATH": os.environ["PATH"], "PYTHONPATH": str(checkout)})
+    assert proc.returncode == 0, proc.stderr[-1500:]
+
+
+@pytest.mark.real_bundle
+def test_a_licence_record_that_differs_from_the_bundle_table_is_a_risk_and_the_table_line_is_printed(asr_rig):
+    r = asr_rig
+    assert r.run() == EXIT_READY
+    ref_path = r.run_dir / "stages" / "1" / sr.REFERENCE_FILE
+    ref = json.loads(ref_path.read_text())
+    ref["license"]["id"] = "mit"
+    ref["license"]["line"] = "tampered line"
+    ref_path.write_text(json.dumps(ref))
+    rebuild_bundle(r.run_dir, r.tmp)
+    results, risks = bundle_files(r)
+    assert LICENCE_SENTENCES["asr"] in results and "tampered line" not in results and "tampered line" not in risks
+    assert "licence recorded in stage 1 differs from the bundle table" in risks
