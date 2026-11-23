@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from orchard import speech_check
+from orchard import speech_route as sr_mod
 from test_speech_check import wav_bytes
 
 ASR_MODEL = "mistralai/Voxtral-Mini-3B-2507"
@@ -44,7 +45,7 @@ def clip_entry(stage_dir: Path, name: str, expected, text, seconds=1.0) -> dict:
 def asr_reference(stage_dir, clips=(("mlk.wav", "I have a dream that one day", "I have a dream that one day"),)) -> dict:
     doc = {"schema": 1, "task": "speech-to-text", "model": ASR_MODEL, "reference": copy.deepcopy(ENGINE), "license": copy.deepcopy(ASR_LICENSE),
            "clips": [clip_entry(stage_dir, n, e, t) for n, e, t in clips]}
-    put_json(Path(stage_dir) / "reference.json", doc)
+    put_json(Path(stage_dir) / sr_mod.REFERENCE_FILE, doc)
     return doc
 
 
@@ -52,7 +53,7 @@ def tts_reference(stage_dir, prompts=PROMPTS, calibration=(("mlk.wav", "I have a
     doc = {"schema": 1, "task": "text-to-speech", "model": TTS_MODEL, "reference": copy.deepcopy(SCORER), "license": copy.deepcopy(TTS_LICENSE),
            "prompts": [{"id": i, "text": t, "voice": None} for i, t in prompts],
            "calibration": [dict(clip_entry(stage_dir, n, e, t), wer=w) for n, e, t, w in calibration]}
-    put_json(Path(stage_dir) / "reference.json", doc)
+    put_json(Path(stage_dir) / sr_mod.REFERENCE_FILE, doc)
     return doc
 
 

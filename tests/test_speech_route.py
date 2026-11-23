@@ -88,13 +88,14 @@ def test_the_line_gives_no_legal_opinion():
 
 
 def test_a_good_speech_to_text_reference_has_no_problems(tmp_path):
+    assert sr.REFERENCE_FILE == "speech_reference.json"
     asr_reference(tmp_path)
-    assert sr.reference_problems(json.loads((tmp_path / "reference.json").read_text()), tmp_path) == []
+    assert sr.reference_problems(json.loads((tmp_path / sr.REFERENCE_FILE).read_text()), tmp_path) == []
 
 
 def test_a_good_text_to_speech_reference_has_no_problems(tmp_path):
     tts_reference(tmp_path)
-    assert sr.reference_problems(json.loads((tmp_path / "reference.json").read_text()), tmp_path) == []
+    assert sr.reference_problems(json.loads((tmp_path / sr.REFERENCE_FILE).read_text()), tmp_path) == []
 
 
 def test_a_reference_that_is_not_an_object_is_refused(tmp_path):
