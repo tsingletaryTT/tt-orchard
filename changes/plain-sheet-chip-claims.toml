@@ -1,0 +1,4 @@
+target = "0.9.193"
+summary = "The plain TT-Lang cheat sheet no longer teaches ttl.math.fill, ttl.math.broadcast or a shape-less reduce_sum as the chip forms: both chip compilers refuse the first two and the pair takes shape; the roots name the pair as the hardware package and 1.1.6 as the fallback."
+kind = "fix"
+pr = 803
