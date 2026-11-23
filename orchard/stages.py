@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, full_port_entries, full_port_quality, full_port_serve, model_kind, safeio, scoring_check
+from orchard import speech_route as _speech
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, raw_evidence, sampling_choice, sampling_probe, sidecar_numbers, token_check
@@ -2324,6 +2325,86 @@ TEXT_TABLE = {0: TEXT_STAGE_0, 1: TEXT_STAGE_1, 2: TEXT_STAGE_2, 6: TEXT_STAGE_6
 TEXT_SPECS = (TEXT_STAGE_0, TEXT_STAGE_1, TEXT_STAGE_2, TEXT_STAGE_6)
 
 
+# The speech route (orchard/speech_route.py, docs/superpowers/specs/2026-11-23-speech-route-design.md): a run started with the input `speech_route=<task>`, for a
+# speech model that a published bundle serves. Stages 0 to 2 and 8 are supervisor code, none of them asks the coder anything, and stage 2 serves the bundle under
+# a lease. Stages 3 to 7 are skipped with a reason.
+def gate_speech_triage(stage_dir, run_dir) -> GateResult:
+    """Stage 0 of a speech run: supervisor code wrote delta.json from the card and the bundle table. The speech record has to name a task, a known bundle for it
+    and the licence record the bundle table gives, and a non-commercial licence has to appear as a hazard."""
+    d, err = _load(stage_dir, "delta.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = [], []
+    _delta_reasons(d, run_dir, reasons, seen)
+    if d.get("path") != "full-port":
+        reasons.append("a speech run's delta.json path must be full-port (a published bundle is the port)")
+    facts = d.get("facts") if isinstance(d.get("facts"), dict) else {}
+    if facts.get("modality") != "audio":
+        reasons.append("a speech run needs facts.modality to be audio")
+    if facts.get("serving") != "container":
+        reasons.append("a speech run needs facts.serving to be container (a published tt-model container serves it)")
+    rec = d.get("speech")
+    if not isinstance(rec, dict):
+        reasons.append("delta.json needs a speech record (task, upstream model, bundle, licence)")
+        return _done(reasons, seen)
+    task = rec.get("task")
+    bundle = _speech.bundle_for_task(task, rec.get("upstream"))
+    if bundle is None:
+        reasons.append(f"for task {task!r}, no known bundle serves {rec.get('upstream')!r}")
+        return _done(reasons, seen)
+    if rec.get("bundle") != bundle.bundle:
+        reasons.append(f"speech.bundle is {rec.get('bundle')!r}; the bundle table gives {bundle.bundle}")
+    if rec.get("license") != _speech.license_record(bundle):
+        reasons.append(f"the licence record is {rec.get('license')!r}; the bundle table gives {_speech.license_record(bundle)!r}")
+    if bundle.non_commercial and not any(isinstance(h, dict) and h.get("area") == "license" and "non-commercial" in str(h.get("finding")) for h in d.get("hazards") or []):
+        reasons.append(f"the licence {bundle.license} is non-commercial and delta.json hazards has no license entry that says non-commercial")
+    return _done(reasons, seen)
+
+
+def gate_speech_reference(stage_dir, run_dir) -> GateResult:
+    doc, err = _load(stage_dir, _speech.REFERENCE_FILE)
+    if err:
+        return GateResult(False, (err,))
+    reasons = _speech.reference_problems(doc, stage_dir)
+    return _done(reasons, [os.path.relpath(Path(stage_dir) / _speech.REFERENCE_FILE, run_dir)] if not reasons else [])
+
+
+def gate_speech_check(stage_dir, run_dir) -> GateResult:
+    result, err = _load(stage_dir, _speech.RESULT_FILE)
+    if err:
+        return GateResult(False, (err,))
+    ref_dir = Path(run_dir) / "stages" / "1"
+    ref, err = _load(ref_dir, _speech.REFERENCE_FILE)
+    if err:
+        return GateResult(False, (f"stage 1's reference is unusable: {err}",))
+    bad = _speech.reference_problems(ref, ref_dir)
+    if bad:
+        return GateResult(False, ("stage 1's reference no longer passes its own checks: " + "; ".join(bad[:3]),))
+    reasons = _speech.result_problems(result, ref, stage_dir)
+    return _done(reasons, [os.path.relpath(Path(stage_dir) / _speech.RESULT_FILE, run_dir)] if not reasons else [])
+
+
+SPEECH_STAGE_0 = StageSpec(0, "intake and triage for a speech model that a published bundle serves", "", (), 0, "delta.json", gate_speech_triage, None,
+                           harness=True, needs_coder=False)
+SPEECH_STAGE_1 = StageSpec(1, "CPU reference for the speech model", "", (), 0, _speech.REFERENCE_FILE, gate_speech_reference, _speech.REFERENCE_FILE,
+                           harness=True, disk=_speech.STAGE_DISK_GB, needs_coder=False)
+SPEECH_STAGE_2 = StageSpec(2, "the published bundle on one board and its answers against the CPU reference", "", ("tt-device-usage",), 1, _speech.RESULT_FILE,
+                           gate_speech_check, "test-result.json", harness=True, disk=_speech.STAGE_DISK_GB, needs_coder=False)
+SKIP_SPEECH_3 = "speech route: the published bundle is the whole model; there is no separate full-model stage"
+SKIP_SPEECH_4 = "speech route: the bundle is published for one chip; a multichip port and a shrink are not part of this route"
+SKIP_SPEECH_5 = "speech route: stage 2 started the bundle's own server and called it; there is no separate serving stage"
+SKIP_SPEECH_6 = "speech route: speed is not measured (the bundle card states its own timings); no benchmark stage"
+SKIP_SPEECH_7 = "speech route: the harness never packages or republishes a speech model's weights"
+SPEECH_TABLE = {0: SPEECH_STAGE_0, 1: SPEECH_STAGE_1, 2: SPEECH_STAGE_2,
+                3: dataclasses.replace(STAGES[3], skip=SKIP_SPEECH_3, needs_coder=False),
+                4: dataclasses.replace(STAGES[4], skip=SKIP_SPEECH_4, needs_coder=False),
+                5: dataclasses.replace(STAGES[5], skip=SKIP_SPEECH_5, needs_coder=False),
+                6: dataclasses.replace(STAGES[6], skip=SKIP_SPEECH_6, needs_coder=False),
+                7: dataclasses.replace(STAGES[7], skip=SKIP_SPEECH_7, needs_coder=False),
+                8: dataclasses.replace(STAGES[8], needs_coder=False)}
+SPEECH_SPECS = (SPEECH_STAGE_0, SPEECH_STAGE_1, SPEECH_STAGE_2)
+
+
 def scratch_stage(number: int, path) -> bool:
     """Whether an agent in this stage may write to <run>/tt-metal-scratch: stages 2 to 4 of the stock-runtime path only."""
     return path == "stock-runtime" and number in (2, 3, 4)
@@ -2455,13 +2536,15 @@ def run_model_kind(entries: list[dict]) -> str:
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
              cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
-             full_port: bool = False, kind: str = "generative") -> StageSpec:
+             full_port: bool = False, kind: str = "generative", speech_route: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
     if text_runtime and number in TEXT_TABLE:
         return TEXT_TABLE[number]
+    if speech_route and number in SPEECH_TABLE:
+        return SPEECH_TABLE[number]
     if number == 0 and stock:
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:
