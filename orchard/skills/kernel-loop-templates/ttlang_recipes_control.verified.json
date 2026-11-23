@@ -1,0 +1,772 @@
+{
+ "schema": "orchard-recipes-verified/2",
+ "date": "2026-11-22",
+ "simulator": "tt-lang-sim 1.1.10+gfec38c6",
+ "targets": [
+  {
+   "package": "tt-lang",
+   "version": "1.1.10.dev20261026+light",
+   "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  },
+  {
+   "package": "tt-lang",
+   "version": "1.1.6",
+   "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  }
+ ],
+ "note": "Simulator passes, and compiles with each chip package's own compiler made with no device. No recipe has been run on a chip unless its record has a `chip` entry.",
+ "records": {
+  "ctl-add-rows": {
+   "skeleton_sha256": "974b6ecf22724fabfa23601655e2a65126511a19b5b326b7a538f98408964e4b",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999999403953552,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "974b6ecf22724fabfa23601655e2a65126511a19b5b326b7a538f98408964e4b",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "b526ab05931c6d84a0b49a54572b6f01cda9bf6fd23def896bba0d967be856de"
+   },
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc 0.005957986693829298, finite True, bar 0.999"
+    }
+   ],
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "974b6ecf22724fabfa23601655e2a65126511a19b5b326b7a538f98408964e4b",
+      "operation": "add_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_8f8122fd.cpp",
+        "bytes": 2089,
+        "sha256": "0feff78de004db6b2b1c70a9013cf11d4968f4eed802c0bae6c2812f81229511"
+       },
+       {
+        "name": "ttlang_kernel_read_1a4dac03.cpp",
+        "bytes": 2422,
+        "sha256": "56cd5d79290771879a29312549ffae0e92925f3b8f367c2fd64a47f388a6554e"
+       },
+       {
+        "name": "ttlang_kernel_write_a33d76f9.cpp",
+        "bytes": 1518,
+        "sha256": "d2a16c8f4ae1d4fd212d735bd19b0c0f6eaac25d375764c2f4adc60bb06ecb87"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.plus"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "974b6ecf22724fabfa23601655e2a65126511a19b5b326b7a538f98408964e4b",
+      "operation": "add_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_8f8122fd.cpp",
+        "bytes": 2089,
+        "sha256": "0feff78de004db6b2b1c70a9013cf11d4968f4eed802c0bae6c2812f81229511"
+       },
+       {
+        "name": "ttlang_kernel_read_2224d133.cpp",
+        "bytes": 2465,
+        "sha256": "d3c8016f12137acee1ea44e0df25d7e3352c55413105979f538cbf2c23c3445e"
+       },
+       {
+        "name": "ttlang_kernel_write_d5df0494.cpp",
+        "bytes": 1526,
+        "sha256": "ee23a620d2e2f39e98bb44348644961b927071e9c13077ce2ccd7a41a99ea5cd"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.plus"
+      }
+     ]
+    }
+   ],
+   "chip": []
+  },
+  "ctl-sub-two-rows": {
+   "skeleton_sha256": "4e87bd53112f137427cfa18d80c36e674b0eec451da3c463f9a136a61c43f760",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999999403953552,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "4e87bd53112f137427cfa18d80c36e674b0eec451da3c463f9a136a61c43f760",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "1021089c83fab6eb02f67c10dd0a3811dd6ad4bd2964d677c3b45d487be2d389"
+   },
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc 0.005957986693829298, finite True, bar 0.999"
+    }
+   ],
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "4e87bd53112f137427cfa18d80c36e674b0eec451da3c463f9a136a61c43f760",
+      "operation": "sub_two_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_f662a277.cpp",
+        "bytes": 2722,
+        "sha256": "8b491e9043de591521438109d4074884e1416840c9c33af5cf8cbe073069b40d"
+       },
+       {
+        "name": "ttlang_kernel_read_59052f79.cpp",
+        "bytes": 2487,
+        "sha256": "43f0115da2c21f409be2f992d80c272716930ea7b80fe46878732dedab29bf3c"
+       },
+       {
+        "name": "ttlang_kernel_write_f52e4d4d.cpp",
+        "bytes": 1509,
+        "sha256": "7c87a7f8fa6b81f6deec580a014598947e5c9d2a9f3107d8544243040ac8f522"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.minus"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "4e87bd53112f137427cfa18d80c36e674b0eec451da3c463f9a136a61c43f760",
+      "operation": "sub_two_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_91b6e7ad.cpp",
+        "bytes": 3057,
+        "sha256": "f968340375fd0b3c3ecf1b12cb555f28d2d7405038566cb6929ce50b43bb82f2"
+       },
+       {
+        "name": "ttlang_kernel_read_cd572543.cpp",
+        "bytes": 2491,
+        "sha256": "d36b7089ed6b407aba0fc212908753e6ce356bf34cac9b5467876e51664e75ce"
+       },
+       {
+        "name": "ttlang_kernel_write_3e3ff558.cpp",
+        "bytes": 1511,
+        "sha256": "47b688f3abe873c67d736318bf62e00030650192053edec934bb2859051d1afc"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.minus"
+      }
+     ]
+    }
+   ],
+   "chip": []
+  },
+  "ctl-mul-tiles": {
+   "skeleton_sha256": "c54148a621613eb9a26d1185c89b27a08e88d8065f764b5bda4aa36ddbc49f40",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 0.9999998807907104,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "c54148a621613eb9a26d1185c89b27a08e88d8065f764b5bda4aa36ddbc49f40",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "0d3c712556db583ed631f11b774f8c569dfb8a283025bba4363a96c56f5436db"
+   },
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: pcc -0.01954123191535473, finite True, bar 0.999"
+    }
+   ],
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "c54148a621613eb9a26d1185c89b27a08e88d8065f764b5bda4aa36ddbc49f40",
+      "operation": "mul_tiles",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.times"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "c54148a621613eb9a26d1185c89b27a08e88d8065f764b5bda4aa36ddbc49f40",
+      "operation": "mul_tiles",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.times"
+      }
+     ]
+    }
+   ],
+   "chip": []
+  },
+  "ctl-double": {
+   "skeleton_sha256": "72f76b13f1ad07d64c84f515f1f1e590552e592aa6af33344e9e8947bc41b5e9",
+   "passed": true,
+   "category": null,
+   "first_line": "",
+   "sets": 6,
+   "pcc_min": 1.0,
+   "rel_l2_max": 0.0,
+   "check_sha256": {
+    "kernel.py": "72f76b13f1ad07d64c84f515f1f1e590552e592aa6af33344e9e8947bc41b5e9",
+    "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
+    "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "a61ae278aac3c9cb64d8990f38a205ae96f77d4df4449ad5bf4aff518f351857"
+   },
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "failed": true,
+     "category": "numeric_mismatch",
+     "first_line": "set seed0: rel_l2 0.5 above bar 0.01"
+    }
+   ],
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "72f76b13f1ad07d64c84f515f1f1e590552e592aa6af33344e9e8947bc41b5e9",
+      "operation": "double_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_5d4156d7.cpp",
+        "bytes": 1970,
+        "sha256": "3cac78ee250d337becc04097502a369fa02f21aefc735a0fb00a7dd8afcf5227"
+       },
+       {
+        "name": "ttlang_kernel_read_23b96f88.cpp",
+        "bytes": 1518,
+        "sha256": "1f0caa8e1f186e0d573bbceaa83e7170605b1f64a04cc0dc921cdf352ba758c1"
+       },
+       {
+        "name": "ttlang_kernel_write_29340af7.cpp",
+        "bytes": 1518,
+        "sha256": "bf61b229e329b223af472890091a1d71fc2b4d89724a7d949fe435d7869cb5f8"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.twice"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "72f76b13f1ad07d64c84f515f1f1e590552e592aa6af33344e9e8947bc41b5e9",
+      "operation": "double_rows",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_5d4156d7.cpp",
+        "bytes": 1970,
+        "sha256": "3cac78ee250d337becc04097502a369fa02f21aefc735a0fb00a7dd8afcf5227"
+       },
+       {
+        "name": "ttlang_kernel_read_0de3d30b.cpp",
+        "bytes": 1526,
+        "sha256": "73da2396c0430163174ceec63e83826a657bf547fdefbae10b7ea3993d9ee246"
+       },
+       {
+        "name": "ttlang_kernel_write_a5a27e5a.cpp",
+        "bytes": 1526,
+        "sha256": "3686def7997c1e3b568ce506187968ff63c36f365464f1ce4f026a19394698d2"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     },
+     "negatives": [
+      {
+       "name": "a function that does not exist",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.math.twice"
+      }
+     ]
+    }
+   ],
+   "chip": []
+  }
+ }
+}

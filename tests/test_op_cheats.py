@@ -337,12 +337,15 @@ def test_the_ttnn_sheet_has_a_mistake_for_each_failure_in_runs_16_to_18():
         assert needle in text, needle
 
 
-def test_the_ttlang_sheet_marks_the_reduce_sum_shape_pitfall_as_simulator_only():
+def test_the_ttlang_sheet_says_who_requires_shape_on_reduce_sum_and_who_refuses_it():
+    """Issue 801 corrected issue 205's claim: the pair's compiler takes shape, the simulator requires it, and only tt-lang 1.1.6 refuses it.
+    The mistake's checks read the signatures of the three trees (the pair as `hardware`, 1.1.6 as `shared`, the simulator as `sim`)."""
     sheet = oc.load_sheet(oc.TTLANG_SHEET)
     by = {e["name"]: e for e in oc.entries(sheet)}
-    assert by["sim.reduce_sum"]["status"] == "simulator only" and "shape" in by["sim.reduce_sum"]["hardware_absent"]
-    assert "shape" not in by["ttl.math.reduce_sum"]["signature"]
-    assert any("issue 205" in m["seen_in"] for m in sheet["mistakes"])
+    assert "shape" in by["ttl.math.reduce_sum"]["signature"] and "sim.reduce_sum" not in by
+    pitfall = next(m for m in sheet["mistakes"] if "issue 205" in m["seen_in"])
+    assert {(c["root"], tuple(c.get("absent_args", ())), tuple(c.get("present_args", ()))) for c in pitfall["checks"]} == {
+        ("shared", ("shape",), ()), ("hardware", (), ("shape",)), ("sim", (), ("shape",))}
 
 
 def need(var, value):
