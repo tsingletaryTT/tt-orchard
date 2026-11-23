@@ -45,7 +45,7 @@ MIN_GOZER = (0, 3, 2)                       # the first gozer with `reset <lease
 GOZER_URL = "https://github.com/tsingletaryTT/tt-gozer.git"
 TT_MODEL_URL = "https://github.com/tenstorrent/tt-model-manager"
 OLLAMA_MODEL = "qwen3-coder:30b"
-REFERENCE_TRANSFORMERS = "transformers==5.19.0"       # the version stage 1 was run with on Clef
+REFERENCE_TRANSFORMERS = "transformers==5.24.0"       # moved from 5.19.0 on 2026-11-23: bf16 CPU references were identical on four models (docs/run-logs/2026-11-23-reference-venv-5-24.md)
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 COMMANDS_NEVER_RUN = ("reset", "publish", "push", "reconcile", "acquire", "release")   # asserted in the tests
 

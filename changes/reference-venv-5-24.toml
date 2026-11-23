@@ -1,0 +1,2 @@
+target = "0.9.195"
+summary = "The reference venv and the setup pin move to transformers 5.24.0 (torch 2.15.0, tokenizers 0.23.3); bf16 CPU references were identical on four models."
