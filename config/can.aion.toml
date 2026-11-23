@@ -1,0 +1,68 @@
+# The can for microsoft/Aion-1.0-Instruct-2.3B on a 1x4 mesh of Blackhole chips (two p300c boards), orchard/can.py. Run from the repository root:
+#   tt-orchard can stage config/can.aion.toml --out <new directory>/aion-1.0-instruct-2.3b-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "aion-1.0-instruct-2.3b-blackhole"
+kind = "tt-dit-server"                 # the server is not a vLLM model; run.sh serves the ASGI app below with uvicorn
+app = "aion_asgi:app"
+model_py = "pkgsrc/can/aion_model.py"
+readme = "pkgsrc/can/aion-README.md"
+arch = "blackhole"
+mesh = "1x4"
+device_count = 4
+python = "3.12"
+port = 20180
+card_profile = "catalog-measured"
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index.
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "huggingface_hub==1.33.0",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "loguru==0.7.3",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import aion_asgi",
+]
+
+[weights]
+repo = "microsoft/Aion-1.0-Instruct-2.3B"
+revision = "28902cbfd9f4e0347d6c853aa1301f5d559b2fc0"
+
+[[extra_code]]
+src = "pkgsrc/server/aion_asgi.py"
+dst = "aion_asgi.py"
+[[extra_code]]
+src = "pkgsrc/runtime/aion_port.py"
+dst = "aion_port.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/aion-NOTICE"
+dst = "NOTICE"
+
+# what the boot check asks of the served bundle. The chat route builds the model's own turn format, so the check uses it
+[check]
+prompt = "What is the capital of France? Answer in one word."
+expect = "Paris"
+max_tokens = 48
+stream = true
+min_decode_tok_s = 1.0                # a liveness floor only: it fails a server that is stuck, not a slow one. The measured rates are on the card
+ready_contains = ['"event": "ready"', '"mesh": "1x4"']

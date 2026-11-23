@@ -1,0 +1,100 @@
+{
+  "schema": "aion-1.0-instruct-2.3b-bench/1",
+  "cache_state": "cold",
+  "repeats": 3,
+  "load_before": [
+    1.87353515625,
+    1.3935546875,
+    1.4599609375
+  ],
+  "started": "2026-11-23T01:42:33Z",
+  "first_request_s": 7.38,
+  "decode": {
+    "prompts": 5,
+    "new_tokens_each": 64,
+    "runs": 15,
+    "tok_s": {
+      "n": 15,
+      "min": 4.992,
+      "median": 11.551,
+      "max": 12.521
+    },
+    "tokens_per_run": {
+      "n": 15,
+      "min": 64,
+      "median": 64,
+      "max": 64
+    }
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 141,
+      "seconds": {
+        "n": 3,
+        "min": 0.216,
+        "median": 0.23,
+        "max": 4.473
+      },
+      "tok_s_median": 612.8
+    },
+    {
+      "prompt_tokens": 561,
+      "seconds": {
+        "n": 3,
+        "min": 0.668,
+        "median": 0.679,
+        "max": 5.127
+      },
+      "tok_s_median": 826.2
+    },
+    {
+      "prompt_tokens": 2261,
+      "seconds": {
+        "n": 3,
+        "min": 2.533,
+        "median": 2.547,
+        "max": 9.098
+      },
+      "tok_s_median": 887.8
+    },
+    {
+      "target": 8192,
+      "error": "400 {\"error\": {\"message\": \"the prompt is 9101 tokens and the context limit is 8192\"}}"
+    }
+  ],
+  "decode_at_length": [
+    {
+      "prompt_tokens": 561,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 2,
+        "min": 1.463,
+        "median": 1.476,
+        "max": 1.489
+      }
+    },
+    {
+      "prompt_tokens": 2261,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 0
+      }
+    },
+    {
+      "target": 8192,
+      "error": "400 {\"error\": {\"message\": \"the prompt is 9101 tokens and the context limit is 8192\"}}"
+    }
+  ],
+  "concurrency": {
+    "two_at_once_status_codes": [
+      200,
+      503
+    ],
+    "batching": "not supported: a second request gets 503 while one runs"
+  },
+  "load_after": [
+    2.451171875,
+    2.041015625,
+    1.71337890625
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "schema": "aion-bench-chat/1",
+  "load_before": [
+    1.34619140625,
+    0.90185546875,
+    0.39404296875
+  ],
+  "started": "2026-11-23T15:49:59Z",
+  "runs": [
+    {
+      "prompt_tokens": 50,
+      "tokens": 64,
+      "tok_s": 7.4084
+    },
+    {
+      "prompt_tokens": 50,
+      "tokens": 64,
+      "tok_s": 7.5488
+    },
+    {
+      "prompt_tokens": 50,
+      "tokens": 64,
+      "tok_s": 7.5375
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 7.2828
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 7.2335
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 2.6862
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 2.1129
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 2.9989
+    },
+    {
+      "prompt_tokens": 51,
+      "tokens": 64,
+      "tok_s": 6.6406
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.6048
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.6775
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.713
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.6445
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.7966
+    },
+    {
+      "prompt_tokens": 52,
+      "tokens": 64,
+      "tok_s": 6.7302
+    }
+  ],
+  "tok_s": {
+    "n": 15,
+    "min": 2.113,
+    "median": 6.713,
+    "max": 7.549
+  },
+  "prompt_tokens": {
+    "min": 50,
+    "max": 52
+  },
+  "load_after": [
+    9.54443359375,
+    6.97900390625,
+    2.97216796875
+  ]
+}
