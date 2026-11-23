@@ -1,0 +1,301 @@
+{
+ "schema": "orchard-ab-sheet-counterfactual/1",
+ "rows": [
+  {
+   "run": "center-1-off",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: AttributeError: '_TTLMathNamespace' object has no attribute 'fill'",
+   "forms": {
+    "ttl.math.fill": 1,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 1,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": false,
+    "category": "tt_lang_error",
+    "first_line": "Deadlock detected: all generators blocked"
+   }
+  },
+  {
+   "run": "center-1-on",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": true,
+   "first_line": "",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 1,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "center-2-off",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: AttributeError: '_TTLMathNamespace' object has no attribute 'broadcast'",
+   "forms": {
+    "ttl.math.fill": 1,
+    "ttl.math.broadcast": 3,
+    "reduce without shape": 0,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 0,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": true,
+    "category": null,
+    "first_line": ""
+   },
+   "rewrite_compile": {
+    "1.1.10.dev20261026+light": {
+     "category": "compile_error",
+     "first_line": "ttl.diagnostics.TTLangCompileError: error: <ast.Div object at 0x...> not implemented"
+    },
+    "1.1.6": {
+     "category": "compile_error",
+     "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+    }
+   }
+  },
+  {
+   "run": "center-2-on",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "Deadlock detected: all generators blocked",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 2,
+    "ttl.block.broadcast": 2,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "center-3-off",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: ValidationError: 1 validation error for Block.__getitem__",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 1,
+    "reduce without shape": 0,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 0,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": false,
+    "category": "tt_lang_error",
+    "first_line": "error: ValidationError: 1 validation error for Block.__getitem__"
+   }
+  },
+  {
+   "run": "center-3-on",
+   "op": "center",
+   "attempt": 1,
+   "passed_sim": true,
+   "first_line": "",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 1,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "rmsnorm-1-off",
+   "op": "rmsnorm",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: TypeError: reduce_sum() missing 1 required positional argument: 'shape'",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 1,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 0,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": false,
+    "category": "tt_lang_error",
+    "first_line": "error: TypeError: unsupported operand for block truediv: float. Both operands must be blocks; materialize a scalar with ttl.block.fill() first."
+   }
+  },
+  {
+   "run": "rmsnorm-1-on",
+   "op": "rmsnorm",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "set seed0: rel_l2 0.9375 above bar 0.01",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 1,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "rmsnorm-2-off",
+   "op": "rmsnorm",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "set seed0: rel_l2 0.9375 above bar 0.01",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 1,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "softmax-1-off",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "set seed0: pcc 0.956965982913971, finite True, bar 0.999",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 2,
+    "reduce with shape": 2
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "softmax-1-on",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: TypeError: reduce_max() missing 1 required positional argument: 'shape'",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 2,
+    "reduce without shape": 2,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 0,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": true,
+    "category": null,
+    "first_line": ""
+   },
+   "rewrite_compile": {
+    "1.1.10.dev20261026+light": {
+     "category": "compile_error",
+     "first_line": "ttl.diagnostics.TTLangCompileError: error: TTL subscript base must be a named value"
+    },
+    "1.1.6": {
+     "category": "compile_error",
+     "first_line": "AttributeError: 'Call' object has no attribute 'id'"
+    }
+   }
+  },
+  {
+   "run": "softmax-2-off",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: ValueError: Shape mismatch in binary operation: left shape (1, 1) does not match right shape (1, 8). Use broadcast() to expand operands first.",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 1,
+    "reduce with shape": 1
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "softmax-2-on",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: ValueError: Shape mismatch in binary operation: left shape (1, 1) does not match right shape (1, 32). Use broadcast() to expand operands first.",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 2,
+    "ttl.block.broadcast": 2,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": false
+  },
+  {
+   "run": "softmax-3-off",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": false,
+   "first_line": "error: TypeError: reduce_max() missing 1 required positional argument: 'shape'",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 2,
+    "reduce without shape": 2,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 0,
+    "reduce with shape": 0
+   },
+   "uses_wrong_claim": true,
+   "rewrite_changed": true,
+   "rewrite_simulator": {
+    "passed": false,
+    "category": "tt_lang_error",
+    "first_line": "Deadlock detected: all generators blocked"
+   }
+  },
+  {
+   "run": "softmax-3-on",
+   "op": "softmax",
+   "attempt": 1,
+   "passed_sim": true,
+   "first_line": "",
+   "forms": {
+    "ttl.math.fill": 0,
+    "ttl.math.broadcast": 0,
+    "reduce without shape": 0,
+    "ttl.block.fill": 0,
+    "ttl.block.broadcast": 2,
+    "reduce with shape": 2
+   },
+   "uses_wrong_claim": false
+  }
+ ]
+}

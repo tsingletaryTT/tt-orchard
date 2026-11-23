@@ -3,30 +3,32 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Verify the recipes of the TT-Lang cheat sheet and write their verification records.
 
-    python3 scripts/verify_ttlang_recipes.py [--only NAME] [--work DIR] [--chip-package DIR] [--sim PATH] [--windows FILE] [--no-write]
+    python3 scripts/verify_ttlang_recipes.py [--recipes FILE] [--only NAME] [--work DIR] [--chip-python PY ...] [--reuse-simulator]
+                                             [--sim PATH] [--windows FILE] [--no-write]
 
-For each recipe in orchard/skills/kernel-loop-templates/ttlang_recipes.json this runs, one at a time and on the CPU:
+For each recipe in orchard/skills/kernel-loop-templates/ttlang_recipes.json (or `--recipes FILE`) this runs, one at a time and on the CPU:
 
 1. the recipe's skeleton, as kernel.py, through the unedited kernel check (orchard/skills/kernel-loop-templates/kernel_check.py) on the
    real tt-lang simulator, with the recipe's own spec and CPU reference (recipe_references.py). The check runs all six input sets
    (three seeds, each with and without outliers). It must pass.
 2. every wrong variant of the skeleton (the recipe's `negatives`: one expression changed, or a claim the recipe makes about a call).
    Each must FAIL the same check. A check that passes a wrong kernel cannot vouch for the right one.
-3. a static look at the chip form (the skeleton with the recipe's `hardware_replace` pairs applied): every `ttl.*` call is found in the
-   installed chip package under the same namespace, and every keyword is a parameter of a function of that name there. The package is read
-   with `ast` and never imported (importing tt-lang can open a device). This shows the names and keywords exist. It does not show the
-   kernel compiles for a chip, and no record says so.
+3. for each chip package (`--chip-python`, default: the managed pair venv and the shared venv), the skeleton through that package's own
+   compiler with no device (orchard/ttlang_hwcompile.py: the device is shut out with Landlock and `ttnn` is a stand-in), and then each
+   of the recipe's `compile_negatives`, which that compiler must refuse. This shows the compiler accepts the skeleton and writes kernel
+   source. It does not show the kernel runs on a chip, and the record says `compile`, never `chip`.
 
-It then writes `ttlang_recipes.verified.json` next to the recipes. A recipe whose skeleton changes needs a new run: the record carries the
-skeleton's sha256, and the cheat sheet refuses a recipe whose record does not match.
+It then writes `<recipes>.verified.json` next to the recipes. A recipe whose skeleton changes needs a new run: every record carries the
+skeleton's sha256, and the cheat sheet refuses a recipe whose simulator record does not match and shows no compile result for other bytes.
+Each compile record names its chip package by version and by the sha256 of the compiler's files, so a result for one package is never
+shown for another.
 
-The simulator runs use CPU only; no chip, no gozer and no device is opened. `--windows FILE` appends the UTC start and end of every
-simulator run, for a caller that needs to know when the host was busy.
+Everything runs on the CPU; no chip, no gozer and no device is opened. `--windows FILE` appends the UTC start and end of every simulator
+run, for a caller that needs to know when the host was busy.
 """
 from __future__ import annotations
 
 import argparse
-import ast
 import datetime
 import json
 import shutil
@@ -38,7 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from orchard import op_cheats, safeio  # noqa: E402
+from orchard import op_cheats, safeio, ttlang_hwcompile, ttlang_pair  # noqa: E402
 
 TEMPLATES = ROOT / "orchard" / "skills" / "kernel-loop-templates"
 RUN_TIMEOUT_S = 400
@@ -88,115 +90,57 @@ def _measure(sets: list, key: str, pick) -> float | None:
     return pick(values) if values else None
 
 
-# ---- the chip form, read statically ---------------------------------------------------------------------------------------
+# ---- the chip compilers ---------------------------------------------------------------------------------------------------------------
 
 
-def _all_names(tree: ast.Module) -> set:
-    """The names in a module's `__all__`, when it is a literal list or tuple (a starred `*other` is skipped by the caller)."""
-    names: set = set()
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
-            if isinstance(node.value, (ast.List, ast.Tuple)):
-                names |= {e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
-    return names
-
-
-def _parse(path: Path) -> ast.Module:
-    return ast.parse(safeio.read_bytes(path, max_bytes=4_000_000).decode("utf-8", errors="replace"))
-
-
-def chip_namespaces(package: Path) -> dict:
-    """What the installed chip package exposes: `ttl.<name>` names, `ttl.math.<name>` names, and the parameters of each function by name.
-
-    `ttl.math` is the generated elementwise functions plus the names ttl_math.py imports from operators.py; `ttl` itself exports its
-    `__init__` names plus the generated elementwise ones. There is no `ttl.block` namespace. Read with `ast`; nothing is imported."""
-    generated = _all_names(_parse(package / "_generated_elementwise.py"))
-    math_tree = _parse(package / "ttl_math.py")
-    math_names = set(generated)
-    for node in math_tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "operators":
-            math_names |= {a.asname or a.name for a in node.names}
-    init_tree = _parse(package / "__init__.py")
-    top_names = set(generated)
-    for node in ast.walk(init_tree):
-        if isinstance(node, ast.ImportFrom) and node.module in ("ttl.ttl", "ttl.operators"):
-            top_names |= {a.asname or a.name for a in node.names}
-    params: dict = {}
-    for path in package.rglob("*.py"):
-        if "sim" in path.relative_to(package).parts or "tutorials" in path.relative_to(package).parts:
+def default_chip_pythons() -> list:
+    """The interpreters of the chip packages this machine has: the managed pair venv, then the shared venv. Only the ones that hold a
+    tt-lang compiler are returned (read from files; nothing is imported)."""
+    found = []
+    for python in (ttlang_pair.default_venv() / "bin" / "python", Path.home() / ".tenstorrent-venv" / "bin" / "python"):
+        try:
+            ttlang_hwcompile.package_identity(python)
+        except ttlang_hwcompile.HwCompileError:
             continue
-        for node in ast.walk(_parse(path)):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                a = node.args
-                params.setdefault(node.name, set()).update(x.arg for x in a.args + a.kwonlyargs + a.posonlyargs)
-                if a.kwarg is not None:
-                    params[node.name].add("**")
-    return {"top": top_names, "math": math_names, "params": params}
+        found.append(python)
+    return found
 
 
-def _call_chain(node: ast.AST) -> list | None:
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    return list(reversed(parts)) if isinstance(node, ast.Name) and node.id == "ttl" and parts else None
-
-
-def static_hardware_check(recipe: dict, namespaces: dict) -> dict:
-    """Every `ttl.*` call in the chip form exists under its namespace in the chip package, with only parameters it has."""
-    text = "\n".join(op_cheats.hardware_skeleton(recipe))
-    tree = ast.parse(text)
-    checked, problems = [], []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        chain = _call_chain(node.func) if isinstance(node.func, ast.Attribute) else None
-        if chain is None:
-            continue
-        name = "ttl." + ".".join(chain)
-        keywords = sorted(k.arg for k in node.keywords if k.arg)
-        space, leaf = (namespaces["math"], chain[1]) if chain[0] == "math" and len(chain) == 2 else (namespaces["top"], chain[0])
-        if len(chain) > 2 or (len(chain) == 2 and chain[0] != "math"):
-            problems.append(f"{name}: a namespace the chip package does not have")
-        elif leaf not in space:
-            problems.append(f"{name}: not exported by the chip package")
-        else:
-            known = namespaces["params"].get(leaf)
-            if known is not None and "**" not in known:
-                missing = [k for k in keywords if k not in known]
-                if missing:
-                    problems.append(f"{name}: the keyword {missing[0]!r} is not a parameter of {leaf} in the chip package")
-        checked.append({"name": name, "keywords": keywords})
-    seen, unique = set(), []
-    for c in checked:
-        key = (c["name"], tuple(c["keywords"]))
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-    return {"ok": not problems and bool(unique), "checked": unique, "problems": problems}
-
-
-def package_version(package: Path) -> str:
-    for meta in sorted(package.parent.glob("tt_lang-*.dist-info")):
-        return meta.name.removesuffix(".dist-info")
-    return "unknown"
-
-
-def find_chip_package() -> Path:
-    home = Path.home()
-    for candidate in sorted((home / ".tenstorrent-venv" / "lib").glob("python3.*/site-packages/ttl")):
-        return candidate
-    raise SystemExit("no installed chip package found: pass --chip-package DIR (the ttl directory of the tt-lang package)")
+def compile_entry(recipe: dict, python, work: Path, today: str, compile_check=ttlang_hwcompile.compile_check) -> dict:
+    """One chip package's verdict on a recipe: the skeleton compiled with that package's own compiler and no device, then each of the
+    recipe's compile negatives, which the same compiler must refuse. The identity of the package is read once, before the first compile,
+    and every record of this entry carries that identity."""
+    identity = ttlang_hwcompile.package_identity(python)
+    label = ttlang_hwcompile.target_label(identity)
+    shapes = ttlang_hwcompile.spec_shapes(recipe["spec"])
+    tag = f"{recipe['name']}--{identity['version']}"
+    kernel = work / "compile" / tag / "kernel.py"
+    kernel.parent.mkdir(parents=True, exist_ok=True)
+    kernel.write_text(op_cheats.skeleton_text(recipe), encoding="utf-8")
+    print(f"{recipe['name']}: compile with {label}, no device ...", flush=True)
+    record = compile_check(python, kernel, shapes, identity=identity)
+    print(f"  -> {record['category']}{': ' + record['first_line'] if record['first_line'] else ''}", flush=True)
+    negatives = []
+    for neg in recipe["compile_negatives"]:
+        wrong = kernel.parent / f"wrong-{len(negatives)}.py"
+        wrong.write_text(op_cheats.apply_replacements(recipe, neg["replace"], f"compile negative {neg['name']!r}") + "\n", encoding="utf-8")
+        got = compile_check(python, wrong, shapes, identity=identity)
+        failed = got["category"] == "compile_error"
+        negatives.append({"name": neg["name"], "failed": failed, "category": got["category"], "first_line": got["first_line"]})
+        print(f"  wrong form {neg['name']!r} -> {got['category']}{': ' + got['first_line'] if got['first_line'] else ''}", flush=True)
+    return {"date": today, "record": record, "negatives": negatives}
 
 
 # ---- the run ------------------------------------------------------------------------------------------------------------
 
 
-def verify_recipe(recipe: dict, overlay: Path, work: Path, sim: str, namespaces: dict, windows: Path | None) -> dict:
+SIM_FIELDS = ("skeleton_sha256", "passed", "category", "first_line", "sets", "pcc_min", "rel_l2_max", "check_sha256", "negatives")
+
+
+def simulator_record(recipe: dict, overlay: Path, work: Path, sim: str, windows: Path | None) -> dict:
     name, spec = recipe["name"], recipe["spec"]
-    kernel_text = "\n".join(recipe["skeleton"]) + "\n"
     print(f"{name}: unedited check on the skeleton ...", flush=True)
-    check = run_check(overlay, work, name, spec, kernel_text, sim, windows)
+    check = run_check(overlay, work, name, spec, op_cheats.skeleton_text(recipe), sim, windows)
     sets = check.get("sets") or []
     record = {"skeleton_sha256": op_cheats.skeleton_sha256(recipe), "passed": check.get("passed") is True, "category": check.get("category"),
               "first_line": check.get("first_line") or "", "sets": len(sets),
@@ -211,57 +155,109 @@ def verify_recipe(recipe: dict, overlay: Path, work: Path, sim: str, namespaces:
         record["negatives"].append({"name": neg["name"], "failed": failed, "category": result.get("category"),
                                     "first_line": (result.get("first_line") or "")[:200]})
         print(f"  -> {'failed, as it must' if failed else 'PASSED, which it must not'} ({result.get('category')})", flush=True)
-    record["hardware_static"] = static_hardware_check(recipe, namespaces)
-    print(f"{name}: chip-form calls {'all found' if record['hardware_static']['ok'] else 'PROBLEMS: ' + '; '.join(record['hardware_static']['problems'])}", flush=True)
     return record
+
+
+def reusable_simulator_record(recipe: dict, old) -> dict | None:
+    """The simulator part of an earlier record, when it is for exactly this skeleton. A record for other bytes is never reused."""
+    if not isinstance(old, dict) or old.get("skeleton_sha256") != op_cheats.skeleton_sha256(recipe):
+        return None
+    return {key: old.get(key) for key in SIM_FIELDS}
+
+
+def verify_recipe(recipe: dict, overlay: Path | None, work: Path, sim: str | None, chip_pythons, windows: Path | None, today: str,
+                  old=None, compile_check=ttlang_hwcompile.compile_check) -> dict:
+    """One recipe's record: the simulator part (run now, or reused from `old` when `overlay` is None and `old` is for this skeleton),
+    then one compile entry per chip package. Chip entries of `old` are kept only for the same skeleton."""
+    record = reusable_simulator_record(recipe, old) if overlay is None else simulator_record(recipe, overlay, work, sim, windows)
+    if record is None:
+        raise SystemExit(f"{recipe['name']}: --reuse-simulator needs an earlier record for exactly this skeleton, and there is none")
+    record["compile"] = [compile_entry(recipe, python, work, today, compile_check) for python in chip_pythons]
+    kept = old.get("chip", []) if isinstance(old, dict) and old.get("skeleton_sha256") == record["skeleton_sha256"] else []
+    record["chip"] = kept if isinstance(kept, list) else []
+    return record
+
+
+def _old_records(path: Path) -> dict:
+    """The records of an earlier verification file of any schema, as plain data. Only `reusable_simulator_record` reads them."""
+    try:
+        old = safeio.read_json(path, max_bytes=op_cheats.RECIPES_MAX_BYTES, expect=dict)
+    except safeio.SafeReadError:
+        return {}
+    records = old.get("records")
+    return records if isinstance(records, dict) else {}
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--recipes", help="the recipes file to verify (default: the shipped ttlang_recipes.json); the records are written "
+                                      "next to it as <name>.verified.json")
     ap.add_argument("--only", help="verify one recipe by name (the others keep their existing record)")
     ap.add_argument("--work", help="scratch directory (default: a temporary one)")
-    ap.add_argument("--chip-package", help="the ttl directory of the installed chip package (default: the shared venv's)")
+    ap.add_argument("--chip-python", action="append",
+                    help="the interpreter of a venv with a chip package; may be given more than once (default: the managed pair venv "
+                         "and the shared venv, each when it holds a tt-lang compiler)")
+    ap.add_argument("--reuse-simulator", action="store_true",
+                    help="do not run the simulator: keep the simulator part of each existing record whose skeleton is unchanged and "
+                         "only compile with the chip packages. Stops when a skeleton has no such record")
     ap.add_argument("--sim", help="the tt-lang-sim executable (default: the kernel probe's)")
     ap.add_argument("--windows", help="append the UTC window of every simulator run to this file")
-    ap.add_argument("--no-write", action="store_true", help="print the result and do not write ttlang_recipes.verified.json")
+    ap.add_argument("--no-write", action="store_true", help="print the result and do not write the records")
     args = ap.parse_args(argv)
-    recipes = op_cheats.load_recipes()
+    recipes_path = Path(args.recipes) if args.recipes else op_cheats.RECIPES
+    verified_path = recipes_path.with_name(recipes_path.stem + ".verified.json")
+    recipes = op_cheats.load_recipes(recipes_path)
+    chip_pythons = [Path(p) for p in args.chip_python] if args.chip_python else default_chip_pythons()
+    targets = [ttlang_hwcompile.package_identity(p) for p in chip_pythons]
     sim = args.sim
-    if not sim:
+    if not sim and not args.reuse_simulator:
         from types import SimpleNamespace
         from orchard import kernelprobe
         sim = str(kernelprobe.default_env(SimpleNamespace(src_dir=None, venv_dir=None)).sim)
-    package = Path(args.chip_package) if args.chip_package else find_chip_package()
-    namespaces = chip_namespaces(package)
     work_ctx = tempfile.TemporaryDirectory(prefix="recipes-verify-") if not args.work else None
     work = Path(args.work) if args.work else Path(work_ctx.name)
     work.mkdir(parents=True, exist_ok=True)
     windows = Path(args.windows) if args.windows else None
+    today = datetime.date.today().isoformat()
     try:
-        overlay = build_overlay(work, recipes)
-        existing = {}
-        if args.only:
-            existing = op_cheats.load_verified().get("records", {})
-        records = dict(existing)
+        overlay = None if args.reuse_simulator else build_overlay(work, recipes)
+        old = _old_records(verified_path)
+        records = {}
         for recipe in recipes["recipes"]:
             if args.only and recipe["name"] != args.only:
+                if recipe["name"] in old:
+                    records[recipe["name"]] = old[recipe["name"]]
                 continue
-            records[recipe["name"]] = verify_recipe(recipe, overlay, work, sim, namespaces, windows)
-        sim_version = subprocess.run([sim, "--version"], capture_output=True, text=True, timeout=60, check=False).stdout.strip()
-        out = {"schema": op_cheats.VERIFIED_SCHEMA, "date": datetime.date.today().isoformat(), "simulator": sim_version or "unknown",
-               "chip_package": package_version(package),
-               "note": "Simulator passes and static name checks only. No recipe has been compiled on a chip.", "records": records}
+            records[recipe["name"]] = verify_recipe(recipe, overlay, work, sim, chip_pythons, windows, today, old.get(recipe["name"]))
+        sim_version = "not run (simulator records reused)"
+        if sim:
+            sim_version = subprocess.run([sim, "--version"], capture_output=True, text=True, timeout=60, check=False).stdout.strip() or "unknown"
+        elif isinstance(_old_top(verified_path).get("simulator"), str):
+            sim_version = _old_top(verified_path)["simulator"]
+        out = {"schema": op_cheats.VERIFIED_SCHEMA, "date": today, "simulator": sim_version, "targets": targets,
+               "note": "Simulator passes, and compiles with each chip package's own compiler made with no device. No recipe has been "
+                       "run on a chip unless its record has a `chip` entry.", "records": records}
         problems = op_cheats.verified_problems(recipes, out)
         if problems:
             print("NOT WRITTEN: " + "; ".join(problems), file=sys.stderr)
             return 1
+        for target in targets:
+            reasons = op_cheats.recipes_gate(recipes, out, target)
+            print(f"gate for {ttlang_hwcompile.target_label(target)}: {'holds' if not reasons else 'does not hold: ' + '; '.join(reasons)}")
         if not args.no_write:
-            (TEMPLATES / "ttlang_recipes.verified.json").write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
-            print(f"wrote {TEMPLATES / 'ttlang_recipes.verified.json'}")
+            safeio.atomic_write(verified_path, json.dumps(out, indent=1) + "\n", mode=0o644)
+            print(f"wrote {verified_path}")
         return 0
     finally:
         if work_ctx is not None:
             work_ctx.cleanup()
+
+
+def _old_top(path: Path) -> dict:
+    try:
+        return safeio.read_json(path, max_bytes=op_cheats.RECIPES_MAX_BYTES, expect=dict)
+    except safeio.SafeReadError:
+        return {}
 
 
 if __name__ == "__main__":

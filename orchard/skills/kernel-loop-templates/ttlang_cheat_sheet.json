@@ -3,11 +3,12 @@
  "sheet": "ttlang",
  "title": "TT-Lang cheat sheet for a kernel",
  "roots": {
-  "hardware": "the tt-lang package installed for the chip (1.1.6): what compiles",
-  "tree": "the tt-lang checkout's compiler package (newer than the package)",
-  "sim": "the checkout's simulator (accepts more than the chip's compiler)"
+  "hardware": "the tt-lang package the kernel probe's hardware phase compiles with: the managed pair (tt-lang 1.1.10.dev20261026+light) when it is installed",
+  "tree": "the tt-lang checkout's compiler package (built from the same commit as the pair)",
+  "sim": "the checkout's simulator (accepts more than the chip's compiler)",
+  "shared": "the older tt-lang 1.1.6 package in the shared venv: the fallback when the pair is not installed"
  },
- "intro": "Each tag says what is known. [compiles on hardware]: an elementwise kernel built from these calls ran on the chip. [hardware signature only]: the signature is in the hardware package and no compile was shown. [simulator only]: the simulator accepts it and the hardware package does not. A simulator pass does not show a kernel compiles for the chip. Do not import ttl or ttnn to look things up. `python3 stage_tools.py cheat NAME` prints one entry where the tool exists.",
+ "intro": "Each tag says what is known. [compiles on hardware]: a kernel built from these calls ran on the chip or compiled with the chip package's own compiler, with no device. [hardware signature only]: the signature is in the hardware package and no compile was shown. [simulator only]: the simulator accepts it and the hardware package does not. A simulator pass does not show a kernel compiles for the chip. Do not import ttl or ttnn to look things up. `python3 stage_tools.py cheat NAME` prints one entry where the tool exists.",
  "sections": [
   {
    "title": "Kernel structure",
@@ -67,6 +68,20 @@
      ],
      "status": "compiles on hardware",
      "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.make_dfb",
+     "kind": "op",
+     "signature": "ttl.make_dfb(dtype, shape, block_count=2, tile=(32, 32))",
+     "usage": "t_dfb = ttl.make_dfb('bf16', shape=(1, 1))",
+     "notes": "A buffer from a dtype with no backing tensor. The pair's compiler takes it; tt-lang 1.1.6 does not have it. make_dataflow_buffer_like works with every package.",
+     "seen_in": "tt-lang 1.1.10.dev20261026+light package; python/ttl/dataflow_buffer.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "compiled with the pair's compiler, no device (2026-11-22, issue 801); not in tt-lang 1.1.6"
     },
     {
      "name": "ttl.grid_size",
@@ -165,41 +180,44 @@
     {
      "name": "ttl.math.reduce_sum",
      "kind": "op",
-     "signature": "ttl.math.reduce_sum(input, *, dims)",
-     "usage": "s = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1])",
-     "notes": "Sum over the grid dimension in dims (-1 is across a row of tiles). The result keeps one value per row in column 0 of each tile: spread it back with ttl.math.broadcast. There is no shape argument in the hardware package.",
-     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "signature": "ttl.math.reduce_sum(input, *, dims, shape)",
+     "usage": "s = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
+     "notes": "Sum over the grid dimension in dims (-1 is across a row of tiles). Pass shape, the shape of the result: the simulator requires it and the pair's compiler takes it; tt-lang 1.1.6 refuses it (see the mistakes). The result keeps one value per row in column 0 of each tile: spread it back with ttl.block.broadcast.",
+     "seen_in": "issue 205; tt-lang 1.1.10.dev20261026+light package and python/sim/math.py",
      "in": [
       "hardware",
       "tree"
      ],
-     "status": "hardware signature only"
+     "status": "compiles on hardware",
+     "evidence": "issue 205: with the pair (tt-lang 1.1.10.dev20261026+light) 11 of 11 reduction kernels compiled and ran on a chip; the row-reduction skeleton also compiles with the pair's compiler, no device (2026-11-22, issue 801)"
     },
     {
      "name": "ttl.math.reduce_max",
      "kind": "op",
-     "signature": "ttl.math.reduce_max(input, *, dims)",
-     "usage": "m = ttl.math.reduce_max(s_blk, dims=[-1])",
-     "notes": "Maximum over dims, same shape rules as reduce_sum (softmax).",
-     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "signature": "ttl.math.reduce_max(input, *, dims, shape)",
+     "usage": "m = ttl.math.reduce_max(s_blk, dims=[-1], shape=(1, 1))",
+     "notes": "Maximum over dims, same shape rules as reduce_sum (softmax): the simulator requires shape and 1.1.6 refuses it.",
+     "seen_in": "tt-lang 1.1.10.dev20261026+light package and python/sim/math.py",
      "in": [
       "hardware",
       "tree"
      ],
-     "status": "hardware signature only"
+     "status": "compiles on hardware",
+     "evidence": "issue 205: with the pair (tt-lang 1.1.10.dev20261026+light) 11 of 11 reduction kernels compiled and ran on a chip; the row-reduction skeleton also compiles with the pair's compiler, no device (2026-11-22, issue 801)"
     },
     {
-     "name": "ttl.math.broadcast",
+     "name": "ttl.block.broadcast",
      "kind": "op",
-     "signature": "ttl.math.broadcast(input, *, dims, shape)",
-     "usage": "r = ttl.math.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
-     "notes": "Spreads a reduced block (a column of values) back across dims to the given shape; the way to multiply a row by its own statistic.",
-     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "signature": "ttl.block.broadcast(input, *, dims, shape)",
+     "usage": "r = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
+     "notes": "Spreads a reduced block (a column of values) back across dims to the given shape; the way to multiply a row by its own statistic. Write ttl.block.broadcast: ttl.math.broadcast is refused (see the mistakes).",
+     "seen_in": "chip compilers' ttl.block namespace; python/sim/__init__.py",
      "in": [
       "hardware",
       "tree"
      ],
-     "status": "hardware signature only"
+     "status": "compiles on hardware",
+     "evidence": "the orchard library's rmsnorm (ttl.block, shape=) ran on a chip with the pair (issue 205); both chip compilers (the pair and tt-lang 1.1.6) take ttl.block.fill and ttl.block.broadcast, no device (2026-11-22, issue 801)"
     },
     {
      "name": "ttl.matmul",
@@ -228,17 +246,19 @@
      "status": "hardware signature only"
     },
     {
-     "name": "ttl.math.fill",
+     "name": "ttl.block.fill",
      "kind": "op",
-     "signature": "ttl.math.fill(value, *, shape, dtype=None)",
-     "usage": "half = ttl.math.fill(0.5, shape=(1, 1))",
-     "notes": "A block of one value; use it for scalar constants in an expression, such as epsilon.",
-     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "signature": "ttl.block.fill(value, *, shape)",
+     "usage": "half = ttl.block.fill(0.5, shape=(1, 1))",
+     "notes": "A block of one value; use it for scalar constants in an expression, such as epsilon or 1/N. Write ttl.block.fill: ttl.math.fill is refused (see the mistakes).",
+     "seen_in": "chip compilers' ttl.block namespace; python/sim/__init__.py",
      "in": [
       "hardware",
-      "tree"
+      "tree",
+      "sim"
      ],
-     "status": "hardware signature only"
+     "status": "compiles on hardware",
+     "evidence": "the orchard library's rmsnorm (ttl.block, shape=) ran on a chip with the pair (issue 205); both chip compilers (the pair and tt-lang 1.1.6) take ttl.block.fill and ttl.block.broadcast, no device (2026-11-22, issue 801)"
     },
     {
      "name": "ttl.math.typecast",
@@ -360,73 +380,26 @@
      "status": "hardware signature only"
     }
    ]
-  },
-  {
-   "title": "Simulator-only forms (do not compile on the hardware package)",
-   "entries": [
-    {
-     "name": "sim.reduce_sum",
-     "kind": "op",
-     "signature": "ttl.math.reduce_sum(block, dims, shape)",
-     "usage": "s = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
-     "notes": "The simulator requires shape and accepts this. The hardware package has no shape argument: `reduce_sum() got an unexpected keyword argument 'shape'`. 0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205). Write the hardware form above.",
-     "seen_in": "issue 205; tt-lang python/sim/math.py",
-     "in": [
-      "sim"
-     ],
-     "status": "simulator only",
-     "hardware_absent": [
-      "shape"
-     ]
-    },
-    {
-     "name": "sim.fill",
-     "kind": "op",
-     "signature": "ttl.block.fill(value, shape, tile=None)",
-     "usage": "half = ttl.block.fill(0.5, shape=(1, 1))",
-     "notes": "The simulator's ttl.block namespace (broadcast, fill, mask, where, squeeze, unsqueeze, transpose) is not in the hardware package; the hardware names live under ttl.math. Check the orchard kernel library before copying from it: its rmsnorm uses ttl.block and the shape argument.",
-     "seen_in": "tt-lang python/sim/__init__.py; orchard kernel-loop-templates/library/rmsnorm.py",
-     "in": [
-      "sim"
-     ],
-     "status": "simulator only",
-     "hardware_absent": [
-      "ttl.block"
-     ]
-    },
-    {
-     "name": "ttl.make_dfb",
-     "kind": "op",
-     "signature": "ttl.make_dfb(dtype, shape, block_count=2, tile=(32, 32))",
-     "usage": "t_dfb = ttl.make_dfb('bf16', shape=(1, 1))",
-     "notes": "A buffer from a dtype with no backing tensor. Present in the newer tt-lang checkout, absent from the 1.1.6 hardware package; use make_dataflow_buffer_like there.",
-     "seen_in": "tt-lang python/ttl/dataflow_buffer.py",
-     "in": [
-      "tree"
-     ],
-     "status": "simulator only",
-     "hardware_absent": [
-      "make_dfb"
-     ]
-    }
-   ]
   }
  ],
  "mistakes": [
   {
-   "symptom": "`reduce_sum() got an unexpected keyword argument 'shape'` when a kernel that passed the simulator is compiled for the chip (issue 205).",
-   "fix": "Call ttl.math.reduce_sum(x, dims=[-1]) with no shape, then ttl.math.broadcast the result back. A simulator pass does not show the kernel compiles on hardware; for any reduction, read the hardware signature above.",
-   "seen_in": "issue 205 (Granite-4.0-H-1B run, 7 of 7 failed)",
+   "symptom": "`reduce_sum() got an unexpected keyword argument 'shape'` when a kernel is compiled for the chip with tt-lang 1.1.6 (issue 205: 0 of 7 simulator-passing reduction kernels compiled).",
+   "fix": "Keep shape=: the simulator requires it and the pair (the package the probe compiles with) takes it. Only tt-lang 1.1.6 refuses it, and no one form passes the simulator and compiles with 1.1.6; build the pair with `tt-orchard kernel-env --pair --apply`, and do not remove shape.",
+   "seen_in": "issue 205 (Granite-4.0-H-1B run, 7 of 7 failed with 1.1.6)",
    "checks": [
     {
-     "root": "hardware",
+     "root": "shared",
      "name": "ttl.math.reduce_sum",
      "absent_args": [
       "shape"
-     ],
+     ]
+    },
+    {
+     "root": "hardware",
+     "name": "ttl.math.reduce_sum",
      "present_args": [
-      "input",
-      "dims"
+      "shape"
      ]
     },
     {
@@ -437,6 +410,11 @@
      ]
     }
    ]
+  },
+  {
+   "symptom": "`ttl.math.fill` or `ttl.math.broadcast` in a kernel: the simulator says `'_TTLMathNamespace' object has no attribute 'fill'` (or 'broadcast'); both chip compilers say `ttl.math.fill is not available; use ttl.block.fill` and `ttl.math.broadcast is not available; use ttl.block.broadcast`.",
+   "fix": "Write ttl.block.fill(value, shape=...) and ttl.block.broadcast(x, dims=[-1], shape=...). The math names exist as Python functions in the chip package, so a search of its files finds them, and the compiler still refuses them inside a kernel.",
+   "seen_in": "issue 801; recipes A/B of 2026-11-21 (2 of 15 attempts); compile of the row-reduction skeleton, 2026-11-22"
   },
   {
    "symptom": "`make_dataflow_buffer_like(..., buffer_factor=2)` from older guides fails.",
