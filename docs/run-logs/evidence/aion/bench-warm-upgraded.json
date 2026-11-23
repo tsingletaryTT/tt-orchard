@@ -1,0 +1,153 @@
+{
+  "schema": "aion-1.0-instruct-2.3b-bench/1",
+  "cache_state": "warm",
+  "repeats": 3,
+  "load_before": [
+    9.54443359375,
+    6.97900390625,
+    2.97216796875
+  ],
+  "started": "2026-11-23T15:53:13Z",
+  "first_request_s": 4.06,
+  "decode": {
+    "prompts": 5,
+    "new_tokens_each": 64,
+    "runs": 15,
+    "tok_s": {
+      "n": 15,
+      "min": 10.096,
+      "median": 10.906,
+      "max": 12.16
+    },
+    "tokens_per_run": {
+      "n": 15,
+      "min": 64,
+      "median": 64,
+      "max": 64
+    }
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 141,
+      "seconds": {
+        "n": 3,
+        "min": 0.225,
+        "median": 0.227,
+        "max": 4.212
+      },
+      "tok_s_median": 620.6
+    },
+    {
+      "prompt_tokens": 561,
+      "seconds": {
+        "n": 3,
+        "min": 0.726,
+        "median": 0.754,
+        "max": 5.005
+      },
+      "tok_s_median": 743.5
+    },
+    {
+      "prompt_tokens": 2261,
+      "seconds": {
+        "n": 3,
+        "min": 2.569,
+        "median": 2.617,
+        "max": 8.933
+      },
+      "tok_s_median": 863.9
+    },
+    {
+      "prompt_tokens": 7541,
+      "seconds": {
+        "n": 3,
+        "min": 9.101,
+        "median": 9.207,
+        "max": 15.507
+      },
+      "tok_s_median": 819.0
+    }
+  ],
+  "decode_at_length": [
+    {
+      "prompt_tokens": 582,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 2,
+        "min": 1.322,
+        "median": 1.335,
+        "max": 1.349
+      }
+    },
+    {
+      "prompt_tokens": 2282,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 2,
+        "min": 0.364,
+        "median": 0.369,
+        "max": 0.374
+      }
+    },
+    {
+      "prompt_tokens": 7562,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 2,
+        "min": 0.106,
+        "median": 0.106,
+        "max": 0.107
+      }
+    }
+  ],
+  "concurrency": {
+    "two_at_once_status_codes": [
+      200,
+      503
+    ],
+    "batching": "not supported: a second request gets 503 while one runs"
+  },
+  "load_after": [
+    3.595703125,
+    4.591796875,
+    3.51953125
+  ],
+  "reference_match": [
+    {
+      "prompt": "The capital of France is",
+      "compared": 128,
+      "leading_match": 128,
+      "matching_positions": 128
+    },
+    {
+      "prompt": "Water boils at a temperature of",
+      "compared": 128,
+      "leading_match": 18,
+      "matching_positions": 20
+    },
+    {
+      "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+      "compared": 128,
+      "leading_match": 128,
+      "matching_positions": 128
+    },
+    {
+      "prompt": "In 1969, the first humans to walk on the",
+      "compared": 128,
+      "leading_match": 51,
+      "matching_positions": 51
+    },
+    {
+      "prompt": "<|system|>You are Aion Instruct, a large",
+      "compared": 128,
+      "leading_match": 6,
+      "matching_positions": 6
+    },
+    {
+      "prompt": "<|system|>You are Aion Instruct, a large",
+      "compared": 128,
+      "leading_match": 27,
+      "matching_positions": 127
+    }
+  ]
+}

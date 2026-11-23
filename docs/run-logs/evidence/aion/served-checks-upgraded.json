@@ -1,0 +1,82 @@
+{
+  "schema": "aion-served-checks/1",
+  "load_before": [
+    3.595703125,
+    4.591796875,
+    3.51953125
+  ],
+  "started": "2026-11-23T16:02:01Z",
+  "passkey": [
+    {
+      "length": "about 256",
+      "prompt_tokens": 343,
+      "status": 200,
+      "answer": "48217",
+      "found": true,
+      "seconds": 5.2
+    },
+    {
+      "length": "about 2048",
+      "prompt_tokens": 2303,
+      "status": 200,
+      "answer": "73905",
+      "found": true,
+      "seconds": 13.2
+    },
+    {
+      "length": "about 7800",
+      "prompt_tokens": 7583,
+      "status": 200,
+      "answer": "20653",
+      "found": true,
+      "seconds": 32.9
+    }
+  ],
+  "chat": [
+    {
+      "question": "What is the capital of France? Answer in one word.",
+      "expected": "paris",
+      "status": 200,
+      "answer": "Paris",
+      "found": true,
+      "seconds": 0.2
+    },
+    {
+      "question": "What is 17 plus 25? Reply with just the number.",
+      "expected": "42",
+      "status": 200,
+      "answer": "42",
+      "found": true,
+      "seconds": 0.2
+    },
+    {
+      "question": "Which planet is known as the Red Planet? Answer in one word.",
+      "expected": "mars",
+      "status": 200,
+      "answer": "Mars",
+      "found": true,
+      "seconds": 0.2
+    },
+    {
+      "question": "What is the chemical symbol for water? Give the formula.",
+      "expected": "h2o",
+      "status": 200,
+      "answer": "The chemical symbol for water is **H\u2082O**.\n\nThe formula for water is **H\u2082O**.",
+      "found": false,
+      "seconds": 2.7
+    },
+    {
+      "question": "Name the author of the play Hamlet. Answer with the name only.",
+      "expected": "shakespeare",
+      "status": 200,
+      "answer": "William Shakespeare",
+      "found": true,
+      "seconds": 0.3
+    }
+  ],
+  "load_after": [
+    3.08642578125,
+    4.291015625,
+    3.47900390625
+  ]
+}

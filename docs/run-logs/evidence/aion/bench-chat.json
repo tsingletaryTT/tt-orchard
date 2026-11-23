@@ -1,101 +1,101 @@
 {
   "schema": "aion-bench-chat/1",
   "load_before": [
-    14.05029296875,
-    6.45556640625,
-    2.5791015625
+    1.34619140625,
+    0.90185546875,
+    0.39404296875
   ],
-  "started": "2026-11-23T13:32:36Z",
+  "started": "2026-11-23T15:49:59Z",
   "runs": [
     {
       "prompt_tokens": 50,
       "tokens": 64,
-      "tok_s": 4.7506
+      "tok_s": 7.4084
     },
     {
       "prompt_tokens": 50,
       "tokens": 64,
-      "tok_s": 4.6398
+      "tok_s": 7.5488
     },
     {
       "prompt_tokens": 50,
       "tokens": 64,
-      "tok_s": 5.8005
+      "tok_s": 7.5375
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 5.7271
+      "tok_s": 7.2828
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 5.3281
+      "tok_s": 7.2335
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 5.1817
+      "tok_s": 2.6862
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 5.4687
+      "tok_s": 2.1129
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 5.5833
+      "tok_s": 2.9989
     },
     {
       "prompt_tokens": 51,
       "tokens": 64,
-      "tok_s": 4.1961
+      "tok_s": 6.6406
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 4.55
+      "tok_s": 6.6048
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 4.3307
+      "tok_s": 6.6775
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 4.4907
+      "tok_s": 6.713
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 4.7391
+      "tok_s": 6.6445
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 5.2166
+      "tok_s": 6.7966
     },
     {
       "prompt_tokens": 52,
       "tokens": 64,
-      "tok_s": 5.9614
+      "tok_s": 6.7302
     }
   ],
   "tok_s": {
     "n": 15,
-    "min": 4.196,
-    "median": 5.182,
-    "max": 5.961
+    "min": 2.113,
+    "median": 6.713,
+    "max": 7.549
   },
   "prompt_tokens": {
     "min": 50,
     "max": 52
   },
   "load_after": [
-    27.943359375,
-    16.48681640625,
-    7.1708984375
+    9.54443359375,
+    6.97900390625,
+    2.97216796875
   ]
 }

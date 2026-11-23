@@ -9,3 +9,4 @@
 2026-11-23T13:30:43Z can boot start, load 12.36 3.98 1.43
 2026-11-23T13:35:49Z LOADED: driver5 chat-route bench (load ~34, two suites running); rerun on 'quiet'
 2026-11-23T13:36:19Z driver5 chat-route result (LOADED, load 13 to 34): median 5.18 tok/s, min 4.20, max 5.96, n=15, prompt tokens 50-52 -> not for the card headline; rerun on quiet
+2026-11-23T15:48:21Z quiet: stock-host boot check, host SFPI 7.96.0 kmd 2.12.0, load 0.33 0.36 0.17

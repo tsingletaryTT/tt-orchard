@@ -44,7 +44,7 @@ Question answering, summarization, rewriting and chat in the model's eight langu
 - The [Tenstorrent CLI](https://github.com/tenstorrent/tt-cli/blob/main/docs/prerequisites.md), `tt`: `uv tool install tenstorrent` (or use tt-model alone, see the Quickstart)
 - Tenstorrent hardware: **p300x2**, or any machine where four Blackhole chips are free
 - 1 GB hugepages mounted at `/dev/hugepages-1G`
-- SFPI 7.85.0 or newer on the host (the version `ttnn` 0.80.0 declares). `install.sh` stops with a message when the host's SFPI is older. The figures below were taken with SFPI 7.85.0, tt-kmd 2.11.0 and Blackhole firmware bundle 19.17.1
+- SFPI 7.85.0 or newer on the host (the version `ttnn` 0.80.0 declares). `install.sh` stops with a message when the host's SFPI is older. The bundle was tested on a host with SFPI 7.96.0, tt-kmd 2.12.0 and Blackhole firmware bundle 19.17.1; hosts with SFPI between 7.85.0 and 7.96.0 were not tested
 - About 8 GB of free disk: the checkpoint (4.6 GB), the Python environment `install.sh` builds (1.9 GB) and the compiled-kernel cache (1.4 GB after the runs below)
 
 ## Quickstart
@@ -78,11 +78,11 @@ curl -s http://127.0.0.1:20180/v1/chat/completions -H 'Content-Type: application
 
 ## Expected performance
 
-Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was 2.2, 2.0, 1.7 before and 2.7, 2.6, 2.1 after the short-prompt decode runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host. The load average also rises because of the server itself: during the long-prompt runs below it was 11.8, 3.3, 1.1 before and 14.3, 11.4, 5.4 after, because the host work uses many cores, so a load average above 1 does not by itself mean another job was running.
+Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was 9.5, 7.0, 3.0 before and 3.6, 4.6, 3.5 after the short-prompt decode runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host. The load average also rises because of the server itself: during the long-prompt runs below it was 11.8, 3.3, 1.1 before and 14.3, 11.4, 5.4 after, because the host work uses many cores, so a load average above 1 does not by itself mean another job was running. The short-prompt decode, chat-route, accuracy-served and boot rows were measured on SFPI 7.96.0 and tt-kmd 2.12.0. The long-prompt rows, the cold-cache run and the logits records were measured earlier on SFPI 7.85.0 and tt-kmd 2.11.0 (same bundle, same chips); they were not repeated after the upgrade.
 
 | measure | context (prompt tokens) | new tokens | N | value |
 | --- | ---: | ---: | ---: | --- |
-| decode, batch 1 | 5 to 14 (5 prompts) | 64 | 15 | median 11.34 tok/s (min 10.13, max 12.45) |
+| decode, batch 1 | 5 to 14 (5 prompts) | 64 | 15 | median 10.91 tok/s (min 10.10, max 12.16) |
 | decode, batch 1 | 582 | 9 | 2 | median 0.940 tok/s (min 0.907, max 0.972) |
 | decode, batch 1 | 2282 | 9 | 2 | median 0.297 tok/s (min 0.291, max 0.304) |
 | decode, batch 1 | 7562 | 9 | 2 | median 0.093 tok/s (min 0.092, max 0.095) |
@@ -90,6 +90,8 @@ Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 bo
 | prefill (time to the end of the prompt) | 561 | 1 | 3 | median 1.01 s (min 1.01, max 1.17), 557 tok/s |
 | prefill (time to the end of the prompt) | 2261 | 1 | 3 | median 3.25 s (min 3.17, max 3.43), 696 tok/s |
 | prefill (time to the end of the prompt) | 7541 | 1 | 3 | median 10.70 s (min 10.04, max 10.79), 705 tok/s |
+
+Through the chat route every prompt starts with a system header of about 40 tokens, so the context is longer at the same answer length. Five prompts that ask for a paragraph, 3 runs each, 64 new tokens, prompts of 50 to 52 tokens, warm kernel cache, host load 1.3, 0.9, 0.4 before and 9.5, 7.0, 3.0 after: decode median 6.71 tok/s (min 2.11, max 7.55, 15 runs). The boot check's single 64-token chat answer, on an empty kernel cache, ran at 3.81 tok/s. 
 
 The port has no key-value cache: each new token runs the whole sequence again, so the time per token grows with the length of the prompt and the answer together, as the rows with a longer context show. The in-process decode benchmark of the bring-up harness, which ran on one prompt with 32 steps and no server, gave a median of 8.3 tok/s (min 8.3, max 8.4, 3 runs). A second measurement run, started with an empty kernel cache, gave a served decode median of 11.55 tok/s (min 4.99, max 12.52, 15 runs; host load 1.9, 1.4, 1.5 before and 2.5, 2.0, 1.7 after); its first request took 7.38 s. The two runs ran at different times, so the difference between their medians says nothing about the kernel cache.
 

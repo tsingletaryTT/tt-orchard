@@ -152,7 +152,7 @@ Question answering, summarization, rewriting and chat in the model's eight langu
 - The [Tenstorrent CLI](https://github.com/tenstorrent/tt-cli/blob/main/docs/prerequisites.md), `tt`: `uv tool install tenstorrent` (or use tt-model alone, see the Quickstart)
 - Tenstorrent hardware: **p300x2**, or any machine where four Blackhole chips are free
 - 1 GB hugepages mounted at `/dev/hugepages-1G`
-- SFPI 7.85.0 or newer on the host (the version `ttnn` 0.80.0 declares). `install.sh` stops with a message when the host's SFPI is older. The figures below were taken with SFPI 7.85.0, tt-kmd 2.11.0 and Blackhole firmware bundle 19.17.1
+- SFPI 7.85.0 or newer on the host (the version `ttnn` 0.80.0 declares). `install.sh` stops with a message when the host's SFPI is older. The bundle was tested on a host with SFPI 7.96.0, tt-kmd 2.12.0 and Blackhole firmware bundle 19.17.1; hosts with SFPI between 7.85.0 and 7.96.0 were not tested
 - About 8 GB of free disk: the checkpoint (4.6 GB), the Python environment `install.sh` builds (1.9 GB) and the compiled-kernel cache (1.4 GB after the runs below)
 
 ## Quickstart
@@ -186,7 +186,7 @@ curl -s http://127.0.0.1:20180/v1/chat/completions -H 'Content-Type: application
 
 ## Expected performance
 
-Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was {load_text(w)} the short-prompt decode runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host. The load average also rises because of the server itself: during the long-prompt runs below it was {load_text(lg)}, because the host work uses many cores, so a load average above 1 does not by itself mean another job was running.
+Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was {load_text(w)} the short-prompt decode runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host. The load average also rises because of the server itself: during the long-prompt runs below it was {load_text(lg)}, because the host work uses many cores, so a load average above 1 does not by itself mean another job was running. The short-prompt decode, chat-route, accuracy-served and boot rows were measured on SFPI 7.96.0 and tt-kmd 2.12.0. The long-prompt rows, the cold-cache run and the logits records were measured earlier on SFPI 7.85.0 and tt-kmd 2.11.0 (same bundle, same chips); they were not repeated after the upgrade.
 
 {chr(10).join(speed)}
 {('Prefill sizes that did not complete: ' + '; '.join(str(e) for e in prefill_err)) if prefill_err else ''}
