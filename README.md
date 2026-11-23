@@ -2298,13 +2298,20 @@ Flags:
 - `--library`: one of `all`, `others`, `none`. The worked kernels (`orchard/skills/kernel-loop-templates/library/`) copied into each attempt's
   `reference/` as `library_<op>.py`. `all` is the default; `others` leaves out the kernel for the op under test, so a pass is not
   a copy of a worked solution; `none` is the earlier behaviour. The report records the mode and says when the op's own kernel was offered.
-- `--cheat-sheet-recipes`: `on` or `off` (default `off`). `on` adds recipes by kind of op after the TT-Lang cheat sheet in each attempt's
-  directory (`orchard/skills/kernel-loop-templates/ttlang_recipes.json`): a plan and a skeleton for a row-wise reduction, a column
-  reduction with an accumulator, an elementwise chain with a constant and a reused row operand, and a value carried down the rows. Each
-  skeleton passed the unedited simulator check on a worked op that is not a probe op, every wrong variant failed it, and the chip form's
-  calls were found in the installed chip package (`python3 scripts/verify_ttlang_recipes.py` writes the records). No recipe has been
-  compiled on a chip. `off` leaves the sheet byte for byte as it was. The report and each attempt's provenance record the setting.
-  A recipe whose record does not match its skeleton stops the run before any attempt. Not with `--staged`.
+- `--cheat-sheet-recipes`: `on`, `off`, `auto` or `control` (default `off`). `on` adds recipes by kind of op after the TT-Lang cheat sheet in
+  each attempt's directory (`orchard/skills/kernel-loop-templates/ttlang_recipes.json`): a plan and a skeleton for a row-wise reduction, a
+  column reduction with an accumulator, an elementwise chain with a constant and a reused row operand, and a value carried down the rows.
+  Each skeleton passed the unedited simulator check on a worked op that is not a probe op, and every wrong variant failed it. Each recipe is
+  also tagged for the chip package the run's hardware phase would use (the managed pair venv, else the shared venv): `compiles with tt-lang
+  X, no chip` when that package's own compiler accepted the skeleton, `refused by the compiler of tt-lang X` with the compiler's message
+  when it did not, and `not compiled` when there is no result for that package. The compile is made with no device
+  (`orchard/ttlang_hwcompile.py`: `/dev/tenstorrent` is shut out with Landlock and `ttnn` is a stand-in), so the tag says the compiler
+  accepts the skeleton. It does not say the kernel runs on a chip; no recipe has run on one. `python3 scripts/verify_ttlang_recipes.py`
+  writes the records. `auto` turns the recipes on only when every recipe compiles with the run's chip package and that compiler refused
+  every wrong form listed with the recipe; otherwise the run uses the plain sheet and the report says why. `control` adds a section of the
+  same form and length with four elementwise kernels and none of the recipes' content, as the control arm of an A/B. `off` leaves the sheet
+  byte for byte as it was. The report and each attempt's provenance record the setting, the chip package and each recipe's level. A recipe
+  whose simulator record does not match its skeleton stops the run before any attempt. Not with `--staged`.
 - `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each

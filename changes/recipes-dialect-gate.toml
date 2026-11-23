@@ -1,0 +1,4 @@
+target = "0.9.192"
+summary = "The cheat sheet's recipes are compiled with each chip package's own compiler and no device, and tagged for the run's package; the chip lines both compilers refuse are gone; kernel-probe --cheat-sheet-recipes gains auto and control."
+kind = "feature"
+pr = 802

@@ -201,16 +201,46 @@ def write_references(adir: Path, references: list[dict]) -> list[dict]:
     return out
 
 
-def write_cheat_sheet(adir: Path, *, recipes: bool = False) -> bool:
+RECIPE_MODES = ("off", "on", "auto", "control")
+# The data file and the records behind each section that can follow the sheet. `control` has the form and the length of the recipes and
+# none of their content (four elementwise kernels), so an A/B can tell what the recipes add from what more sheet text adds.
+RECIPE_SECTIONS = ("on", "control")
+
+
+def _section_files(section: str) -> tuple[Path, Path]:
+    """(data file, verification records) of a section, read from op_cheats when called."""
+    if section == "control":
+        return op_cheats.RECIPES_CONTROL, op_cheats.RECIPES_CONTROL_VERIFIED
+    return op_cheats.RECIPES, op_cheats.RECIPES_VERIFIED
+
+
+def _section(recipes) -> str | None:
+    """The section a `recipes` argument names: None for off, `on` (also for True, as before) or `control`."""
+    if recipes in (False, None, "off"):
+        return None
+    if recipes is True:
+        return "on"
+    if recipes in RECIPE_SECTIONS:
+        return recipes
+    raise ValueError(f"no recipes section {recipes!r}")
+
+
+def write_cheat_sheet(adir: Path, *, recipes=False, target: dict | None = None) -> bool:
     """Render the shipped TT-Lang cheat sheet (orchard/op_cheats.py) into the attempt directory. False when it cannot be read: the attempt
     then runs without it and the prompt does not name it (`cheat_line`).
 
-    With `recipes` the sheet is followed by the recipes section (`--cheat-sheet-recipes on`); the sheet's own bytes are the same. A run
-    that asked for recipes and cannot have them stops: it raises ProbeBlocked, since an attempt that silently ran without them would
-    be a measurement of the other condition."""
+    With `recipes` (`on` or `control`) the sheet is followed by that section; the sheet's own bytes are the same. `target` is the chip
+    package of the run (ttlang_hwcompile.package_identity): each recipe's chip tag is taken from the record for exactly that package,
+    and with None every recipe is tagged as not compiled. A run that asked for a section and cannot have it stops: it raises
+    ProbeBlocked, since an attempt that silently ran without it would be a measurement of the other condition."""
+    section = _section(recipes)
     try:
         sheet = op_cheats.load_sheet(op_cheats.TTLANG_SHEET)
-        text = op_cheats.render_with_recipes(sheet) if recipes else op_cheats.render(sheet)
+        if section:
+            data_path, verified_path = _section_files(section)
+            text = op_cheats.render_with_recipes(sheet, op_cheats.load_recipes(data_path), op_cheats.load_verified(verified_path), target)
+        else:
+            text = op_cheats.render(sheet)
         safeio.atomic_write(Path(adir) / CHEAT_NAME, text.encode("utf-8"), mode=0o644)
         return True
     except op_cheats.RecipeError as exc:
@@ -221,17 +251,46 @@ def write_cheat_sheet(adir: Path, *, recipes: bool = False) -> bool:
         return False
 
 
-def cheat_recipes_record() -> dict:
-    """What a run with recipes on records about them (the report header and each attempt's provenance): the recipe names, the sha256 of
-    the recipes file and of the verification records, and the records' date. Raises op_cheats.RecipeError when the recipes cannot be
-    used, so `main` can refuse before any attempt directory exists."""
-    data, verified = op_cheats.load_recipes(), op_cheats.load_verified()
+def cheat_recipes_record(section: str = "on", target: dict | None = None) -> dict:
+    """What a run with a recipes section records about it (the report header and each attempt's provenance): which section, the recipe
+    names, the sha256 of the data file and of the verification records, the records' date, the chip package the tags were rendered for
+    and, per recipe, what the records show for that package (`chip`, `compile`, `refused` or `none`). Raises op_cheats.RecipeError when
+    the section cannot be used, so `main` can refuse before any attempt directory exists."""
+    data_path, verified_path = _section_files(section)
+    data, verified = op_cheats.load_recipes(data_path), op_cheats.load_verified(verified_path)
     problems = op_cheats.verified_problems(data, verified)
     if problems:
         raise op_cheats.RecipeError("; ".join(problems[:5]))
-    return {"on": True, "recipes": [r["name"] for r in data["recipes"]],
-            "data_sha256": _sha256(op_cheats.RECIPES), "verified_sha256": _sha256(op_cheats.RECIPES_VERIFIED),
-            "verified_date": verified.get("date")}
+    levels = {r["name"]: op_cheats.compile_status(r, verified["records"][r["name"]], target)["level"] for r in data["recipes"]}
+    return {"on": True, "section": section, "recipes": [r["name"] for r in data["recipes"]],
+            "data_sha256": _sha256(data_path), "verified_sha256": _sha256(verified_path),
+            "verified_date": verified.get("date"),
+            "target": ({"version": target["version"], "compiler_sha256": target["compiler_sha256"]} if target else None),
+            "levels": levels}
+
+
+def recipes_target(python) -> tuple[dict | None, str | None]:
+    """The chip package of the interpreter the hardware phase would use, read from files (nothing is imported), and None with the
+    reason when it cannot be identified. The recipes' chip tags are rendered for this package."""
+    from orchard import ttlang_hwcompile
+    try:
+        return ttlang_hwcompile.package_identity(python), None
+    except ttlang_hwcompile.HwCompileError as exc:
+        return None, str(exc)
+
+
+def resolve_recipes_mode(mode: str, target: dict | None) -> tuple[str, list[str]]:
+    """What `--cheat-sheet-recipes MODE` means for this run: (`off`, `on` or `control`, the reasons). `auto` turns the recipes on only
+    when the gate holds for the run's chip package (op_cheats.recipes_gate): every recipe passed the simulator, compiled with exactly
+    that package's compiler and that compiler refused every wrong form. Otherwise `auto` is off and the reasons say why. The other
+    modes are returned as given: `on` shows the recipes whatever their tags say."""
+    if mode != "auto":
+        return mode, []
+    try:
+        reasons = op_cheats.recipes_gate(op_cheats.load_recipes(), op_cheats.load_verified(), target)
+    except op_cheats.RecipeError as exc:
+        reasons = [str(exc)]
+    return ("off" if reasons else "on"), reasons
 
 
 def cheat_line(adir: Path) -> str:
@@ -248,7 +307,7 @@ def attempt_user_message(op: str, adir: Path) -> str:
 
 
 def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
-                    references: list[dict] | None = None, cheat_recipes: bool = False) -> list[dict]:
+                    references: list[dict] | None = None, cheat_recipes=False, cheat_target: dict | None = None) -> list[dict]:
     """Fill an EMPTY attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env).
     Returns the reference files written, with their sha256 (write_references).
 
@@ -267,7 +326,7 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
     for name in TEMPLATE_FILES:
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
-    write_cheat_sheet(adir, recipes=cheat_recipes)
+    write_cheat_sheet(adir, recipes=cheat_recipes, target=cheat_target)
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     safeio.atomic_write(adir / "check_config.json", json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
                                                                 "tt_lang": facts}, indent=2) + "\n", mode=0o644)
@@ -1148,7 +1207,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
                  tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
                  seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
                  coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None, hw_status=None,
-                 cheat_recipes: bool = False, _box: dict | None = None) -> dict:
+                 cheat_recipes=False, cheat_target: dict | None = None, _box: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
     `hw_policy` (hwtool.HwPolicy) offers the agent the `hardware_check` tool, which runs its current kernel.py on one
     leased chip under the policy's limits with `shared_python`; None or a policy with 0 calls offers no tool. The calls
@@ -1159,8 +1218,9 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
     sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
     adir = Path(probe_dir) / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references, cheat_recipes=cheat_recipes)
-    recipes_record = cheat_recipes_record() if cheat_recipes else None
+    copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references, cheat_recipes=cheat_recipes,
+                             cheat_target=cheat_target)
+    recipes_record = cheat_recipes_record(_section(cheat_recipes), cheat_target) if _section(cheat_recipes) else None
     control = ProbeControl(wall_s=wall_s)
     ledger = Ledger(adir / "ledger.jsonl")
     hwcheck = None
@@ -2037,8 +2097,17 @@ def _reference_lines(header: dict) -> list[str]:
             lines.append(str(lib["note"]))
     recipes = header.get("cheat_recipes")
     if isinstance(recipes, dict) and recipes.get("on") is True:
-        lines += ["", f"Cheat sheet recipes: on ({', '.join(str(n) for n in recipes.get('recipes', []))}); recipes file sha256 "
-                      f"{recipes.get('data_sha256')}, records of {recipes.get('verified_date')} sha256 {recipes.get('verified_sha256')}."]
+        target = recipes.get("target") if isinstance(recipes.get("target"), dict) else None
+        levels = recipes.get("levels") if isinstance(recipes.get("levels"), dict) else {}
+        shown = ", ".join(f"{n} ({levels.get(n, 'none')})" for n in (str(x) for x in recipes.get("recipes", [])))
+        lines += ["", f"Cheat sheet recipes: {recipes.get('section', 'on')} (asked for: {recipes.get('mode', 'on')}): {shown}; data file sha256 "
+                      f"{recipes.get('data_sha256')}, records of {recipes.get('verified_date')} sha256 {recipes.get('verified_sha256')}. "
+                      + (f"Tags are for the chip package tt-lang {target.get('version')}: `compile` means its compiler accepted the "
+                         "skeleton with no chip, `refused` that it did not, `none` that there is no result. No level is a chip run "
+                         "unless it says `chip`." if target else "No chip package was found, so no recipe is tagged as compiled.")]
+    elif isinstance(recipes, dict) and recipes.get("mode") == "auto":
+        gate = [str(g) for g in recipes.get("gate", [])] if isinstance(recipes.get("gate"), list) else []
+        lines += ["", "Cheat sheet recipes: off (asked for: auto). The gate did not hold: " + ("; ".join(gate) or "no reason recorded") + "."]
     return lines + [""] + ttlang_reference.report_lines(header)
 
 
@@ -2471,17 +2540,35 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         if getattr(args, "phase", "sim") != "sim":
             return refuse("--staged runs the simulator only: use --phase sim")
     recipes_arg = getattr(args, "cheat_sheet_recipes", None) or "off"
-    if recipes_arg not in ("on", "off"):
-        return refuse(f"--cheat-sheet-recipes takes on or off; {recipes_arg!r} is neither")
-    cheat_recipes = recipes_arg == "on"
-    recipes_record = None
-    if cheat_recipes:
-        if staged:
-            return refuse("--cheat-sheet-recipes on is not offered with --staged: the staged probe writes its own attempt directories")
-        try:
-            recipes_record = cheat_recipes_record()
-        except op_cheats.RecipeError as exc:
-            return refuse(f"--cheat-sheet-recipes on: the recipes cannot be used: {exc}")
+    if recipes_arg not in RECIPE_MODES:
+        return refuse(f"--cheat-sheet-recipes takes {', '.join(RECIPE_MODES[:-1])} or {RECIPE_MODES[-1]}; {recipes_arg!r} is none of them")
+    if recipes_arg != "off" and staged:
+        return refuse(f"--cheat-sheet-recipes {recipes_arg} is not offered with --staged: the staged probe writes its own attempt directories")
+    # The section is tagged for the chip package the hardware phase would use, so that package is found now (from files; nothing is
+    # imported and no device is opened), before any attempt directory exists.
+    cheat_section, cheat_target, recipes_record = None, None, None
+    if recipes_arg != "off":
+        early = ttlang_pair.resolve_hardware_python(getattr(args, "shared_python", None), fallback=default_shared_python())
+        cheat_target, target_problem = recipes_target(early.python)
+        resolved, gate_reasons = resolve_recipes_mode(recipes_arg, cheat_target)
+        if recipes_arg == "auto":
+            if resolved == "on":
+                say(f"--cheat-sheet-recipes auto: on (every recipe compiles with tt-lang {cheat_target['version']}, checked with no chip)")
+            else:
+                say("--cheat-sheet-recipes auto: off (" + "; ".join(gate_reasons[:3]) + ")")
+        elif cheat_target is None:
+            say(f"--cheat-sheet-recipes {recipes_arg}: no chip package found ({target_problem}); every recipe is tagged as not compiled")
+        if resolved != "off":
+            cheat_section = resolved
+            try:
+                recipes_record = cheat_recipes_record(cheat_section, cheat_target)
+            except op_cheats.RecipeError as exc:
+                return refuse(f"--cheat-sheet-recipes {recipes_arg}: the recipes cannot be used: {exc}")
+            recipes_record["mode"] = recipes_arg
+        else:
+            recipes_record = {"on": False, "mode": "auto", "gate": gate_reasons[:5],
+                              "target": ({"version": cheat_target["version"], "compiler_sha256": cheat_target["compiler_sha256"]}
+                                         if cheat_target else None)}
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
@@ -2601,7 +2688,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     f"{attempts} attempts per temperature ({temps}): {attempts * n_temps} in total")
         say(f"kernel probe {probe_id}: op {args.op}, {how_many}, coder {model} at {safe_url(endpoint)}")
         records: list[dict] = []
-        attempt_fn, attempt_extra = run_attempt, ({"cheat_recipes": True} if cheat_recipes else {})
+        attempt_fn, attempt_extra = run_attempt, ({"cheat_recipes": cheat_section, "cheat_target": cheat_target} if cheat_section else {})
         if staged:                                          # staged construction (orchard/kernelstaged.py, issue 176)
             attempt_fn = kernelstaged.run_attempt
             attempt_extra = {"stage_turns": getattr(args, "stage_turns", None),

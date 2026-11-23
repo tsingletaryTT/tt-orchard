@@ -1,12 +1,35 @@
 {
- "schema": "orchard-recipes-verified/1",
- "date": "2026-11-21",
+ "schema": "orchard-recipes-verified/2",
+ "date": "2026-11-22",
  "simulator": "tt-lang-sim 1.1.10+gfec38c6",
- "chip_package": "tt_lang-1.1.6",
- "note": "Simulator passes and static name checks only. No recipe has been compiled on a chip.",
+ "targets": [
+  {
+   "package": "tt-lang",
+   "version": "1.1.10.dev20261026+light",
+   "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  },
+  {
+   "package": "tt-lang",
+   "version": "1.1.6",
+   "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  }
+ ],
+ "note": "Simulator passes, and compiles with each chip package's own compiler made with no device. No recipe has been run on a chip unless its record has a `chip` entry.",
  "records": {
   "row-reduce-spread": {
-   "skeleton_sha256": "7435c14cdc58c771d3baae6238b2f2f0b13dc43ccb3e1963674ce4547e728f84",
+   "skeleton_sha256": "dd68be92a5fe69675b56e23866326f0ca19147a25fffefd5b287ad5fab36c286",
    "passed": true,
    "category": null,
    "first_line": "",
@@ -14,7 +37,7 @@
    "pcc_min": 1.0,
    "rel_l2_max": 0.0,
    "check_sha256": {
-    "kernel.py": "7435c14cdc58c771d3baae6238b2f2f0b13dc43ccb3e1963674ce4547e728f84",
+    "kernel.py": "dd68be92a5fe69675b56e23866326f0ca19147a25fffefd5b287ad5fab36c286",
     "kernel_harness.py": "9b68caaace62b0096c92bcc0cef1ba0123c50427682f8fc3bd0f32f0587a7cbc",
     "references.py": "893646e589ca53de1baa7177a498eb2edd045731454f324393cf54f7244aa64e",
     "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
@@ -28,60 +51,162 @@
      "first_line": "set seed0: rel_l2 15.068114 above bar 0.01"
     }
    ],
-   "hardware_static": {
-    "ok": true,
-    "checked": [
-     {
-      "name": "ttl.operation",
-      "keywords": [
-       "grid"
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "dd68be92a5fe69675b56e23866326f0ca19147a25fffefd5b287ad5fab36c286",
+      "operation": "l2norm",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_3f999d33.cpp",
+        "bytes": 6033,
+        "sha256": "57d6f9b2ece531b755e0d8bcd6f569e370eec659a9462cfe9e05da55dd95e5a7"
+       },
+       {
+        "name": "ttlang_kernel_read_808bcee1.cpp",
+        "bytes": 1518,
+        "sha256": "c6ed775bce419720465121c84bdf5493bdc0571a9b1c48ba917af7c1d96e1d89"
+       },
+       {
+        "name": "ttlang_kernel_write_86cfb732.cpp",
+        "bytes": 1518,
+        "sha256": "d80d3d14abcda00c23364cef68a6b061dfa9d83e8075cfadad0c19f4c1306e65"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.make_dataflow_buffer_like",
-      "keywords": [
-       "block_count",
-       "shape"
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      },
+      {
+       "name": "reduction added to directly",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "RuntimeError: ttlang 1.1.10.dev20261026+light | error: cannot lower tensor store to ttl.compute: store input is not dataflow-buffer-backed"
+      },
+      {
+       "name": "broadcast under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "dd68be92a5fe69675b56e23866326f0ca19147a25fffefd5b287ad5fab36c286",
+      "operation": "l2norm",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.datamovement",
-      "keywords": []
-     },
-     {
-      "name": "ttl.compute",
-      "keywords": []
-     },
-     {
-      "name": "ttl.copy",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.reduce_sum",
-      "keywords": [
-       "dims"
-      ]
-     },
-     {
-      "name": "ttl.math.fill",
-      "keywords": [
-       "shape"
-      ]
-     },
-     {
-      "name": "ttl.math.rsqrt",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.broadcast",
-      "keywords": [
-       "dims",
-       "shape"
-      ]
-     }
-    ],
-    "problems": []
-   }
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      },
+      {
+       "name": "reduction added to directly",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      },
+      {
+       "name": "broadcast under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ],
+   "chip": []
   },
   "column-reduce-accumulate": {
    "skeleton_sha256": "a78cef8c43a59e2158e6734076e9ae9b908f47e6823da0fa77616edd5aec8166",
@@ -106,49 +231,150 @@
      "first_line": "set seed0: rel_l2 126.999998 above bar 0.01"
     }
    ],
-   "hardware_static": {
-    "ok": true,
-    "checked": [
-     {
-      "name": "ttl.operation",
-      "keywords": [
-       "grid"
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "a78cef8c43a59e2158e6734076e9ae9b908f47e6823da0fa77616edd5aec8166",
+      "operation": "col_mean",
+      "shapes": [
+       [
+        128,
+        256
+       ],
+       [
+        32,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_71ef8ae1.cpp",
+        "bytes": 5356,
+        "sha256": "cc1ab6ea5edf9ba133de675dedb5ea490feef6e99c3ca73c4d3898495314aeab"
+       },
+       {
+        "name": "ttlang_kernel_read_cb232b37.cpp",
+        "bytes": 1714,
+        "sha256": "4937ceeca9b606cdfa7d471c9286a0900876cf389bde5cac1ac44f5928f70622"
+       },
+       {
+        "name": "ttlang_kernel_write_20448549.cpp",
+        "bytes": 1363,
+        "sha256": "504b8a45e8462f7a9ecf1282882fc95ebb4d8e7560996dc599e52dfe2fccbb34"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.make_dataflow_buffer_like",
-      "keywords": [
-       "block_count",
-       "shape"
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      },
+      {
+       "name": "a division inside a thread",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: <ast.Div object at 0x...> not implemented"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "a78cef8c43a59e2158e6734076e9ae9b908f47e6823da0fa77616edd5aec8166",
+      "operation": "col_mean",
+      "shapes": [
+       [
+        128,
+        256
+       ],
+       [
+        32,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.datamovement",
-      "keywords": []
-     },
-     {
-      "name": "ttl.compute",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.fill",
-      "keywords": [
-       "shape"
-      ]
-     },
-     {
-      "name": "ttl.copy",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.reduce_sum",
-      "keywords": [
-       "dims"
-      ]
-     }
-    ],
-    "problems": []
-   }
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      },
+      {
+       "name": "a division inside a thread",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ],
+   "chip": []
   },
   "elementwise-with-operands": {
    "skeleton_sha256": "25818ae53ba834f01f5ddd7c8aa37232b2b3517fc9bc29e7005ce67aab4b0040",
@@ -179,43 +405,177 @@
      "first_line": "set seed0: pcc 0.2364761382341385, finite True, bar 0.999"
     }
    ],
-   "hardware_static": {
-    "ok": true,
-    "checked": [
-     {
-      "name": "ttl.operation",
-      "keywords": [
-       "grid"
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "25818ae53ba834f01f5ddd7c8aa37232b2b3517fc9bc29e7005ce67aab4b0040",
+      "operation": "gated_bias",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        32,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_1820cde6.cpp",
+        "bytes": 3130,
+        "sha256": "ca5d99e37e095c1a22d61ae96c94f170a413e662a64e05885867ac29d80b9423"
+       },
+       {
+        "name": "ttlang_kernel_read_bba38357.cpp",
+        "bytes": 3301,
+        "sha256": "e1a744c676b200a96fec3bc58a8bf48d04fbbda52c376c0d8201e6f80c0bd64a"
+       },
+       {
+        "name": "ttlang_kernel_write_60546dcc.cpp",
+        "bytes": 1518,
+        "sha256": "3bbcca3725239aa3ec41322687a81620f1335e32f12c0855dbd4532f10a0a6b7"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.make_dataflow_buffer_like",
-      "keywords": [
-       "block_count",
-       "shape"
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "25818ae53ba834f01f5ddd7c8aa37232b2b3517fc9bc29e7005ce67aab4b0040",
+      "operation": "gated_bias",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        32,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_662d5afc.cpp",
+        "bytes": 3130,
+        "sha256": "abe3e17b9a193fb0d7f5b84cc0db6251c8be0a3c6eb7dc18121f0e251c2508e5"
+       },
+       {
+        "name": "ttlang_kernel_read_24d9812d.cpp",
+        "bytes": 3350,
+        "sha256": "f7e9fd789d0531f6fabc9c9d7943feea80f9b2d112a5b69fcc6994e97286f4c0"
+       },
+       {
+        "name": "ttlang_kernel_write_053c5478.cpp",
+        "bytes": 1526,
+        "sha256": "c0a56f765d08142e949e1693071185cfbfd4aaa64178a81874a6a061bf969fcf"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.datamovement",
-      "keywords": []
-     },
-     {
-      "name": "ttl.compute",
-      "keywords": []
-     },
-     {
-      "name": "ttl.copy",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.fill",
-      "keywords": [
-       "shape"
-      ]
-     }
-    ],
-    "problems": []
-   }
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      }
+     ]
+    }
+   ],
+   "chip": []
   },
   "running-total-down-rows": {
    "skeleton_sha256": "0be00b251f4b7c35bb6c87c71dcb6850f885a1deef7ccb2605f068923cc38956",
@@ -240,43 +600,161 @@
      "first_line": "set seed0: pcc 0.6344476938247681, finite True, bar 0.999"
     }
    ],
-   "hardware_static": {
-    "ok": true,
-    "checked": [
-     {
-      "name": "ttl.operation",
-      "keywords": [
-       "grid"
+   "compile": [
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "0be00b251f4b7c35bb6c87c71dcb6850f885a1deef7ccb2605f068923cc38956",
+      "operation": "running_sum",
+      "shapes": [
+       [
+        128,
+        64
+       ],
+       [
+        128,
+        64
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_d48bb9a3.cpp",
+        "bytes": 2236,
+        "sha256": "187d789db1800b59c6c22c44637099f7ed63cb67e041cc3626e24281e0b834a5"
+       },
+       {
+        "name": "ttlang_kernel_read_59bf3b94.cpp",
+        "bytes": 1518,
+        "sha256": "7903bbe9c9f09417d2f23b98cd35ad780d853ef3a5bf5e5053ffc5d50d838049"
+       },
+       {
+        "name": "ttlang_kernel_write_1b014652.cpp",
+        "bytes": 1518,
+        "sha256": "698b86b898b33bed5e10a714d129c9ac100a932b57c7b95dd3a97fcefb25205b"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.make_dataflow_buffer_like",
-      "keywords": [
-       "block_count",
-       "shape"
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      }
+     ]
+    },
+    {
+     "date": "2026-11-22",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "0be00b251f4b7c35bb6c87c71dcb6850f885a1deef7ccb2605f068923cc38956",
+      "operation": "running_sum",
+      "shapes": [
+       [
+        128,
+        64
+       ],
+       [
+        128,
+        64
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_4d32f9cf.cpp",
+        "bytes": 2236,
+        "sha256": "b034ccb917b349af55f8b3d1d0600c30b07ba68b8767cebee3285dcd49ecb03c"
+       },
+       {
+        "name": "ttlang_kernel_read_7da4a9cf.cpp",
+        "bytes": 1526,
+        "sha256": "9f51eb63dc36786b4a74a8afd91ff42a9d11afacab8d13fd56d00a3f24ce8520"
+       },
+       {
+        "name": "ttlang_kernel_write_cacc5b71.cpp",
+        "bytes": 1526,
+        "sha256": "833f79006cf7a99f2065697eea45130d0d13f0334c3936c4df28503827ec887a"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
       ]
      },
-     {
-      "name": "ttl.datamovement",
-      "keywords": []
-     },
-     {
-      "name": "ttl.compute",
-      "keywords": []
-     },
-     {
-      "name": "ttl.math.fill",
-      "keywords": [
-       "shape"
-      ]
-     },
-     {
-      "name": "ttl.copy",
-      "keywords": []
-     }
-    ],
-    "problems": []
-   }
+     "negatives": [
+      {
+       "name": "fill under ttl.math",
+       "failed": true,
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+      }
+     ]
+    }
+   ],
+   "chip": []
   }
  }
 }
