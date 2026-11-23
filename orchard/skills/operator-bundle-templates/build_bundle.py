@@ -1015,6 +1015,7 @@ def summary(run: Run, n_todo: int, n_hazards: int) -> str:
             f"Stages skipped: {', '.join(map(str, skipped)) or 'none'}. ")
     if other:
         text += f"Stages with another result: {', '.join(map(str, other))}. "
+    text += reuse_summary(run)
     profiles = run.profiles()
     if run.package:
         ok = sum(1 for p in profiles if p.get("verified") is True)
@@ -1288,6 +1289,27 @@ def text_section(run: Run, redact: Redactor) -> list[str]:
     lines += ["", "### What these numbers do not show", ""]
     lines += [f"- {txt(redact, x, 500)}" for x in as_list(res.get("limits")) + as_list(bench.get("limits"))] or ["- No limits are recorded."]
     return lines
+
+
+def reuse_info(run) -> dict | None:
+    """What stages 3 and 4 of a full port tested (orchard/full_port_reuse.py, gate honesty): None for any other path, so those bundles do not change."""
+    if getattr(run, "path", None) != "full-port":
+        return None
+    from orchard import full_port_reuse
+    return full_port_reuse.describe(run.dir)
+
+
+def reuse_summary(run) -> str:
+    from orchard import full_port_reuse
+    return full_port_reuse.summary_sentences(reuse_info(run))
+
+
+def reuse_lines(run) -> dict[int, list[str]]:
+    """The sentences that follow the stage 3 and stage 4 tables: {3: [...], 4: [...]}, an empty dict when the run has none."""
+    from orchard import full_port_reuse
+    info = reuse_info(run)
+    out = {n: full_port_reuse.lines_for(info, n) for n in (3, 4)}
+    return {n: v for n, v in out.items() if v}
 
 
 def full_port_section(run: Run, redact: Redactor) -> list[str]:
@@ -1780,6 +1802,8 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += full_port_section(run, redact)
     lines += stock_section(run, redact)
     body = stage_results(run, redact)
+    for n, extra in reuse_lines(run).items():      # what stage 3 re-ran and what stage 4 covered (orchard/full_port_reuse.py)
+        body[n] = [*body.get(n, []), "", *extra]
     for n in range(9):
         spec = run.specs[n]
         lines += ["", f"## Stage {n}: {spec.name}", ""]

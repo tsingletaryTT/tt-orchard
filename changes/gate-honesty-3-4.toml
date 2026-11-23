@@ -1,0 +1,4 @@
+target = "0.9.192"
+summary = "The operator bundle says what stage 3 re-ran and that stage 4 ran no new test, read from the run's own records"
+kind = "fix"
+pr = 808

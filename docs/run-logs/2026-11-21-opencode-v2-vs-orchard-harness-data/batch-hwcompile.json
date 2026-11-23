@@ -1,0 +1,406 @@
+{
+ "schema": "orchard-hwcompile-probe-passes/1",
+ "targets": [
+  {
+   "package": "tt-lang",
+   "version": "1.1.10.dev20261026+light",
+   "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  },
+  {
+   "package": "tt-lang",
+   "version": "1.1.6",
+   "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "run": "add-1",
+   "op": "add",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "12e0d32790572aa5181d2232cc39124bbd8dffb55e0631b326c3ce49258cf299",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compiled",
+       "first_line": ""
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "add-2",
+   "op": "add",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "465c3fd414d546239ef849e7f2d8f37d0c50d99bc5e366bbfba16d8eee56d335",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compiled",
+       "first_line": ""
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "center-1",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-2",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-3",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-4",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-5",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-6",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-1",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-2",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-3",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-4",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "d6a4530da5c915c4ddaf3ff669009fd73ba8546299650b92494ce06213fef2e6",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "row_sum-5",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "d608cb589806b23f34eaa297323facf0bffec7a9a75e9e5bf730a54d326a3156",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "row_sum-6",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "34f8db44c0cf371f905a6456e43c337d7efdfd8d8ca0062e291e8ae0528f981f",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compile_error",
+       "first_line": "AttributeError: 'UnaryMinusOp' object has no attribute 'type'"
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: Unknown function: ttl.grid_size"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "add-1",
+   "op": "add",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "229c5387d6d887883dfdf61983e6943509d72c979ffcf1b8802bb84b3f3fa6d2",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compiled",
+       "first_line": ""
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "add-2",
+   "op": "add",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "d92df02fcce4734bd553f5485654faad8a7de6d80687f6eb4d5f796988a008ff",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compiled",
+       "first_line": ""
+      },
+      {
+       "version": "1.1.6",
+       "category": "compiled",
+       "first_line": ""
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "center-1",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-2",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-3",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "815b772b6e75d308522c14f4d74446cda0e9d83e8ff361ea778b31416cf0f9c8",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: <ast.Div object at 0x...> not implemented"
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "center-4",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-5",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "center-6",
+   "op": "center",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-1",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-2",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-3",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 1,
+   "kernels": [
+    {
+     "attempt": 1,
+     "kernel_sha256": "68555e7dd9bbaba40710c73c84fd7304e0e8b77e92f0e0a5d910bf4fee77f1e5",
+     "compile": [
+      {
+       "version": "1.1.10.dev20261026+light",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: constant type NoneType not implemented"
+      },
+      {
+       "version": "1.1.6",
+       "category": "compile_error",
+       "first_line": "ttl.diagnostics.TTLangCompileError: error: constant type NoneType not implemented"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "run": "row_sum-4",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-5",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  },
+  {
+   "run": "row_sum-6",
+   "op": "row_sum",
+   "attempts": 1,
+   "recipes": "off",
+   "simulator_passes": 0,
+   "kernels": []
+  }
+ ]
+}

@@ -1,0 +1,1108 @@
+{
+ "windows": [
+  {
+   "name": "suite-fixstubs",
+   "start": "2026-11-21T19:25:35Z",
+   "end": "2026-11-21T19:42:31Z",
+   "source": "systemd user journal (started 11:25:35 PST, stopped 11:42:31 PST; 1h 27min CPU, 12.9G memory peak). Coordinator's corrected figure: 19:25:37Z to 19:42:30Z. An earlier coordinator message gave about 19:34Z to 19:51Z; that was withdrawn."
+  },
+  {
+   "name": "suite-main-final",
+   "start": "2026-11-21T19:49:06Z",
+   "end": "2026-11-21T20:05:45Z",
+   "source": "systemd user journal, read when the unit finished: 2026-11-21T12:05:45-08:00 host systemd[1730]: suite-main-final.service: Consumed 1h 28min 59.771s CPU time."
+  },
+  {
+   "name": "coordinator-sim-check",
+   "start": "2026-11-21T21:26:30Z",
+   "end": "2026-11-21T21:27:20Z",
+   "source": "coordinator message: three runs of the unedited tt-lang simulator check on their own kernel and two wrong copies, nice 0, about one minute of CPU in all."
+  },
+  {
+   "name": "sample-hook-pytest-1",
+   "start": "2026-11-21T21:29:39Z",
+   "end": "2026-11-21T21:29:40Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-2",
+   "start": "2026-11-21T21:29:50Z",
+   "end": "2026-11-21T21:29:59Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-3",
+   "start": "2026-11-21T21:30:34Z",
+   "end": "2026-11-21T21:30:36Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-4",
+   "start": "2026-11-21T21:32:14Z",
+   "end": "2026-11-21T21:32:24Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-5",
+   "start": "2026-11-21T21:32:30Z",
+   "end": "2026-11-21T21:32:31Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-6",
+   "start": "2026-11-21T21:32:58Z",
+   "end": "2026-11-21T21:33:00Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-7",
+   "start": "2026-11-21T21:33:32Z",
+   "end": "2026-11-21T21:35:06Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-8",
+   "start": "2026-11-21T21:35:11Z",
+   "end": "2026-11-21T21:35:12Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-9",
+   "start": "2026-11-21T21:35:42Z",
+   "end": "2026-11-21T21:35:58Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-10",
+   "start": "2026-11-21T21:36:12Z",
+   "end": "2026-11-21T21:36:28Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-11",
+   "start": "2026-11-21T21:36:42Z",
+   "end": "2026-11-21T21:36:51Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-12",
+   "start": "2026-11-21T21:36:57Z",
+   "end": "2026-11-21T21:36:59Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-13",
+   "start": "2026-11-21T21:37:06Z",
+   "end": "2026-11-21T21:37:15Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M1",
+   "start": "2026-11-21T21:37:51Z",
+   "end": "2026-11-21T21:38:04Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M2",
+   "start": "2026-11-21T21:38:04Z",
+   "end": "2026-11-21T21:38:17Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M3",
+   "start": "2026-11-21T21:38:17Z",
+   "end": "2026-11-21T21:38:30Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M4",
+   "start": "2026-11-21T21:38:30Z",
+   "end": "2026-11-21T21:38:43Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M5",
+   "start": "2026-11-21T21:38:43Z",
+   "end": "2026-11-21T21:38:55Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M6",
+   "start": "2026-11-21T21:38:55Z",
+   "end": "2026-11-21T21:39:10Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M7",
+   "start": "2026-11-21T21:39:10Z",
+   "end": "2026-11-21T21:39:24Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M8",
+   "start": "2026-11-21T21:39:24Z",
+   "end": "2026-11-21T21:39:37Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-M9",
+   "start": "2026-11-21T21:39:37Z",
+   "end": "2026-11-21T21:39:52Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G1",
+   "start": "2026-11-21T21:39:52Z",
+   "end": "2026-11-21T21:40:17Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G2",
+   "start": "2026-11-21T21:40:17Z",
+   "end": "2026-11-21T21:40:31Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G3",
+   "start": "2026-11-21T21:40:31Z",
+   "end": "2026-11-21T21:40:46Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G4",
+   "start": "2026-11-21T21:40:46Z",
+   "end": "2026-11-21T21:41:04Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G5",
+   "start": "2026-11-21T21:41:04Z",
+   "end": "2026-11-21T21:41:17Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-G6",
+   "start": "2026-11-21T21:41:17Z",
+   "end": "2026-11-21T21:41:29Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-N1",
+   "start": "2026-11-21T21:41:29Z",
+   "end": "2026-11-21T21:41:42Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-N2",
+   "start": "2026-11-21T21:41:42Z",
+   "end": "2026-11-21T21:41:54Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-H1",
+   "start": "2026-11-21T21:41:54Z",
+   "end": "2026-11-21T21:42:10Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-H2",
+   "start": "2026-11-21T21:42:10Z",
+   "end": "2026-11-21T21:42:23Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-mutation-S1",
+   "start": "2026-11-21T21:42:23Z",
+   "end": "2026-11-21T21:42:36Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-34",
+   "start": "2026-11-21T21:43:29Z",
+   "end": "2026-11-21T21:43:31Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-35",
+   "start": "2026-11-21T21:43:39Z",
+   "end": "2026-11-21T21:43:41Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-36",
+   "start": "2026-11-21T21:43:41Z",
+   "end": "2026-11-21T21:43:43Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-37",
+   "start": "2026-11-21T21:44:28Z",
+   "end": "2026-11-21T21:45:11Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "sample-hook-pytest-38",
+   "start": "2026-11-21T21:45:17Z",
+   "end": "2026-11-21T21:46:25Z",
+   "source": "coordinator file sample-hook-pytest-windows.txt"
+  },
+  {
+   "name": "audit-hardening-1",
+   "start": "2026-11-21T21:28:41Z",
+   "end": "2026-11-21T21:28:44Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_template_flat_rope_overflow.py"
+  },
+  {
+   "name": "audit-hardening-2",
+   "start": "2026-11-21T21:28:51Z",
+   "end": "2026-11-21T21:28:55Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_template_flat_rope_overflow.py"
+  },
+  {
+   "name": "audit-hardening-3",
+   "start": "2026-11-21T21:29:29Z",
+   "end": "2026-11-21T21:29:32Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_template_flat_rope_overflow.py"
+  },
+  {
+   "name": "audit-hardening-4",
+   "start": "2026-11-21T21:29:54Z",
+   "end": "2026-11-21T21:29:57Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_template_flat_rope_overflow.py"
+  },
+  {
+   "name": "audit-hardening-5",
+   "start": "2026-11-21T21:30:06Z",
+   "end": "2026-11-21T21:30:36Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_template_decode.py tests/test_port_template_flat_rope_"
+  },
+  {
+   "name": "audit-hardening-6",
+   "start": "2026-11-21T21:30:53Z",
+   "end": "2026-11-21T21:31:06Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 3 mutation driver (7 runs, single process, nice 10)"
+  },
+  {
+   "name": "audit-hardening-7",
+   "start": "2026-11-21T21:31:38Z",
+   "end": "2026-11-21T21:31:39Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_reference_gate_remote_code.py"
+  },
+  {
+   "name": "audit-hardening-8",
+   "start": "2026-11-21T21:31:53Z",
+   "end": "2026-11-21T21:32:02Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_reference_gate_remote_code.py tests/test_port_construction_"
+  },
+  {
+   "name": "audit-hardening-9",
+   "start": "2026-11-21T21:32:16Z",
+   "end": "2026-11-21T21:32:26Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_port_construction_remote.py tests/test_reference_gate_remot"
+  },
+  {
+   "name": "audit-hardening-10",
+   "start": "2026-11-21T21:32:40Z",
+   "end": "2026-11-21T21:33:30Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 2 mutation driver (6 runs x 2 files, -n 1, nice 10)"
+  },
+  {
+   "name": "audit-hardening-11",
+   "start": "2026-11-21T21:33:36Z",
+   "end": "2026-11-21T21:35:29Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_dense_load_reuse.py tests/test_port_construction_remote.py "
+  },
+  {
+   "name": "audit-hardening-12",
+   "start": "2026-11-21T21:37:43Z",
+   "end": "2026-11-21T21:37:44Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py"
+  },
+  {
+   "name": "audit-hardening-13",
+   "start": "2026-11-21T21:39:03Z",
+   "end": "2026-11-21T21:39:14Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py tests/test_port_construction_r"
+  },
+  {
+   "name": "audit-hardening-14",
+   "start": "2026-11-21T21:39:37Z",
+   "end": "2026-11-21T21:39:49Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py tests/test_port_construction_r"
+  },
+  {
+   "name": "audit-hardening-15",
+   "start": "2026-11-21T21:39:55Z",
+   "end": "2026-11-21T21:40:31Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_hostile_readers.py"
+  },
+  {
+   "name": "audit-hardening-16",
+   "start": "2026-11-21T21:40:41Z",
+   "end": "2026-11-21T21:41:14Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_hostile_readers.py"
+  },
+  {
+   "name": "audit-hardening-17",
+   "start": "2026-11-21T21:41:36Z",
+   "end": "2026-11-21T21:41:38Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py"
+  },
+  {
+   "name": "audit-hardening-18",
+   "start": "2026-11-21T21:41:49Z",
+   "end": "2026-11-21T21:41:53Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py"
+  },
+  {
+   "name": "audit-hardening-19",
+   "start": "2026-11-21T21:41:53Z",
+   "end": "2026-11-21T21:41:57Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py"
+  },
+  {
+   "name": "audit-hardening-20",
+   "start": "2026-11-21T21:41:57Z",
+   "end": "2026-11-21T21:42:08Z",
+   "source": "coordinator file harden-781-pytest-windows.log: -p no:randomly tests/test_construction_remote_audit.py tests/test_port"
+  },
+  {
+   "name": "audit-hardening-21",
+   "start": "2026-11-21T21:42:34Z",
+   "end": "2026-11-21T21:42:38Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py"
+  },
+  {
+   "name": "audit-hardening-22",
+   "start": "2026-11-21T21:42:54Z",
+   "end": "2026-11-21T21:50:16Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 1 mutation driver, first run (crashed on a duplicate search text "
+  },
+  {
+   "name": "audit-hardening-23",
+   "start": "2026-11-21T21:50:40Z",
+   "end": "2026-11-21T21:58:22Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 1 mutation driver, second run (18 mutations; H2 and H6 wait 200 s"
+  },
+  {
+   "name": "audit-hardening-24",
+   "start": "2026-11-21T21:58:50Z",
+   "end": "2026-11-21T21:58:54Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 1 mutation S3b"
+  },
+  {
+   "name": "audit-hardening-25",
+   "start": "2026-11-21T21:59:04Z",
+   "end": "2026-11-21T22:00:13Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_cheat_sheet_wiring.py tests/test_decoder_idioms.py tests/te"
+  },
+  {
+   "name": "audit-hardening-26",
+   "start": "2026-11-21T22:00:21Z",
+   "end": "2026-11-21T22:01:55Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_audio_package.py tests/test_block_family_authoring_skill.py"
+  },
+  {
+   "name": "audit-hardening-27",
+   "start": "2026-11-21T22:02:02Z",
+   "end": "2026-11-21T22:02:12Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_can_stable_audio.py tests/test_block_family_authoring_skill"
+  },
+  {
+   "name": "audit-hardening-28",
+   "start": "2026-11-21T22:02:44Z",
+   "end": "2026-11-21T22:03:29Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_construction_remote_audit.py tests/test_port_construction_r"
+  },
+  {
+   "name": "audit-hardening-29",
+   "start": "2026-11-21T22:03:48Z",
+   "end": "2026-11-21T22:03:51Z",
+   "source": "coordinator file harden-781-pytest-windows.log: item 1 mutation P8"
+  },
+  {
+   "name": "audit-hardening-30",
+   "start": "2026-11-21T22:04:43Z",
+   "end": "2026-11-21T22:05:52Z",
+   "source": "coordinator file harden-781-pytest-windows.log: tests/test_cheat_sheet_wiring.py tests/test_decoder_idioms.py tests/te"
+  },
+  {
+   "name": "suite-integ2",
+   "start": "2026-11-21T22:06:53Z",
+   "end": "2026-11-21T22:25:33Z",
+   "source": "systemd user journal: Started 14:06:53 PST. Coordinator: full suite, nice 10, CPU weight 20, pytest -n 6, about 17 minutes, exact end to follow. Coordinator's exact window: 22:06:53Z to about 22:25:33Z (1120.4 s run time; the log's last write is the end)."
+  },
+  {
+   "name": "recipes-1-simulator-verification-recipe-l2norm",
+   "start": "2026-11-21T22:38:21Z",
+   "end": "2026-11-21T22:38:22Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-2-simulator-verification-recipe-col-mean",
+   "start": "2026-11-21T22:38:38Z",
+   "end": "2026-11-21T22:38:39Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-3-simulator-verification-recipe-gated-bias",
+   "start": "2026-11-21T22:38:50Z",
+   "end": "2026-11-21T22:38:51Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-4-simulator-verification-recipe-gated-bias-wrong",
+   "start": "2026-11-21T22:39:01Z",
+   "end": "2026-11-21T22:39:03Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-5-simulator-verification-recipe-running-sum",
+   "start": "2026-11-21T22:39:12Z",
+   "end": "2026-11-21T22:39:13Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-6-pytest-tests-test-ttlang-recipes-py-red-run-",
+   "start": "2026-11-21T22:43:18Z",
+   "end": "2026-11-21T22:43:20Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-7-simulator-verification-row-reduce-spread",
+   "start": "2026-11-21T22:45:30Z",
+   "end": "2026-11-21T22:45:31Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-8-simulator-verification-row-reduce-spread-no-scalin",
+   "start": "2026-11-21T22:45:31Z",
+   "end": "2026-11-21T22:45:32Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-9-simulator-verification-column-reduce-accumulate",
+   "start": "2026-11-21T22:45:32Z",
+   "end": "2026-11-21T22:45:33Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-10-simulator-verification-column-reduce-accumulate-no",
+   "start": "2026-11-21T22:45:33Z",
+   "end": "2026-11-21T22:45:34Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-11-simulator-verification-elementwise-with-operands",
+   "start": "2026-11-21T22:45:34Z",
+   "end": "2026-11-21T22:45:36Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-12-simulator-verification-elementwise-with-operands-n",
+   "start": "2026-11-21T22:45:36Z",
+   "end": "2026-11-21T22:45:37Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-13-simulator-verification-elementwise-with-operands-b",
+   "start": "2026-11-21T22:45:37Z",
+   "end": "2026-11-21T22:45:38Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-14-simulator-verification-running-total-down-rows",
+   "start": "2026-11-21T22:45:38Z",
+   "end": "2026-11-21T22:45:39Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-15-simulator-verification-running-total-down-rows-no-",
+   "start": "2026-11-21T22:45:39Z",
+   "end": "2026-11-21T22:45:40Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-16-verification-run",
+   "start": "2026-11-21T22:45:27Z",
+   "end": "2026-11-21T22:45:41Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-17-simulator-verification-elementwise-with-operands",
+   "start": "2026-11-21T22:45:54Z",
+   "end": "2026-11-21T22:45:55Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-18-simulator-verification-elementwise-with-operands-w",
+   "start": "2026-11-21T22:45:55Z",
+   "end": "2026-11-21T22:45:56Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-19-simulator-verification-elementwise-with-operands-b",
+   "start": "2026-11-21T22:45:56Z",
+   "end": "2026-11-21T22:45:57Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-20-verification-only",
+   "start": "2026-11-21T22:45:52Z",
+   "end": "2026-11-21T22:45:58Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-21-pytest-new-file",
+   "start": "2026-11-21T22:46:46Z",
+   "end": "2026-11-21T22:46:48Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-22-red-run",
+   "start": "2026-11-21T22:46:57Z",
+   "end": "2026-11-21T22:46:59Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-23-mutation-O1-recipes-before-the-sheet-pytest",
+   "start": "2026-11-21T22:47:35Z",
+   "end": "2026-11-21T22:47:37Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-24-mutation-O2-render-skips-the-record-check-pytest",
+   "start": "2026-11-21T22:47:37Z",
+   "end": "2026-11-21T22:47:39Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-25-mutation-O3-skeleton-sha-not-compared-pytest",
+   "start": "2026-11-21T22:47:39Z",
+   "end": "2026-11-21T22:47:41Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-26-mutation-O4-passed-not-required-pytest",
+   "start": "2026-11-21T22:47:41Z",
+   "end": "2026-11-21T22:47:43Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-27-mutation-O5-fewer-than-six-sets-accepted-pytest",
+   "start": "2026-11-21T22:47:43Z",
+   "end": "2026-11-21T22:47:45Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-28-mutation-O6-a-passing-wrong-variant-accepted-pytes",
+   "start": "2026-11-21T22:47:45Z",
+   "end": "2026-11-21T22:47:47Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-29-mutation-O7-a-missing-wrong-variant-accepted-pytes",
+   "start": "2026-11-21T22:47:47Z",
+   "end": "2026-11-21T22:47:49Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-30-mutation-O8-hardware-static-not-required-pytest",
+   "start": "2026-11-21T22:47:49Z",
+   "end": "2026-11-21T22:47:51Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-31-mutation-O9-extra-records-accepted-pytest",
+   "start": "2026-11-21T22:47:51Z",
+   "end": "2026-11-21T22:47:53Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-32-mutation-O10-verified-schema-not-checked-pytest",
+   "start": "2026-11-21T22:47:53Z",
+   "end": "2026-11-21T22:47:55Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-33-mutation-O11-replacement-count-not-checked-pytest",
+   "start": "2026-11-21T22:47:55Z",
+   "end": "2026-11-21T22:47:57Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-34-mutation-O12-hardware-form-ignores-its-pairs-pytes",
+   "start": "2026-11-21T22:47:57Z",
+   "end": "2026-11-21T22:47:59Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-35-mutation-O13-duplicate-names-accepted-pytest",
+   "start": "2026-11-21T22:47:59Z",
+   "end": "2026-11-21T22:48:01Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-36-mutation-O14-NUL-in-a-skeleton-line-accepted-pytes",
+   "start": "2026-11-21T22:48:01Z",
+   "end": "2026-11-21T22:48:03Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-37-mutation-O15-long-skeleton-line-accepted-pytest",
+   "start": "2026-11-21T22:48:03Z",
+   "end": "2026-11-21T22:48:05Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-38-mutation-O16-spec-op-not-checked-pytest",
+   "start": "2026-11-21T22:48:05Z",
+   "end": "2026-11-21T22:48:07Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-39-mutation-O17-loader-skips-the-shape-check-pytest",
+   "start": "2026-11-21T22:48:07Z",
+   "end": "2026-11-21T22:48:09Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-40-mutation-O18-hardware-tag-dropped-pytest",
+   "start": "2026-11-21T22:48:09Z",
+   "end": "2026-11-21T22:48:11Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-41-mutation-O19-issue-205-line-dropped-pytest",
+   "start": "2026-11-21T22:48:11Z",
+   "end": "2026-11-21T22:48:14Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-42-mutation-O20-sha-without-the-trailing-newline-pyte",
+   "start": "2026-11-21T22:48:14Z",
+   "end": "2026-11-21T22:48:16Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-43-mutation-O21-line-budget-too-small-pytest",
+   "start": "2026-11-21T22:48:16Z",
+   "end": "2026-11-21T22:48:18Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-44-mutation-O22-plan-not-checked-pytest",
+   "start": "2026-11-21T22:48:18Z",
+   "end": "2026-11-21T22:48:20Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-45-mutation-K1-sheet-writer-ignores-the-switch-pytest",
+   "start": "2026-11-21T22:48:20Z",
+   "end": "2026-11-21T22:48:22Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-46-mutation-K2-a-failed-recipes-load-is-tolerated-pyt",
+   "start": "2026-11-21T22:48:22Z",
+   "end": "2026-11-21T22:48:24Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-47-mutation-K3-prepare-attempt-ignores-the-switch-pyt",
+   "start": "2026-11-21T22:48:24Z",
+   "end": "2026-11-21T22:48:26Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-48-mutation-K4-attempt-does-not-pass-the-switch-on-py",
+   "start": "2026-11-21T22:48:26Z",
+   "end": "2026-11-21T22:48:28Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-49-mutation-K5-provenance-always-carries-the-key-pyte",
+   "start": "2026-11-21T22:48:28Z",
+   "end": "2026-11-21T22:48:30Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-50-mutation-K6-main-does-not-pass-the-switch-to-attem",
+   "start": "2026-11-21T22:48:30Z",
+   "end": "2026-11-21T22:48:32Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-51-mutation-K7-main-allows-recipes-with-staged-pytest",
+   "start": "2026-11-21T22:48:32Z",
+   "end": "2026-11-21T22:48:35Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-52-mutation-K8-main-does-not-check-the-records-pytest",
+   "start": "2026-11-21T22:48:35Z",
+   "end": "2026-11-21T22:48:37Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-53-mutation-K9-header-does-not-record-the-setting-pyt",
+   "start": "2026-11-21T22:48:37Z",
+   "end": "2026-11-21T22:48:39Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-54-mutation-K10-any-switch-value-accepted-pytest",
+   "start": "2026-11-21T22:48:39Z",
+   "end": "2026-11-21T22:48:41Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-55-mutation-K11-report-omits-the-recipes-line-pytest",
+   "start": "2026-11-21T22:48:41Z",
+   "end": "2026-11-21T22:48:43Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-56-mutation-K12-record-omits-the-recipe-names-pytest",
+   "start": "2026-11-21T22:48:43Z",
+   "end": "2026-11-21T22:48:45Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-57-mutation-K13-record-omits-the-file-hash-pytest",
+   "start": "2026-11-21T22:48:45Z",
+   "end": "2026-11-21T22:48:47Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-58-mutation-C1-CLI-default-is-on-pytest",
+   "start": "2026-11-21T22:48:47Z",
+   "end": "2026-11-21T22:48:50Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-59-mutation-C2-CLI-accepts-any-value-pytest",
+   "start": "2026-11-21T22:48:50Z",
+   "end": "2026-11-21T22:48:52Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-60-mutation-driver",
+   "start": "2026-11-21T22:47:35Z",
+   "end": "2026-11-21T22:48:52Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-61-pytest-new-file",
+   "start": "2026-11-21T22:49:05Z",
+   "end": "2026-11-21T22:49:07Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-62-mutation-O1-recipes-before-the-sheet-pytest",
+   "start": "2026-11-21T22:49:07Z",
+   "end": "2026-11-21T22:49:09Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-63-mutation-O2-render-skips-the-record-check-pytest",
+   "start": "2026-11-21T22:49:09Z",
+   "end": "2026-11-21T22:49:11Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-64-mutation-O3-skeleton-sha-not-compared-pytest",
+   "start": "2026-11-21T22:49:11Z",
+   "end": "2026-11-21T22:49:13Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-65-mutation-O4-passed-not-required-pytest",
+   "start": "2026-11-21T22:49:13Z",
+   "end": "2026-11-21T22:49:15Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-66-mutation-O5-fewer-than-six-sets-accepted-pytest",
+   "start": "2026-11-21T22:49:15Z",
+   "end": "2026-11-21T22:49:16Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-67-mutation-O6-a-passing-wrong-variant-accepted-pytes",
+   "start": "2026-11-21T22:49:16Z",
+   "end": "2026-11-21T22:49:18Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-68-mutation-O7-a-missing-wrong-variant-accepted-pytes",
+   "start": "2026-11-21T22:49:18Z",
+   "end": "2026-11-21T22:49:20Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-69-mutation-O8-hardware-static-not-required-pytest",
+   "start": "2026-11-21T22:49:20Z",
+   "end": "2026-11-21T22:49:22Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-70-mutation-O9-extra-records-accepted-pytest",
+   "start": "2026-11-21T22:49:22Z",
+   "end": "2026-11-21T22:49:24Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-71-mutation-O10-verified-schema-not-checked-pytest",
+   "start": "2026-11-21T22:49:24Z",
+   "end": "2026-11-21T22:49:26Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-72-mutation-O11-replacement-count-not-checked-pytest",
+   "start": "2026-11-21T22:49:26Z",
+   "end": "2026-11-21T22:49:27Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-73-mutation-O12-hardware-form-ignores-its-pairs-pytes",
+   "start": "2026-11-21T22:49:27Z",
+   "end": "2026-11-21T22:49:29Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-74-mutation-O13-duplicate-names-accepted-pytest",
+   "start": "2026-11-21T22:49:29Z",
+   "end": "2026-11-21T22:49:31Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-75-mutation-O14-NUL-in-a-skeleton-line-accepted-pytes",
+   "start": "2026-11-21T22:49:31Z",
+   "end": "2026-11-21T22:49:33Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-76-mutation-O15-long-skeleton-line-accepted-pytest",
+   "start": "2026-11-21T22:49:33Z",
+   "end": "2026-11-21T22:49:35Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-77-mutation-O16-spec-op-not-checked-pytest",
+   "start": "2026-11-21T22:49:35Z",
+   "end": "2026-11-21T22:49:37Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-78-mutation-O17-loader-skips-the-shape-check-pytest",
+   "start": "2026-11-21T22:49:37Z",
+   "end": "2026-11-21T22:49:39Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-79-mutation-O18-hardware-tag-dropped-pytest",
+   "start": "2026-11-21T22:49:39Z",
+   "end": "2026-11-21T22:49:41Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-80-mutation-O19-issue-205-line-dropped-pytest",
+   "start": "2026-11-21T22:49:41Z",
+   "end": "2026-11-21T22:49:43Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-81-mutation-O20-sha-without-the-trailing-newline-pyte",
+   "start": "2026-11-21T22:49:43Z",
+   "end": "2026-11-21T22:49:45Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-82-mutation-O21-line-budget-too-small-pytest",
+   "start": "2026-11-21T22:49:45Z",
+   "end": "2026-11-21T22:49:46Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-83-mutation-O22-plan-not-checked-pytest",
+   "start": "2026-11-21T22:49:46Z",
+   "end": "2026-11-21T22:49:48Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-84-mutation-K1-sheet-writer-ignores-the-switch-pytest",
+   "start": "2026-11-21T22:49:48Z",
+   "end": "2026-11-21T22:49:50Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-85-mutation-K2-a-failed-recipes-load-is-tolerated-pyt",
+   "start": "2026-11-21T22:49:50Z",
+   "end": "2026-11-21T22:49:52Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-86-mutation-K3-prepare-attempt-ignores-the-switch-pyt",
+   "start": "2026-11-21T22:49:52Z",
+   "end": "2026-11-21T22:49:54Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-87-mutation-K4-attempt-does-not-pass-the-switch-on-py",
+   "start": "2026-11-21T22:49:54Z",
+   "end": "2026-11-21T22:49:56Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-88-mutation-K5-provenance-always-carries-the-key-pyte",
+   "start": "2026-11-21T22:49:56Z",
+   "end": "2026-11-21T22:49:58Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-89-mutation-K6-main-does-not-pass-the-switch-to-attem",
+   "start": "2026-11-21T22:49:58Z",
+   "end": "2026-11-21T22:50:01Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-90-mutation-K7-main-allows-recipes-with-staged-pytest",
+   "start": "2026-11-21T22:50:01Z",
+   "end": "2026-11-21T22:50:03Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-91-mutation-K8-main-does-not-check-the-records-pytest",
+   "start": "2026-11-21T22:50:03Z",
+   "end": "2026-11-21T22:50:05Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-92-mutation-K9-header-does-not-record-the-setting-pyt",
+   "start": "2026-11-21T22:50:05Z",
+   "end": "2026-11-21T22:50:07Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-93-mutation-K10-any-switch-value-accepted-pytest",
+   "start": "2026-11-21T22:50:07Z",
+   "end": "2026-11-21T22:50:09Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-94-mutation-K11-report-omits-the-recipes-line-pytest",
+   "start": "2026-11-21T22:50:09Z",
+   "end": "2026-11-21T22:50:11Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-95-mutation-K12-record-omits-the-recipe-names-pytest",
+   "start": "2026-11-21T22:50:11Z",
+   "end": "2026-11-21T22:50:13Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-96-mutation-K13-record-omits-the-file-hash-pytest",
+   "start": "2026-11-21T22:50:13Z",
+   "end": "2026-11-21T22:50:15Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-97-mutation-C1-CLI-default-is-on-pytest",
+   "start": "2026-11-21T22:50:15Z",
+   "end": "2026-11-21T22:50:17Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-98-mutation-C2-CLI-accepts-any-value-pytest",
+   "start": "2026-11-21T22:50:17Z",
+   "end": "2026-11-21T22:50:19Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-99-mutation-driver-2",
+   "start": "2026-11-21T22:49:07Z",
+   "end": "2026-11-21T22:50:19Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-100-pytest-verify-script-tests",
+   "start": "2026-11-21T22:50:44Z",
+   "end": "2026-11-21T22:50:46Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-101-mutation-V1-simulator-namespace-accepted-pytest",
+   "start": "2026-11-21T22:51:00Z",
+   "end": "2026-11-21T22:51:02Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-102-mutation-V2-unknown-names-accepted-pytest",
+   "start": "2026-11-21T22:51:02Z",
+   "end": "2026-11-21T22:51:03Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-103-mutation-V3-invented-keywords-accepted-pytest",
+   "start": "2026-11-21T22:51:03Z",
+   "end": "2026-11-21T22:51:06Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-104-mutation-V4-an-empty-list-of-calls-is-ok-pytest",
+   "start": "2026-11-21T22:51:06Z",
+   "end": "2026-11-21T22:51:08Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-105-mutation-V5-operators-imports-not-read-into-ttl-ma",
+   "start": "2026-11-21T22:51:08Z",
+   "end": "2026-11-21T22:51:09Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-106-mutation-V6-overlay-copies-the-worked-kernel-libra",
+   "start": "2026-11-21T22:51:09Z",
+   "end": "2026-11-21T22:51:12Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-107-mutation-V7-overlay-keeps-the-recipes-data-files-p",
+   "start": "2026-11-21T22:51:12Z",
+   "end": "2026-11-21T22:51:14Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-108-mutation-V8-keywords-of-a-function-unchecked-pytes",
+   "start": "2026-11-21T22:51:14Z",
+   "end": "2026-11-21T22:51:16Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-109-mutation-driver-verifier-",
+   "start": "2026-11-21T22:51:00Z",
+   "end": "2026-11-21T22:51:16Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-110-wider-pytest",
+   "start": "2026-11-21T22:51:28Z",
+   "end": "2026-11-21T22:58:27Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-111-pytest-recipes-tests",
+   "start": "2026-11-21T22:59:19Z",
+   "end": "2026-11-21T22:59:24Z",
+   "source": "coordinator file recipes-windows.txt"
+  },
+  {
+   "name": "recipes-112-pytest-four-historical-breakers",
+   "start": "2026-11-21T22:59:31Z",
+   "end": "2026-11-21T23:00:10Z",
+   "source": "coordinator file recipes-windows.txt"
+  }
+ ]
+}

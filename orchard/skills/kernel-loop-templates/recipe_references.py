@@ -36,3 +36,27 @@ def recipe_running_sum(x):
 
 REFERENCES = {"recipe_l2norm": recipe_l2norm, "recipe_col_mean": recipe_col_mean,
               "recipe_gated_bias": recipe_gated_bias, "recipe_running_sum": recipe_running_sum}
+
+
+# ---- the worked ops of the control section (ttlang_recipes_control.json) -----------------------------------------------------------
+# The control section has the same form and length as the recipes and none of their content: four elementwise kernels with no
+# reduction, no broadcast, no constant block and no carried value. An A/B arm that shows it measures what more sheet text does by itself.
+
+def recipe_ctl_add(x):
+    return x["x"] + x["y"]
+
+
+def recipe_ctl_sub(x):
+    return x["x"] - x["y"]
+
+
+def recipe_ctl_mul(x):
+    return x["x"] * x["y"]
+
+
+def recipe_ctl_double(x):
+    return x["x"] + x["x"]
+
+
+REFERENCES.update({"recipe_ctl_add": recipe_ctl_add, "recipe_ctl_sub": recipe_ctl_sub, "recipe_ctl_mul": recipe_ctl_mul,
+                   "recipe_ctl_double": recipe_ctl_double})

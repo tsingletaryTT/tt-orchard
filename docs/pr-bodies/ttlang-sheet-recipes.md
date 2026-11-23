@@ -1,3 +1,5 @@
+> **Correction, 2026-11-22.** The chip form in this PR is wrong. The tt-lang compilers of both chip packages (1.1.6 and the managed pair) refuse `ttl.math.fill` and `ttl.math.broadcast` ("use ttl.block.fill"), and the recipes' `hardware_replace` pairs and the sheet's own chip claims taught those forms. The static check below read the package's Python exports, and the compiler resolves a call inside a thread with its own table, so the check could not fail on this. "Every `ttl.*` call exists" does not mean the compiler accepts it. The A/B this PR was written for gave `center` 2 of 3 with recipes against 0 of 3 without; counting only simulator passes that a chip compiler accepts, the 15 attempts are 1 of 7 with recipes against 0 of 8 without, which shows no effect. Issue 801 and PR 803 correct the plain sheet, PR 802 adds the per-package compile check. The text below is kept as written.
+
 Adds recipes by kind of op to the TT-Lang cheat sheet, behind a switch, so an A/B can change one thing.
 
 ## What it is

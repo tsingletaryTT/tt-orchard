@@ -16,7 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
-    tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--updates-config FILE]
+    tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -413,6 +413,8 @@ def _parser() -> argparse.ArgumentParser:
     up_.add_argument("--print-timer", action="store_true", help="print a systemd timer and a cron line that run the check daily, as text; installs nothing")
     up_.add_argument("--fail-when-unknown", action="store_true", help="exit 3 when every row is unknown (for a scheduled run)")
     up_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or $ORCHARD_TT_METAL_DIR)")
+    up_.add_argument("--reference-python", metavar="PYTHON", help="the reference venv's interpreter, whose torch, transformers and "
+                     "related packages the report compares with PyPI (default: reference_python in the bringup config)")
     up_.add_argument("--updates-config", metavar="FILE", help="TOML with family, coder_packages, authors, repos, cache_hours "
                                                               "(default config/updates.toml when it exists)")
     k = sub.add_parser("kernel-env", parents=[common],
@@ -609,10 +611,13 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
-    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off"), default="off",
+    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off", "auto", "control"), default="off",
                     help="on: add the recipes by kind of op (orchard/skills/kernel-loop-templates/ttlang_recipes.json) after the "
-                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was. Each recipe "
-                         "was verified on a worked op that is not a probe op. The report records the setting. Not with --staged")
+                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was; auto: on only "
+                         "when every recipe compiles with the chip package of this run (checked with that package's compiler and no "
+                         "chip), else off with the reason; control: a section of the same form and length with four elementwise "
+                         "kernels and no recipe content, for an A/B. Each recipe is tagged with what was checked for the run's chip "
+                         "package. The report records the setting. Not with --staged")
     kp.add_argument("--staged", action="store_true",
                     help="build the kernel in stages, each ending at a simulator check against a reference for that step "
                          "(copy, one arithmetic step, the reduction, the broadcast back, the whole op); the verified "
@@ -1217,8 +1222,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return ttlang_consistency.main(args, out=out)
     if args.cmd == "updates":
         from orchard import updates
-        try:       # the skills checkout comes from the bringup config; without one the skills row says so
-            args.skills_dirs = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)).skills_dirs
+        try:       # the skills checkout, the reference interpreter and the tt-model folder come from the bringup config; without one the rows say so
+            cfg_up = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home))
+            args.skills_dirs = cfg_up.skills_dirs
+            if not getattr(args, "reference_python", None) and cfg_up.reference_python:
+                args.reference_python = str(cfg_up.reference_python)
+            if cfg_up.tt_model_root and not getattr(args, "tt_model_root", None):
+                args.tt_model_root = str(cfg_up.tt_model_root)
         except Exception:
             args.skills_dirs = None
         return updates.main(args, out=out)

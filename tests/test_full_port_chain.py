@@ -98,3 +98,27 @@ def test_the_chain_with_chips_configured_runs_stage_3_on_four_and_stage_4_covers
     assert port(5) == port(3) and port(6) == port(3), "stages 5 and 6 serve and measure the port stage 3 passed"
     assert six["source_stage"] == 3 and len(json.loads((rig.run_dir / "stages" / "6" / "evidence" / "port-quality.json").read_text())["chips"]) == 4
     assert five["derived_by"] == "supervisor"
+
+
+@pytest.mark.parametrize("same_port", [True, False])
+def test_the_bundle_says_what_stage_3_re_ran_and_that_stage_4_ran_no_new_test(rig, same_port):
+    """Gate honesty (issue 793): RESULTS.md carries the sentences of orchard/full_port_reuse.py next to the passes of stages 3 and 4, read from this
+    run's own records. With the same port in both stages it says so; with a changed port it must not."""
+    from test_supervisor_full_port_stage3 import PREPARE_3
+    rig.args.required_chips = (2, 4)
+    src = fk.port_source(fk.ANSWERING, rig.tmp / "snapshot")
+    src3 = src if same_port else src + "\nSTAGE_3_MARKER = 3\n"
+    make(rig, over={(1, "run"): STAGE_1, (2, "prepare"): {**PREPARE, "port/port_model.py": src}, (3, "prepare"): {**PREPARE_3, "port/port_model.py": src3}})
+    from orchard.supervisor import Control
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_READY
+    text = (rig.run_dir / "stages" / "8" / "bundle" / "RESULTS.md").read_text()
+    summary = text.split("## Summary")[1].split("\n## ")[0]
+    stage3 = text.split("## Stage 3:")[1].split("\n## ")[0]
+    stage4 = text.split("## Stage 4:")[1].split("\n## ")[0]
+    assert "Stage 4 ran no new test" in stage4 and "Stage 4 ran no new test" in summary
+    assert "2-chip entry is covered by the stage 2 test" in stage4 and "4-chip entry is covered by the stage 3 test" in stage4
+    if same_port:
+        assert "byte-identical to stage 2's port" in stage3 and "Stage 3 re-ran stage 2's port unchanged" in summary
+    else:
+        assert "differs from stage 2's port" in stage3 and "byte-identical" not in stage3 and "re-ran stage 2's port unchanged" not in summary
