@@ -267,8 +267,10 @@ def test_a_layer_keyed_rope_block_the_tables_cannot_follow_leaves_a_named_stub(w
 def test_a_flat_rope_model_is_generated_byte_for_byte_as_before():
     """The standard small decoder and the tiny Qwen4 rehearsal model. The hashes moved once, when the generator began to write the one line
     `TOKEN_CHOICE = "host-row"` (tests/test_port_template_token_choice.py holds the hashes from before that line and checks the text is the
-    same without it)."""
-    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "6efab8c58df94df3e5872c33ef536685ec7954d4b9a1346f732436c83e3f9ccf"
+    same without it). The standard small decoder's hash moved a second time when the generator began to write the cached decode of a standard decoder
+    (issue 759: `_attention_step`, `_rope_row`, `_rotate_row`, the cache lines of `_attention` and `close`, the cached `prefill` and `decode_step`); the tiny
+    Qwen4 hash did not move, so the composed layers' text is byte for byte as before."""
+    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "bec9114c87f3d22141e3527b5d1315526f7b42bc0c2d46ee8cd4c79fb872f6bf"
     assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "aa1dceb6c5204afce761ecba00ec2b0816d14736062f1baae86164738cf2c02d"
 
 
