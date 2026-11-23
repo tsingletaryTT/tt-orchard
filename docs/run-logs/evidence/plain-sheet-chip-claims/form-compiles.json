@@ -1,0 +1,66 @@
+{
+ "base (block.fill, block.broadcast, reduce_sum shape=) | 1.1.10.dev20261026+light": [
+  "compiled",
+  ""
+ ],
+ "base (block.fill, block.broadcast, reduce_sum shape=) | 1.1.6": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+ ],
+ "ttl.math.fill | 1.1.10.dev20261026+light": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+ ],
+ "ttl.math.fill | 1.1.6": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+ ],
+ "ttl.math.broadcast | 1.1.10.dev20261026+light": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast"
+ ],
+ "ttl.math.broadcast | 1.1.6": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'"
+ ],
+ "reduce_sum without shape | 1.1.10.dev20261026+light": [
+  "compiled",
+  ""
+ ],
+ "reduce_sum without shape | 1.1.6": [
+  "compiled",
+  ""
+ ],
+ "make_dfb | 1.1.10.dev20261026+light": [
+  "compiled",
+  ""
+ ],
+ "make_dfb | 1.1.6": [
+  "compile_error",
+  "AttributeError: module 'ttl' has no attribute 'make_dfb'"
+ ],
+ "noshape: block.fill and block.broadcast | 1.1.10.dev20261026+light": [
+  "compiled",
+  ""
+ ],
+ "noshape: block.fill and block.broadcast | 1.1.6": [
+  "compiled",
+  ""
+ ],
+ "noshape: ttl.math.fill | 1.1.10.dev20261026+light": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+ ],
+ "noshape: ttl.math.fill | 1.1.6": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill"
+ ],
+ "noshape: ttl.math.broadcast | 1.1.10.dev20261026+light": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast"
+ ],
+ "noshape: ttl.math.broadcast | 1.1.6": [
+  "compile_error",
+  "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast"
+ ]
+}

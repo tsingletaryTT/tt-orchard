@@ -1,10 +1,10 @@
 {
- "schema": "orchard-recipes/1",
+ "schema": "orchard-recipes/2",
  "title": "Recipes by kind of op",
  "intro": [
   "Each recipe is a plan for a kind of op, with a skeleton that passed the unedited simulator check on a worked op. Change the shapes and the arithmetic for your op and keep the structure.",
-  "tt-lang has two forms. The check that judges your kernel (the unedited check) runs the simulator, and the simulator takes `ttl.block.broadcast`, `ttl.block.fill` and `ttl.math.reduce_sum(x, dims=..., shape=...)`. The package that compiles for the chip has no `ttl.block` namespace and no `shape` argument on `reduce_sum`: it has `ttl.math.broadcast`, `ttl.math.fill` and `ttl.math.reduce_sum(x, dims=...)`.",
-  "Write the simulator form to pass the check. Each recipe lists the lines that change for the chip. No recipe has been compiled on a chip: 0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205)."
+  "Each heading says what was checked. `[passes the simulator]`: the unedited check passed on every input set. The second tag names the chip package of this run and says whether its compiler accepted the skeleton. That compile was made with no chip. It shows the compiler accepts every call in the skeleton and wrote kernel source. It does not show that the kernel runs on a chip or gives the right numbers there.",
+  "A line that starts with `The chip compiler refuses` is a form that was tried against that compiler and failed. Where an entry of the sheet above says something else about the chip, follow these lines: they were compiled."
  ],
  "recipes": [
   {
@@ -16,6 +16,7 @@
     "One buffer block is a whole row of tiles, shape (1, col_tiles). The data is read once, and the same block feeds the reduction and the finishing expression: a block can be used in several statements while its `with` stays open.",
     "Reduce over the last dimension with shape (1, 1). The result is one value per row, in column 0 of a one-tile block.",
     "A Python number is not an operand. Make a (1, 1) block with `ttl.block.fill(value, shape=(1, 1))` for a constant such as an epsilon or 1/N. Take N from `x.shape[1]`, which counts elements, before you divide.",
+    "Multiply the reduction's result by a (1, 1) block before you add to it or pass it to a function: 1/N for a mean, 1.0 when there is nothing to scale. Then add the epsilon and take the function.",
     "Spread the per-row value back with `ttl.block.broadcast(v, dims=[-1], shape=(1, col_tiles))`. It copies column 0 across the values of the row and across its tiles.",
     "Finish with one elementwise expression and one `store` into the output block."
    ],
@@ -49,8 +50,10 @@
     "            with x_dfb.wait() as x_blk, out_dfb.reserve() as out_blk:",
     "                # The row sum of squares: one value per row, in column 0 of a (1, 1) block.",
     "                total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
+    "                # Multiply a reduction by a (1, 1) block before any other use (see the plan).",
+    "                one = ttl.block.fill(1.0, shape=(1, 1))",
     "                eps = ttl.block.fill(1e-6, shape=(1, 1))",
-    "                inv = ttl.math.rsqrt(total + eps)",
+    "                inv = ttl.math.rsqrt(total * one + eps)",
     "                # Spread column 0 across the row's values and across its tiles.",
     "                inv_row = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
     "                out_blk.store(x_blk * inv_row)",
@@ -61,20 +64,6 @@
     "            with out_dfb.wait() as out_blk:",
     "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
     "                tx.wait()"
-   ],
-   "hardware_replace": [
-    [
-     "total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
-     "total = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1])"
-    ],
-    [
-     "eps = ttl.block.fill(1e-6, shape=(1, 1))",
-     "eps = ttl.math.fill(1e-6, shape=(1, 1))"
-    ],
-    [
-     "inv_row = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
-     "inv_row = ttl.math.broadcast(inv, dims=[-1], shape=(1, col_tiles))"
-    ]
    ],
    "negatives": [
     {
@@ -126,7 +115,39 @@
     ],
     "heavy_tail": true,
     "provisional": true
-   }
+   },
+   "compile_negatives": [
+    {
+     "name": "fill under ttl.math",
+     "replace": [
+      [
+       "one = ttl.block.fill(1.0, shape=(1, 1))",
+       "one = ttl.math.fill(1.0, shape=(1, 1))"
+      ]
+     ],
+     "claim": "`ttl.math.fill`: write `ttl.block.fill`."
+    },
+    {
+     "name": "reduction added to directly",
+     "replace": [
+      [
+       "inv = ttl.math.rsqrt(total * one + eps)",
+       "inv = ttl.math.rsqrt(total + eps)"
+      ]
+     ],
+     "claim": "a reduction's result used directly in an add or a function, as in `rsqrt(total + eps)`: multiply it by a (1, 1) block first, as the skeleton does."
+    },
+    {
+     "name": "broadcast under ttl.math",
+     "replace": [
+      [
+       "inv_row = ttl.block.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
+       "inv_row = ttl.math.broadcast(inv, dims=[-1], shape=(1, col_tiles))"
+      ]
+     ],
+     "claim": "`ttl.math.broadcast`: write `ttl.block.broadcast`."
+    }
+   ]
   },
   {
    "name": "column-reduce-accumulate",
@@ -187,20 +208,6 @@
     "            tx = ttl.copy(out_blk, out[0:1, 0:col_tiles])",
     "            tx.wait()"
    ],
-   "hardware_replace": [
-    [
-     "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
-     "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
-    ],
-    [
-     "partial = ttl.math.reduce_sum(x_blk, dims=[0], shape=(1, col_tiles))",
-     "partial = ttl.math.reduce_sum(x_blk, dims=[0])"
-    ],
-    [
-     "scale = ttl.block.fill(inv_n, shape=(1, col_tiles))",
-     "scale = ttl.math.fill(inv_n, shape=(1, col_tiles))"
-    ]
-   ],
    "negatives": [
     {
      "name": "no scaling",
@@ -251,7 +258,29 @@
     ],
     "heavy_tail": true,
     "provisional": true
-   }
+   },
+   "compile_negatives": [
+    {
+     "name": "fill under ttl.math",
+     "replace": [
+      [
+       "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+       "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
+      ]
+     ],
+     "claim": "`ttl.math.fill`: write `ttl.block.fill`."
+    },
+    {
+     "name": "a division inside a thread",
+     "replace": [
+      [
+       "scale = ttl.block.fill(inv_n, shape=(1, col_tiles))",
+       "scale = ttl.block.fill(1.0 / 128.0, shape=(1, col_tiles))"
+      ]
+     ],
+     "claim": "a division written inside a thread, as in `ttl.block.fill(1.0 / 128.0, ...)`: compute the number in the operation body, before the threads, as `inv_n` is."
+    }
+   ]
   },
   {
    "name": "elementwise-with-operands",
@@ -315,12 +344,6 @@
     "            with out_dfb.wait() as out_blk:",
     "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
     "                tx.wait()"
-   ],
-   "hardware_replace": [
-    [
-     "half = ttl.block.fill(0.5, shape=(1, col_tiles))",
-     "half = ttl.math.fill(0.5, shape=(1, col_tiles))"
-    ]
    ],
    "negatives": [
     {
@@ -422,7 +445,19 @@
     ],
     "heavy_tail": true,
     "provisional": true
-   }
+   },
+   "compile_negatives": [
+    {
+     "name": "fill under ttl.math",
+     "replace": [
+      [
+       "half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+       "half = ttl.math.fill(0.5, shape=(1, col_tiles))"
+      ]
+     ],
+     "claim": "`ttl.math.fill`: write `ttl.block.fill`."
+    }
+   ]
   },
   {
    "name": "running-total-down-rows",
@@ -472,12 +507,6 @@
     "            with out_dfb.wait() as out_blk:",
     "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
     "                tx.wait()"
-   ],
-   "hardware_replace": [
-    [
-     "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
-     "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
-    ]
    ],
    "negatives": [
     {
@@ -529,7 +558,19 @@
     ],
     "heavy_tail": true,
     "provisional": true
-   }
+   },
+   "compile_negatives": [
+    {
+     "name": "fill under ttl.math",
+     "replace": [
+      [
+       "total = ttl.block.fill(0.0, shape=(1, col_tiles))",
+       "total = ttl.math.fill(0.0, shape=(1, col_tiles))"
+      ]
+     ],
+     "claim": "`ttl.math.fill`: write `ttl.block.fill`."
+    }
+   ]
   }
  ]
 }

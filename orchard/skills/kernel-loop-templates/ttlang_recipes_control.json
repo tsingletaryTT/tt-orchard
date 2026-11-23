@@ -1,0 +1,511 @@
+{
+ "schema": "orchard-recipes/2",
+ "title": "Recipes by kind of op",
+ "intro": [
+  "Each recipe is a plan for a kind of op, with a skeleton that passed the unedited simulator check on a worked op. Change the shapes and the arithmetic for your op and keep the structure.",
+  "Each heading says what was checked. `[passes the simulator]`: the unedited check passed on every input set. The second tag names the chip package of this run and says whether its compiler accepted the skeleton. That compile was made with no chip. It shows the compiler accepts every call in the skeleton and wrote kernel source. It does not show that the kernel runs on a chip or gives the right numbers there.",
+  "A line that starts with `The chip compiler refuses` is a form that was tried against that compiler and failed. Where an entry of the sheet above says something else about the chip, follow these lines: they were compiled."
+ ],
+ "recipes": [
+  {
+   "name": "ctl-add-rows",
+   "title": "Add two tensors, one row of tiles per block",
+   "applies_to": "an op that combines two tensors of the same shape value by value",
+   "worked_op": "out = x + y",
+   "plan": [
+    "One buffer block is a whole row of tiles, shape (1, col_tiles). Each input has its own buffer and the output has one.",
+    "The reader copies the same slice of each input into its block and waits on every copy before the block ends.",
+    "The compute function waits on both inputs, reserves the output block and stores one expression. The operators +, -, * and / work on blocks of the same shape.",
+    "The writer waits on the output buffer and copies the block to the same slice of the output tensor.",
+    "The reader, the compute function and the writer loop the same number of times, once per row of tiles. Every `reserve` has a matching `wait`.",
+    "`shape` in `make_dataflow_buffer_like` is the size of one block in tiles, and `block_count=2` lets the producer fill the next block while the consumer works on the present one.",
+    "A slice names tiles: `x[row : row + 1, 0:col_tiles]` is one row of tiles across the whole width. A slice that does not match the block shape of its buffer does not compile."
+   ],
+   "units": "Buffer shapes and slices count tiles. `x.shape` counts elements.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def add_rows(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    # One block is a whole row of tiles, the same for both inputs and the output.",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    # The reader: copy one slice of each input into its block, once per pass.",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                ty = ttl.copy(y[row : row + 1, 0:col_tiles], y_blk)",
+    "                tx.wait()",
+    "                ty.wait()",
+    "",
+    "    # The compute function: wait on the inputs, reserve the output, store one expression.",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                # One elementwise expression, stored once into the output block.",
+    "                out_blk.store(x_blk + y_blk)",
+    "",
+    "    # The writer: copy each finished block to its slice of the output tensor.",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "replace": [
+      [
+       "out_blk.store(x_blk + y_blk)",
+       "out_blk.store(x_blk - y_blk)"
+      ]
+     ],
+     "claim": "A kernel that subtracts where the worked op adds fails the check on the numbers."
+    }
+   ],
+   "compile_negatives": [
+    {
+     "name": "a function that does not exist",
+     "replace": [
+      [
+       "out_blk.store(x_blk + y_blk)",
+       "out_blk.store(ttl.math.plus(x_blk, y_blk))"
+      ]
+     ],
+     "claim": "`ttl.math.plus`: there is no such function. Write `x_blk + y_blk`."
+    }
+   ],
+   "spec": {
+    "op": "recipe_ctl_add",
+    "description": "out = x + y, value by value",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ],
+     "y": [
+      64,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_ctl_add",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "ctl-sub-two-rows",
+   "title": "Subtract two tensors, two rows of tiles per block",
+   "applies_to": "an op that combines two tensors of the same shape, read in larger blocks",
+   "worked_op": "out = x - y, read two tile rows at a time",
+   "plan": [
+    "Read the rows in blocks of R tile rows, shape (R, col_tiles). The block count is row_tiles // R, and the slice for block b is rows b * R to (b + 1) * R.",
+    "Both inputs and the output use the same block shape, so the three slices of one pass cover the same rows and columns.",
+    "A larger block means fewer passes of each loop. The arithmetic is the same: one expression and one `store`.",
+    "Compute the slice bounds once per pass in plain Python (`r0, r1 = ...`) and use them in every copy of that pass.",
+    "The reader waits on every copy it started before its `with` ends. A block is pushed to the consumer when the `with` of its `reserve` ends, and released when the `with` of its `wait` ends.",
+    "The row count of the tensor must be a multiple of the block's row count in elements, here 2 * 32. Check it in plain Python at the top of the operation when the shapes can vary."
+   ],
+   "units": "The block count is `x.shape[0] // TILE_SIZE // R`. Block and slice shapes count tiles.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "ROWS_PER_BLOCK = 2",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def sub_two_rows(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "    blocks = row_tiles // ROWS_PER_BLOCK",
+    "",
+    "    # One block is two rows of tiles, for both inputs and the output.",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(ROWS_PER_BLOCK, col_tiles), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(ROWS_PER_BLOCK, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(ROWS_PER_BLOCK, col_tiles), block_count=2)",
+    "",
+    "    # The reader: copy one slice of each input into its block, once per pass.",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for b in range(blocks):",
+    "            r0, r1 = b * ROWS_PER_BLOCK, (b + 1) * ROWS_PER_BLOCK",
+    "            with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                tx = ttl.copy(x[r0:r1, 0:col_tiles], x_blk)",
+    "                ty = ttl.copy(y[r0:r1, 0:col_tiles], y_blk)",
+    "                tx.wait()",
+    "                ty.wait()",
+    "",
+    "    # The compute function: wait on the inputs, reserve the output, store one expression.",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(blocks):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                # One elementwise expression, stored once into the output block.",
+    "                out_blk.store(x_blk - y_blk)",
+    "",
+    "    # The writer: copy each finished block to its slice of the output tensor.",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for b in range(blocks):",
+    "            r0, r1 = b * ROWS_PER_BLOCK, (b + 1) * ROWS_PER_BLOCK",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[r0:r1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "replace": [
+      [
+       "out_blk.store(x_blk - y_blk)",
+       "out_blk.store(x_blk + y_blk)"
+      ]
+     ],
+     "claim": "A kernel that adds where the worked op subtracts fails the check on the numbers."
+    }
+   ],
+   "compile_negatives": [
+    {
+     "name": "a function that does not exist",
+     "replace": [
+      [
+       "out_blk.store(x_blk - y_blk)",
+       "out_blk.store(ttl.math.minus(x_blk, y_blk))"
+      ]
+     ],
+     "claim": "`ttl.math.minus`: there is no such function. Write `x_blk - y_blk`."
+    }
+   ],
+   "spec": {
+    "op": "recipe_ctl_sub",
+    "description": "out = x - y, value by value",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ],
+     "y": [
+      64,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_ctl_sub",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "ctl-mul-tiles",
+   "title": "Multiply two tensors, one tile per block",
+   "applies_to": "an op that combines two tensors of the same shape, read one tile at a time",
+   "worked_op": "out = x * y, one tile per block",
+   "plan": [
+    "One buffer block is one tile, shape (1, 1). The reader and the writer loop over the rows of tiles and, inside, over the columns of tiles.",
+    "The compute function has one loop that runs row_tiles * col_tiles times: it sees the blocks in the order the reader pushed them and needs no row or column index.",
+    "Blocks leave a buffer in the order they entered it. The reader of each input and the writer of the output walk the tiles in the same order.",
+    "A small block uses little buffer memory and makes more passes. The arithmetic is the same: one expression and one `store`.",
+    "Keep the inner loop over the columns inside the loop over the rows in the reader and in the writer alike, so the two walk the tiles in one order.",
+    "The output tensor is written in place: the operation returns nothing, and the writer's copies are what fills it."
+   ],
+   "units": "The compute loop counts tiles: `row_tiles * col_tiles`. Slices count tiles.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def mul_tiles(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    # One block is one tile, so the data-movement loops walk the rows and the columns of tiles.",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    # The reader: copy one slice of each input into its block, once per pass.",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    # The compute function: wait on the inputs, reserve the output, store one expression.",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                # One elementwise expression, stored once into the output block.",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    # The writer: copy each finished block to its slice of the output tensor.",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "replace": [
+      [
+       "out_blk.store(x_blk * y_blk)",
+       "out_blk.store(x_blk + y_blk)"
+      ]
+     ],
+     "claim": "A kernel that adds where the worked op multiplies fails the check on the numbers."
+    }
+   ],
+   "compile_negatives": [
+    {
+     "name": "a function that does not exist",
+     "replace": [
+      [
+       "out_blk.store(x_blk * y_blk)",
+       "out_blk.store(ttl.math.times(x_blk, y_blk))"
+      ]
+     ],
+     "claim": "`ttl.math.times`: there is no such function. Write `x_blk * y_blk`."
+    }
+   ],
+   "spec": {
+    "op": "recipe_ctl_mul",
+    "description": "out = x * y, value by value",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ],
+     "y": [
+      64,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_ctl_mul",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  },
+  {
+   "name": "ctl-double",
+   "title": "Double a tensor, one row of tiles per block",
+   "applies_to": "an op with one input that changes every value the same way",
+   "worked_op": "out = x + x",
+   "plan": [
+    "One input needs one input buffer and one output buffer, each with blocks of one row of tiles.",
+    "A block can be used more than once in the expression while its `with` stays open: `x_blk + x_blk` reads the block twice and pops it once.",
+    "The reader, the compute function and the writer loop the same number of times, once per row of tiles.",
+    "The output buffer takes its dtype and layout from the output tensor, and the input buffer from the input tensor: `make_dataflow_buffer_like` is called once for each.",
+    "The threads are plain functions with a decorator and take no arguments. They read the buffers and the tensors of the operation around them by name.",
+    "Give the copy handle a name and wait on it (`tx = ttl.copy(...)`, then `tx.wait()`) before the block ends."
+   ],
+   "units": "The loop runs over tile rows, `x.shape[0] // TILE_SIZE` times.",
+   "skeleton": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def double_rows(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    # One block is a whole row of tiles.",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    # The reader: copy one slice of each input into its block, once per pass.",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    # The compute function: wait on the inputs, reserve the output, store one expression.",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as out_blk:",
+    "                # One elementwise expression, stored once into the output block.",
+    "                out_blk.store(x_blk + x_blk)",
+    "",
+    "    # The writer: copy each finished block to its slice of the output tensor.",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as out_blk:",
+    "                tx = ttl.copy(out_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "negatives": [
+    {
+     "name": "wrong operator",
+     "replace": [
+      [
+       "out_blk.store(x_blk + x_blk)",
+       "out_blk.store(x_blk)"
+      ]
+     ],
+     "claim": "A kernel that copies the input where the worked op doubles it fails the check on the numbers."
+    }
+   ],
+   "compile_negatives": [
+    {
+     "name": "a function that does not exist",
+     "replace": [
+      [
+       "out_blk.store(x_blk + x_blk)",
+       "out_blk.store(ttl.math.twice(x_blk))"
+      ]
+     ],
+     "claim": "`ttl.math.twice`: there is no such function. Write `x_blk + x_blk`."
+    }
+   ],
+   "spec": {
+    "op": "recipe_ctl_double",
+    "description": "out = x + x, value by value",
+    "inputs": {
+     "x": [
+      64,
+      256
+     ]
+    },
+    "output": [
+     64,
+     256
+    ],
+    "reference": "recipe_ctl_double",
+    "dtype": "bfloat16",
+    "pcc_bar_sim": 0.999,
+    "pcc_bar_hw": 0.99,
+    "rel_l2_bar_sim": 0.01,
+    "rel_l2_bar_hw": 0.05,
+    "slope_band_sim": [
+     0.98,
+     1.02
+    ],
+    "slope_band_hw": [
+     0.95,
+     1.05
+    ],
+    "max_abs_atol_sim": 0.01,
+    "max_abs_rtol_sim": 0.01,
+    "max_abs_atol_hw": 0.1,
+    "max_abs_rtol_hw": 0.05,
+    "seeds": [
+     0,
+     1,
+     2
+    ],
+    "heavy_tail": true,
+    "provisional": true
+   }
+  }
+ ]
+}

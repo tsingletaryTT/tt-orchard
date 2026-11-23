@@ -68,8 +68,8 @@ def test_cheat_with_no_name_lists_the_names(tmp_path):
 
 
 def test_cheat_can_print_a_ttlang_entry_with_its_status(tmp_path):
-    done = cli(stage_dir(tmp_path, ttlang=True), "cheat", "--sheet", "ttlang", "sim.reduce_sum")
-    assert done.returncode == 0 and "[simulator only]" in done.stdout
+    done = cli(stage_dir(tmp_path, ttlang=True), "cheat", "--sheet", "ttlang", "ttl.block.fill")
+    assert done.returncode == 0 and "[compiles on hardware]" in done.stdout
 
 
 def test_cheat_refuses_an_unknown_name_a_missing_sheet_and_a_hostile_name(tmp_path):

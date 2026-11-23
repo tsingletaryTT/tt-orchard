@@ -272,10 +272,23 @@ class Plan:
     rotary: dict | None = None                         # {head_dim, rot, theta} when the rotary helpers are written (issue 696, slice 4)
 
     @property
-    def cached_decode(self) -> bool:
+    def composed_cached_decode(self) -> bool:
         """True when every block of every layer keeps decode state (the composed Qwen4 layers: gated delta net or sparse attention, PLE, connections, MLP or MoE), so `decode_step`
-        runs one row (issue 759). A plan with a stub, a standard attention layer or a generated plain attention keeps the whole-sequence decode."""
+        runs one row (issue 759)."""
         return bool(self.layers) and self.attention is None and all(l.composed and not l.standard and not l.composed.get("stub_sublayer") for l in self.layers)
+
+    @property
+    def attention_cached_decode(self) -> bool:
+        """True for a port whose layers are all the standard pre-norm attention and MLP and whose attention the generator writes (a plain or sliding-window decoder: Qwen3,
+        Aion): every attention layer keeps its keys and values and `decode_step` runs one row. A stub, a step between the embedding and the first layer, an extra child of the
+        text model or a block family keeps the whole-sequence decode, because the generator cannot say what such a function needs to carry from step to step."""
+        return (bool(self.layers) and self.attention is not None and not self.stubs and not self.prelude_reason and not self.prelude_family and not self.epilogue
+                and not self.model_blocks and all(l.standard and not l.composed for l in self.layers))
+
+    @property
+    def cached_decode(self) -> bool:
+        """True when `decode_step` runs one row with state kept from the earlier steps; False when it runs the whole sequence again (issue 759)."""
+        return self.composed_cached_decode or self.attention_cached_decode
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
@@ -1967,6 +1980,129 @@ _WINDOW_MASK_TEXT = '''def _window_mask(model, n):
 '''
 
 
+_ROPE_ROW_TEXT = '''def _rope_row(model, layer_type, pos):
+    """cos and sin of the one position `pos` for the layer type `layer_type`, [1, 1, 1, head_dim] TILE bf16 on the device, in the HF layout (freqs repeated twice) and with
+    the same scaling factor `_rope_tables` multiplies in. The tables of the last position are kept in model["rope_row"] so every layer of one type shares them."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.get("rope_row")
+    if held is not None and held[0] == pos and layer_type in held[1]:
+        return held[1][layer_type]
+    if held is None or held[0] != pos:
+        for pair in (held[1].values() if held is not None else ()):
+            for t in pair:
+                ttnn.deallocate(t)
+        held = model["rope_row"] = (pos, {})
+    hd = ATTENTION["head_dim"]
+@@INV_FREQ@@
+    freqs = torch.tensor([float(pos)], dtype=torch.float32)[:, None] * inv_freq[None, :]
+    emb = torch.cat([freqs, freqs], dim=-1)
+    pair = (_upload(model, (emb.cos() * scaling).reshape(1, 1, 1, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT),
+            _upload(model, (emb.sin() * scaling).reshape(1, 1, 1, hd).to(torch.bfloat16), ttnn.TILE_LAYOUT))
+    held[1][layer_type] = pair
+    return pair
+
+
+def _step_zeros(model, heads, rows):
+    """A zero tensor [1, heads, rows, head_dim] TILE bf16 on the device, uploaded once and shared by every layer and every step (the padding of the query and of the keys)."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.setdefault("step_zeros", {})
+    if (heads, rows) not in held:
+        held[(heads, rows)] = _upload(model, torch.zeros(1, heads, rows, ATTENTION["head_dim"], dtype=torch.bfloat16), ttnn.TILE_LAYOUT)
+    return held[(heads, rows)]
+
+
+def _step_mask(model, n, T, total):
+    """The additive mask [1, 1, 32, total] TILE bf16 of a step at position n over T real rows: 0 on the first T columns, -30000 on the padding. The masks of one position are shared
+    by every layer (the sliding layers have one T, the full layers another) and freed when the position moves on."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    held = model.get("step_masks")
+    if held is None or held[0] != n:
+        for old in (held[1].values() if held is not None else ()):
+            ttnn.deallocate(old)
+        held = model["step_masks"] = (n, {})
+    if (T, total) not in held[1]:
+        row = torch.where(torch.arange(total) < T, 0.0, -30000.0)
+        held[1][(T, total)] = _upload(model, row.reshape(1, 1, 1, total).expand(1, 1, 32, total).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    return held[1][(T, total)]
+
+
+def _rotate_row(model, x, cos, sin):
+    """Rotary in the HF layout on x [1, heads, 1, head_dim] with the tables of `_rope_row`: x * cos + rotate_half(x) * sin, rotate_half as one multiplication by a constant matrix."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    hd, heads = ATTENTION["head_dim"], x.shape[1]
+    r = model.get("rotate_half")
+    if r is None:
+        m = torch.zeros(hd, hd)
+        for i in range(hd // 2):
+            m[i, i + hd // 2] = 1.0
+            m[i + hd // 2, i] = -1.0
+        r = model["rotate_half"] = _upload(model, m.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    rotated = ttnn.linear(ttnn.reshape(x, (1, 1, heads, hd)), r, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(ttnn.reshape(rotated, (1, heads, 1, hd)), sin))
+
+
+'''
+
+_ATTENTION_STEP_TEXT = '''def _attention_step(model, prefix, x, state, n, layer_type):
+    """One row (the token at position n) through the attention at `prefix`, from the keys and values the prompt and the earlier steps kept in `state`: the projections, the
+    per-head norm, the rotary at position n, the new key and value appended to the kept ones (a sliding layer keeps only the last ATTENTION["window"] rows), and SDPA of the
+    one query row against all kept rows. The query is padded to 32 rows and the keys to a multiple of 32, with an additive mask on the padding columns."""
+    # GENERATED (not a stub): a failure inside this function is not sent to the coder as a repair target
+    heads, kv, hd = ATTENTION["heads"], ATTENTION["kv_heads"], ATTENTION["head_dim"]
+    q = ttnn.permute(ttnn.reshape(_linear(model, prefix + ".q_proj", x), (1, 1, heads, hd)), (0, 2, 1, 3))
+    k = ttnn.permute(ttnn.reshape(_linear(model, prefix + ".k_proj", x), (1, 1, kv, hd)), (0, 2, 1, 3))
+    v = ttnn.permute(ttnn.reshape(_linear(model, prefix + ".v_proj", x), (1, 1, kv, hd)), (0, 2, 1, 3))
+@@NORMS@@
+    cos, sin = _rope_row(model, layer_type, n)
+    q, k = _rotate_row(model, q, cos, sin), _rotate_row(model, k, cos, sin)
+    keys = ttnn.concat([state["k"], k], dim=2)
+    values = ttnn.concat([state["v"], v], dim=2)
+    ttnn.deallocate(state["k"])
+    ttnn.deallocate(state["v"])
+    T = keys.shape[2]
+@@WINDOW@@
+    state["k"], state["v"] = keys, values
+    total = -(-T // 32) * 32
+    pad_keys, pad_values = keys, values
+    if total > T:
+        zeros = _step_zeros(model, kv, total - T)
+        pad_keys, pad_values = ttnn.concat([keys, zeros], dim=2), ttnn.concat([values, zeros], dim=2)
+    q32 = ttnn.concat([q, _step_zeros(model, heads, 31)], dim=2)
+    mask = _step_mask(model, n, T, total)
+    out = ttnn.transformer.scaled_dot_product_attention(q32, pad_keys, pad_values, attn_mask=mask, is_causal=False, scale=ATTENTION["scale"])
+    out = ttnn.slice(out, (0, 0, 0, 0), (1, heads, 1, hd))
+    joined = ttnn.reshape(ttnn.permute(out, (0, 2, 1, 3)), (1, 1, 1, heads * hd))
+    for t in (q, k, v, q32) + ((pad_keys, pad_values) if total > T else ()):
+        ttnn.deallocate(t)
+    return _linear(model, prefix + ".o_proj", joined)
+
+
+'''
+
+
+def _cached_attention_text(a: dict) -> list:
+    """The lines of `_rope_row`, `_rotate_row` and `_attention_step` for the generated attention settings `a` (issue 759: the cached decode of a standard decoder)."""
+    if "rope" in a:
+        inv = '    inv_freq, scaling = _rope_inv_freq(ATTENTION["rope"][layer_type], hd)'
+    else:
+        inv = '    inv_freq = 1.0 / (ATTENTION["theta"] ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))\n    scaling = 1.0'
+    norms = []
+    for flag, name, heads in (("q_norm", "q", "heads"), ("k_norm", "k", "kv")):
+        if a[flag]:
+            norms.append(f'    {name} = ttnn.reshape(ttnn.rms_norm(ttnn.reshape({name}, (1, 1, {heads}, hd)), epsilon=ATTENTION["norm_eps"], '
+                         f'weight=model["dev"][prefix + ".{name}_norm.weight"]), (1, {heads}, 1, hd))')
+    window = ""
+    if "window" in a:
+        window = ('    if layer_type == "sliding_attention" and T > ATTENTION["window"]:          # a sliding layer attends to its last `window` rows, the new one included\n'
+                  '        full_keys, full_values, T = keys, values, ATTENTION["window"]\n'
+                  '        keys = ttnn.slice(full_keys, (0, 0, full_keys.shape[2] - T, 0), (1, kv, full_keys.shape[2], hd))\n'
+                  '        values = ttnn.slice(full_values, (0, 0, full_values.shape[2] - T, 0), (1, kv, full_values.shape[2], hd))\n'
+                  '        ttnn.deallocate(full_keys)\n'
+                  '        ttnn.deallocate(full_values)')
+    text = (_ROPE_ROW_TEXT + _ATTENTION_STEP_TEXT).replace("@@INV_FREQ@@", inv).replace("@@NORMS@@", "\n".join(norms) or "    pass").replace("@@WINDOW@@", window or "    pass")
+    return text.split("\n")
+
+
 def render(p: Plan) -> str:
     """The text of the generated port_model.py."""
     L: list[str] = []
@@ -2145,11 +2281,19 @@ def render(p: Plan) -> str:
                   "    return cos, sin", "", ""]
         if "window" in a:
             L += _WINDOW_MASK_TEXT.split("\n")
+        if p.attention_cached_decode:
+            L += _cached_attention_text(a)
         L += ["def _attention(model, prefix, x, cos, sin):",
               '    """Ordinary causal attention for the block at `prefix`: q, k, v projections, the head split, per-head RMSNorm on q and k when the',
               '    reference has one, rotary in the HF layout, SDPA with grouped keys, the head join and the output projection."""']
         if "layer_types" in a:
             L += ['    layer_type = ATTENTION["layer_types"][int(prefix.rsplit(".", 2)[-2])]          # the prefix is "<layers path>.<i>.<attention name>"']
+        elif p.attention_cached_decode:
+            L += ["    layer_type = None"]
+        if p.attention_cached_decode:
+            L += ["    mode, state, n = _cache_of(model, prefix)",
+                  '    if mode == "step":          # one row from the kept keys and values (the tables are the step\'s own, cos and sin are None here)',
+                  "        return _attention_step(model, prefix, x, state, n, layer_type)"]
         if "rope" in a:
             L += ["    cos, sin = cos[layer_type], sin[layer_type]"]
         L += ['    q = _linear(model, prefix + ".q_proj", x)',
@@ -2164,6 +2308,11 @@ def render(p: Plan) -> str:
             L.append('    k = ttnn.rms_norm(k, epsilon=ATTENTION["norm_eps"], weight=model["dev"][prefix + ".k_norm.weight"])')
         L += ["    q = ttnn.experimental.rotary_embedding_hf(q, cos, sin, is_decode_mode=False)",
               "    k = ttnn.experimental.rotary_embedding_hf(k, cos, sin, is_decode_mode=False)"]
+        if p.attention_cached_decode:
+            L += ['    if mode == "prefill":          # keep the keys (after the norm and the rotary) and values of the n real rows for the steps; a sliding layer keeps its last `window`',
+                  '        first = n - min(n, ATTENTION["window"]) if layer_type == "sliding_attention" else 0' if "window" in a else "        first = 0",
+                  '        state["k"] = ttnn.slice(k, (0, 0, first, 0), (1, ATTENTION["kv_heads"], n, ATTENTION["head_dim"]))',
+                  '        state["v"] = ttnn.slice(v, (0, 0, first, 0), (1, ATTENTION["kv_heads"], n, ATTENTION["head_dim"]))']
         if "window" in a:
             L += ["    seq = q.shape[2]",
                   '    if layer_type == "sliding_attention" and seq > ATTENTION["window"]:          # inside the window a sliding layer is plain causal attention',
@@ -2299,6 +2448,25 @@ def render(p: Plan) -> str:
           "            pass",
           '    model["dev"].clear()',
           '    model["host"].clear()']
+    if p.attention_cached_decode:
+        L += ['    for state in list((model.get("cache") or {}).get("state", {}).values()):          # the keys and values the decode kept',
+              "        for t in state.values():",
+              "            try:",
+              "                ttnn.deallocate(t)",
+              "            except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "                pass",
+              '    model["cache"] = None',
+              '    for t in list((model.pop("step_masks", None) or (0, {}))[1].values()) + list(model.pop("step_zeros", {}).values()):',
+              "        try:",
+              "            ttnn.deallocate(t)",
+              "        except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "            pass",
+              '    for t in [model.pop("rotate_half", None)] + [t for pair in (model.pop("rope_row", None) or (0, {}))[1].values() for t in pair]:',
+              "        if t is not None:",
+              "            try:",
+              "                ttnn.deallocate(t)",
+              "            except Exception:      # noqa: BLE001 - a failed free must not stop the run",
+              "                pass"]
     if p.attention and "window" in p.attention:
         L += ['    held = model.pop("window_mask", None)',
               "    if held is not None:",
