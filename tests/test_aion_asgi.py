@@ -207,21 +207,30 @@ def diag(tmp_path, **over):
 
 
 def render(tmp_path, diag_path):
-    bench = {"load_before": [1, 1, 1], "load_after": [1, 1, 1], "repeats": 3,
+    spread = {"n": 3, "min": 1.0, "median": 2.0, "max": 3.0}
+    bench = {"load_before": [1, 1, 1], "load_after": [1, 1, 1], "repeats": 3, "first_request_s": 5.0,
              "decode": {"prompts": 5, "new_tokens_each": 64, "runs": 15, "tok_s": {"n": 15, "min": 1.0, "median": 2.0, "max": 3.0}},
-             "prefill": [{"prompt_tokens": 10, "seconds": {"n": 3, "min": 1.0, "median": 1.0, "max": 1.0}, "tok_s_median": 10.0}],
+             "decode_at_length": [{"prompt_tokens": 500, "new_tokens": 9, "tok_s": spread}],
+             "prefill": [{"prompt_tokens": 10, "seconds": spread, "tok_s_median": 10.0}],
              "concurrency": {"batching": "x"}}
     (tmp_path / "bench.json").write_text(json.dumps(bench))
-    (tmp_path / "q.json").write_text(json.dumps({"top1": 1.0, "ppl": 3.0, "n": 32}))
+    (tmp_path / "cold.json").write_text(json.dumps(bench))
+    quality = {"near_tie_logits": 0.25, "prompts": [{"prompt": "p", "positions": 10, "top1_vs_reference_text": 1.0, "top1_vs_reference_top1": 1.0}],
+               "total": {"positions": 10, "top1_vs_reference_text_fraction": 1.0, "top1_vs_reference_top1_fraction": 1.0, "misses": 0, "near_tie_misses": 0}}
+    (tmp_path / "q.json").write_text(json.dumps(quality))
+    served = {"passkey": [{"length": "about 256", "prompt_tokens": 250, "found": True}], "chat": [{"question": "q", "expected": "x", "found": True}]}
+    (tmp_path / "served.json").write_text(json.dumps(served))
+    (tmp_path / "harness.json").write_text(json.dumps({"benchmark": {"decode_tok_s": spread, "floor": {"floor_tok_s": 400.0}}}))
     out = tmp_path / "card.md"
-    subprocess.run([sys.executable, str(ROOT / "scripts" / "aion" / "make_card.py"), "--warm", str(tmp_path / "bench.json"), "--quality",
-                    str(tmp_path / "q.json"), "--diag", str(diag_path), "--out", str(out)], check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "aion" / "make_card.py"), "--warm", str(tmp_path / "bench.json"), "--cold", str(tmp_path / "cold.json"),
+                    "--cold-start-s", "100", "--warm-start-s", "50", "--quality", str(tmp_path / "q.json"), "--served", str(tmp_path / "served.json"),
+                    "--diag", str(diag_path), "--harness-result", str(tmp_path / "harness.json"), "--out", str(out)], check=True)
     return out.read_text()
 
 
 def test_the_near_tie_explanation_needs_the_records_to_back_it(tmp_path):
     good = render(tmp_path, diag(tmp_path))
-    assert "bf16 near tie" in good and "took the other side of the tie" in good
+    assert "this difference is a near tie" in good and "the reference's own generation took" in good
 
 
 @pytest.mark.parametrize("over", [
@@ -232,7 +241,7 @@ def test_the_near_tie_explanation_needs_the_records_to_back_it(tmp_path):
 ])
 def test_a_contradicted_explanation_is_reported_as_unexplained(tmp_path, over):
     card = render(tmp_path, diag(tmp_path, **over))
-    assert "bf16 near tie" not in card and "took the other side of the tie" not in card
+    assert "this difference is a near tie" not in card and "the reference's own generation took" not in card
     assert "not explained" in card
 
 

@@ -41,7 +41,7 @@ verify = [
 ]
 
 [weights]
-repo = "allenai/Aion-1.0-Instruct-2.3B"
+repo = "microsoft/Aion-1.0-Instruct-2.3B"
 revision = "28902cbfd9f4e0347d6c853aa1301f5d559b2fc0"
 
 [[extra_code]]
