@@ -85,6 +85,32 @@ def retry_when_unavailable(operation, what, *, patience_s=RETRY_PATIENCE_S, inte
             sleep(min(0.5, interval_s * tries))
 
 
+def run_workers(args, timeout_s=300.0, worker=None):
+    """Run `worker` (default `store_worker`) once per argument tuple, each in its own spawned process, and return the results.
+
+    A spawned process takes its `sys.path` from the parent. If an earlier test on the same suite worker left the repository root
+    out of it, every child dies on `import orchard`, the pool starts new ones, and `starmap` waits for a result that cannot come
+    (issue 679: seven tests of one suite worker waited the full 600 s test timeout, one after the other). So the root and the
+    tests directory go back on `sys.path` before the spawn, and the wait has its own limit that names the failure."""
+    import multiprocessing
+    for entry in (str(REPO), str(Path(__file__).resolve().parent)):
+        if not any(os.path.abspath(p or ".") == entry for p in sys.path):
+            sys.path.insert(0, entry)
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(len(args)) as pool:
+        pending = pool.starmap_async(worker or store_worker, args)
+        try:
+            return pending.get(timeout=timeout_s)
+        except multiprocessing.TimeoutError:
+            raise RuntimeError(f"the {len(args)} worker processes did not answer within {timeout_s:g} s "
+                               f"(a worker that cannot start, for example on `import orchard`, looks like this)") from None
+
+
+def sleepy_worker(*_args):
+    """A worker that never answers in time; for the test of the runner's own time limit."""
+    time.sleep(120)
+
+
 def store_worker(directory, table, index, count, problems, tokens, cost, settle_calls=False, busy_timeout_ms=None):
     """One process of the multi-process test: `count` reservations through the real Telegraph budget rules, optionally settled.
     An open, a reservation or a settle that the ledger could not take (`LedgerUnavailable`) is asked again until it is answered
