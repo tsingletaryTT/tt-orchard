@@ -130,7 +130,9 @@ def test_an_address_on_a_port_the_machine_keeps_is_refused_and_the_bundle_is_sto
     path, ref, s2 = config(tmp_path, "speech-to-text", ASR_BUNDLE, tt_model=str(make_tt_model(tmp_path, f"http://127.0.0.1:{port}")))
     assert hw.run(path) != 0
     assert calls(tmp_path)[-1] == f"stop {ASR_BUNDLE}"
-    assert str(port) in result_of(s2)["error"]
+    error = result_of(s2)["error"]
+    assert str(port) in error and "the address in the serve output is refused" in error, "refused before any check was sent"
+    assert result_of(s2).get("checks") is None
 
 
 def test_an_address_that_is_not_on_this_machine_is_not_used(tmp_path):

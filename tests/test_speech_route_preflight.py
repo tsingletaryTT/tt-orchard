@@ -96,6 +96,14 @@ def test_run_preflight_takes_the_speech_route_before_any_research_and_skips_the_
     assert not [c for c in out if c.name in ("port", "cpu-standin") and c.status == pf.BLOCK]
 
 
+def test_a_server_already_on_the_coders_port_does_not_block_a_speech_run_and_does_block_another(tmp_path):
+    busy = dict(port_in_use=lambda p: True, installed_bundles=lambda: [])
+    routed = pf.run_preflight(cfg(tmp_path), MINI_UP, accept_credentials=False, signals=signals(hub_info=lambda m: (MINI_UP_HUB, None), **busy), speech_clips="/c")
+    assert not [c for c in routed if c.reason == "coder-unusable"]
+    plain = pf.run_preflight(cfg(tmp_path), MINI_UP, accept_credentials=False, signals=signals(hub_info=lambda m: (MINI_UP_HUB, None), **busy))
+    assert [c for c in plain if c.reason == "coder-unusable"], "the same signal blocks a run that does boot the coder"
+
+
 def test_run_preflight_without_clips_still_blocks_the_speech_model(tmp_path):
     sig = signals(hub_info=lambda m: (MINI_UP_HUB, None), installed_bundles=lambda: [])
     out = pf.run_preflight(cfg(tmp_path), MINI_UP, accept_credentials=False, signals=sig)

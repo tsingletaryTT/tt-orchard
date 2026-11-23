@@ -222,10 +222,22 @@ def test_a_resume_after_stage_1_keeps_the_selection_and_does_not_run_the_produce
 
 def test_a_resume_after_the_hardware_phase_does_not_serve_the_bundle_again(asr_rig):
     r = asr_rig
-    with pytest.raises(Crash):
-        r.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 2)
+    with pytest.raises(Crash):          # the hardware phase is done and its record is written; the stage has not ended
+        r.run(crash_if=lambda e: e["event"] == "evidence" and e["stage"] == 2 and e["data"].get("what") == "speech stage record")
+    assert len(r.calls["chip"]) == 1 and (r.run_dir / "stages" / "2" / "test-result.json").is_file()
     assert r.run() == EXIT_READY
     assert len(r.calls["chip"]) == 1
+
+
+def test_a_test_command_the_runner_refuses_fails_stage_2_before_any_lease(asr_rig, monkeypatch):
+    r = asr_rig
+    def deny(command, run_dir):
+        raise supervisor.Denied("test-rule", command, "not allowed here")
+    monkeypatch.setattr(supervisor, "check_string", deny)
+    with pytest.raises(Stop):
+        r.run()
+    end = r.ends(2)[0]
+    assert end["result"] == "fail" and "the test command is refused" in " ".join(end["reasons"]) and r.calls["chip"] == []
 
 
 def test_a_missing_reference_interpreter_fails_stage_0_with_the_fix(tmp_path, monkeypatch, request):
@@ -384,7 +396,8 @@ def test_the_text_to_speech_bundle_holds_the_non_commercial_licence_line(tts_rig
     assert r.run() == EXIT_READY
     results, risks = bundle_files(r)
     assert LICENCE_SENTENCES["tts"] in results and LICENCE_SENTENCES["tts"] in risks
-    assert "non-commercial" in risks and "p0" in results and sr.DEFAULT_PROMPTS[0] in results
+    assert "is non-commercial. Use of this model's output and of the bundle is under the licence's terms" in risks
+    assert "p0" in results and sr.DEFAULT_PROMPTS[0] in results
 
 
 @pytest.mark.real_bundle
