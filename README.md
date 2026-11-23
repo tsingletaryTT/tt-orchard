@@ -104,7 +104,7 @@ What landed on `main` from 2026-11-10 to 2026-11-13 (pull requests 689 to 765; t
   seven telegraph four-process failures that were called flaky had one cause, a test that removed the repository from `sys.path` (PR 744). The supervisor
   test rig no longer reads the real device holders of the machine, which made one test fail whenever a real coder was running (PR 765, issue 761).
 - **In review at the time of writing:** a faster expert loop in the generator (one gather and one scatter for all slots, fused silu, LoFi matmuls), a
-  cached decode for the generated Qwen4 port (issue 759: at the time of writing `decode_step` of a generated port ran the whole sequence again; the composed Qwen4 plans got a cached decode in PRs 762 and 780, and every other generated port, Aion's included, still runs the whole sequence again), probes 16 to 18 (trace
+  cached decode for the generated Qwen4 port (issue 759: the composed Qwen4 plans got a cached decode in PRs 762 and 780; standard decoders got one in issue 805, PR 806, which has not run on a board; every other generated port, and Aion's run 3, runs the whole sequence again for each token), probes 16 to 18 (trace
   replay, five loop variants, DRAM-sharded matmuls) and a CPU op count of the generated layers.
 - **Counts.** The full parallel run on 2026-11-13 on the head of PR 765 passed 29,722 tests (see Tests below). As of 2026-11-13 the repository has 354
   merged pull requests and 106 open issues; the issue list was consolidated from 157 to about 104 on 2026-11-12.
@@ -2298,13 +2298,20 @@ Flags:
 - `--library`: one of `all`, `others`, `none`. The worked kernels (`orchard/skills/kernel-loop-templates/library/`) copied into each attempt's
   `reference/` as `library_<op>.py`. `all` is the default; `others` leaves out the kernel for the op under test, so a pass is not
   a copy of a worked solution; `none` is the earlier behaviour. The report records the mode and says when the op's own kernel was offered.
-- `--cheat-sheet-recipes`: `on` or `off` (default `off`). `on` adds recipes by kind of op after the TT-Lang cheat sheet in each attempt's
-  directory (`orchard/skills/kernel-loop-templates/ttlang_recipes.json`): a plan and a skeleton for a row-wise reduction, a column
-  reduction with an accumulator, an elementwise chain with a constant and a reused row operand, and a value carried down the rows. Each
-  skeleton passed the unedited simulator check on a worked op that is not a probe op, every wrong variant failed it, and the chip form's
-  calls were found in the installed chip package (`python3 scripts/verify_ttlang_recipes.py` writes the records). No recipe has been
-  compiled on a chip. `off` leaves the sheet byte for byte as it was. The report and each attempt's provenance record the setting.
-  A recipe whose record does not match its skeleton stops the run before any attempt. Not with `--staged`.
+- `--cheat-sheet-recipes`: `on`, `off`, `auto` or `control` (default `off`). `on` adds recipes by kind of op after the TT-Lang cheat sheet in
+  each attempt's directory (`orchard/skills/kernel-loop-templates/ttlang_recipes.json`): a plan and a skeleton for a row-wise reduction, a
+  column reduction with an accumulator, an elementwise chain with a constant and a reused row operand, and a value carried down the rows.
+  Each skeleton passed the unedited simulator check on a worked op that is not a probe op, and every wrong variant failed it. Each recipe is
+  also tagged for the chip package the run's hardware phase would use (the managed pair venv, else the shared venv): `compiles with tt-lang
+  X, no chip` when that package's own compiler accepted the skeleton, `refused by the compiler of tt-lang X` with the compiler's message
+  when it did not, and `not compiled` when there is no result for that package. The compile is made with no device
+  (`orchard/ttlang_hwcompile.py`: `/dev/tenstorrent` is shut out with Landlock and `ttnn` is a stand-in), so the tag says the compiler
+  accepts the skeleton. It does not say the kernel runs on a chip; no recipe has run on one. `python3 scripts/verify_ttlang_recipes.py`
+  writes the records. `auto` turns the recipes on only when every recipe compiles with the run's chip package and that compiler refused
+  every wrong form listed with the recipe; otherwise the run uses the plain sheet and the report says why. `control` adds a section of the
+  same form and length with four elementwise kernels and none of the recipes' content, as the control arm of an A/B. `off` leaves the sheet
+  byte for byte as it was. The report and each attempt's provenance record the setting, the chip package and each recipe's level. A recipe
+  whose simulator record does not match its skeleton stops the run before any attempt. Not with `--staged`.
 - `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
@@ -2975,6 +2982,18 @@ timeout and a shared 60-second budget.
 | tt-metal | `git describe` of the host tree | latest release |
 | tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag, else the `[project] version` in `pyproject.toml` on the default branch (the row says so) |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
+| SFPI | `dpkg-query` version of `sfpi` | apt candidate, plus the pin in the host tt-metal tree (`tt_metal/sfpi-version`) and the floor each installed tt-model bundle's ttnn declares |
+| tt-kmd (kernel driver) | `modinfo -F version tenstorrent` | apt candidate for `tenstorrent-dkms` |
+| tt-flash, tt-smi | the `.dist-info` folder of the venv that holds the script (no process is started) | public PyPI |
+| Firmware bundle on the chips | the driver's sysfs file `tt_fw_bundle_ver` (does not open the device; read in a thread with a 3-second wait) | newest release in the public Atom feed of tt-system-firmware (the older tt-firmware repository is archived) |
+| Reference venv: torch, transformers, tokenizers, safetensors, huggingface-hub | the `.dist-info` folders of the venv named by `reference_python` in the bringup config (or `--reference-python`) | public PyPI; a major-version jump is labelled `major: do not auto-upgrade` |
+
+The host rows never run tt-smi and never open a chip. On 2026-11-22 tt-smi calls queued behind the kernel driver's mutex while another process
+started a mesh, and a call stuck in the driver cannot be killed. The firmware version comes from the driver's sysfs file instead, in a daemon thread,
+so a driver that does not answer gives `unknown (not read: ...)` and the command goes on. The only commands the report runs are `dpkg-query -W -f=${Version}`
+and `apt-cache policy` for `sfpi` and `tenstorrent-dkms`, and `modinfo -F version tenstorrent`; any other argument raises `NotReadOnly`. The proposals for these rows
+are text: `sudo apt install ...`, `uv pip install ...` and a pointer to the firmware release notes. Their "ready to farm" line is always `unverified`, because no verification
+record covers host packages.
 
 To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. The flag `--updates-config` reads a different file.
 
@@ -2986,6 +3005,9 @@ and cites the rule.
 | R1 | tt-lang, tt-metal | A tt-lang commit builds against one tt-metal ref. A new tt-metal tag needs a tt-lang commit that builds on it (find it with `find-compatible-ttlang.sh` in the tt-lang repository). The verified pair is recorded in `orchard/ttlang_pin.py`. |
 | R2 | tt-metal, tt-model-manager, coder | Bundles carry a tt-metal build; host ttnn and the bundle must agree on the release. |
 | R3 | tt-model-manager, tt-cli | Upgrade together and rerun `tt doctor`. |
+| R4 | sfpi, tt-metal, tt-model-manager | The host tt-metal tree pins one SFPI version and a bundle's ttnn declares a floor that its `install.sh` enforces; the host SFPI must meet both. |
+| R5 | tt-kmd, firmware, tt-flash, tt-smi | No vendor table pairs these for newer releases (tt-metal's `INSTALLING.md` names floors only, read 2026-11-22). The report compares each with its newest release and invents no pairing. After a change, open a 1x4 mesh and run one port check. |
+| R6 | the reference venv's packages | A change to torch or transformers can move reference logits: pin a reference, upgrade a copy of the venv and compare first. |
 
 The "ready to farm" line says `verified` only when `config/verifications.json` (or `$ORCHARD_VERIFICATIONS`) holds a passing record
 whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is

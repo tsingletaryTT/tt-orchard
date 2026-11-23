@@ -609,10 +609,13 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
-    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off"), default="off",
+    kp.add_argument("--cheat-sheet-recipes", choices=("on", "off", "auto", "control"), default="off",
                     help="on: add the recipes by kind of op (orchard/skills/kernel-loop-templates/ttlang_recipes.json) after the "
-                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was. Each recipe "
-                         "was verified on a worked op that is not a probe op. The report records the setting. Not with --staged")
+                         "TT-Lang cheat sheet in each attempt's directory; off (default): the sheet as it always was; auto: on only "
+                         "when every recipe compiles with the chip package of this run (checked with that package's compiler and no "
+                         "chip), else off with the reason; control: a section of the same form and length with four elementwise "
+                         "kernels and no recipe content, for an A/B. Each recipe is tagged with what was checked for the run's chip "
+                         "package. The report records the setting. Not with --staged")
     kp.add_argument("--staged", action="store_true",
                     help="build the kernel in stages, each ending at a simulator check against a reference for that step "
                          "(copy, one arithmetic step, the reduction, the broadcast back, the whole op); the verified "
