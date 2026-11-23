@@ -4,6 +4,30 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def a_sys_path_keeps_the_repository_and_tests_directory():
+    """Issue 679: a test must not take the repository root or the tests directory off `sys.path`.
+
+    A process a later test spawns takes its `sys.path` from the worker. When the repository root is gone, every spawned
+    worker dies on `import orchard` and the test waits out its whole timeout. This fixture records the two entries before
+    the test and fails the test at teardown when one that was present is gone. pytest sets autouse fixtures up in name order, so the name starts with `a_` to set this one up before the other autouse fixtures that
+    use monkeypatch. It is therefore torn down after monkeypatch has restored what it changed, and the check sees the final state.
+    """
+    import os
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    wanted = [os.path.dirname(here), here]
+
+    def present(entry):
+        return any(os.path.abspath(p or ".") == entry for p in sys.path)
+
+    had = [e for e in wanted if present(e)]
+    yield
+    gone = [e for e in had if not present(e)]
+    if gone:
+        raise AssertionError(f"this test left {gone} off sys.path; later spawned workers would fail on `import orchard`")
+
+
 class StubTools:
     """A directory of stub binaries that stand in for tools a test must never really run.
 
@@ -144,3 +168,4 @@ def unbuilt_stages_5_6(monkeypatch):
     there use this fixture, which makes the pause mechanism (`supervisor.FULL_PORT_UNBUILT`) apply again; the real chain has no such pause."""
     from orchard import supervisor
     monkeypatch.setattr(supervisor, "FULL_PORT_UNBUILT", (5, 6))
+

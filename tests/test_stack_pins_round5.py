@@ -110,6 +110,8 @@ def _run_script(monkeypatch, capsys, top, argv, extra_modules=()):
     for name, mod in extra_modules:
         monkeypatch.setitem(sys.modules, name, mod)
     monkeypatch.setattr(sys, "argv", ["-c", *argv])
+    # The probe script takes the current directory off sys.path. Run in this process it would do that for every later test on the worker (issue 679).
+    monkeypatch.setattr(sys, "path", list(sys.path))
     exec(compile(sp.PROBE_SCRIPT, "<probe>", "exec"), {})
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])["classes"]
 

@@ -1,0 +1,3 @@
+target = "0.9.192"
+summary = "The multi-process telegraph store tests and the interrupt-grace test no longer hang or fail when an earlier test or a loaded box changes what a spawned process can import or how fast it starts."
+kind = "fix"

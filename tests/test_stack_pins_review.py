@@ -87,6 +87,8 @@ def test_the_class_lookup_includes_the_model_module_the_reference_loader_searche
     monkeypatch.setitem(sys.modules, "transformers.models.qwen3_5.modeling_qwen3_5", mod)
     monkeypatch.setitem(sys.modules, "transformers", top)
     monkeypatch.setattr(sys, "argv", ["-c", "qwen3_5", "Qwen3_5Model", "Missing"])
+    # The probe script takes the current directory off sys.path. Run in this process it would do that for every later test on the worker (issue 679).
+    monkeypatch.setattr(sys, "path", list(sys.path))
     exec(compile(sp.PROBE_SCRIPT, "<probe>", "exec"), {})
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["classes"] == {"Qwen3_5Model": True, "Missing": False}
 
