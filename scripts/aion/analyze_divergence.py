@@ -25,12 +25,21 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     bench = json.load(open(a.bench))["reference_match"]
-    ref = {i["prompt"][:40]: i for i in json.load(open(a.ref_logits))["items"]}
-    chip = {i["prompt"][:40]: i for i in json.load(open(a.chip_logits))["items"]}
+    # The three records list the prompts in the same order. They are matched by position and the prompt text is checked: two prompts can share their
+    # first 40 characters (the two chat prompts do), and keying by those characters made one prompt's row use the other's logits.
+    ref_items = json.load(open(a.ref_logits))["items"]
+    chip_items = json.load(open(a.chip_logits))["items"]
+    if not (len(bench) == len(ref_items) == len(chip_items)):
+        raise SystemExit("the bench, reference and chip records do not list the same number of prompts")
+    for b, r, c in zip(bench, ref_items, chip_items):
+        if not (r["prompt"].startswith(b["prompt"]) and c["prompt"] == r["prompt"]):
+            raise SystemExit(f"the records list different prompts at the same position: {b['prompt']!r}")
     rows = []
-    for b in bench:
-        key = b["prompt"]
-        row = {"prompt": key, "compared": b["compared"], "leading_match": b["leading_match"], "matching_positions": b["matching_positions"],
+    for idx, b in enumerate(bench):
+        key = idx
+        ref, chip = {idx: ref_items[idx]}, {idx: chip_items[idx]}
+        key = idx
+        row = {"prompt": b["prompt"], "compared": b["compared"], "leading_match": b["leading_match"], "matching_positions": b["matching_positions"],
                "matched_fully": b["leading_match"] >= b["compared"]}
         if not row["matched_fully"]:
             k = b["leading_match"]
@@ -41,6 +50,8 @@ def main():
             row["reference_gap"] = r["gap_top1_top2"]
             row["chip_top2"] = [{"id": t["id"], "text": t["text"], "logit": t["logit"]} for t in c["top"][:2]]
             row["chip_gap"] = c["gap_top1_top2"]
+            row["chip_top2_same_tokens_as_reference_top2"] = {t["id"] for t in c["top"][:2]} == {r1["id"], r2["id"]}
+            row["chip_exact_tie_in_top2"] = c["top"][0]["logit"] == c["top"][1]["logit"]
             row["chip_agrees_with_reference_top1_in_teacher_forcing"] = c["top"][0]["id"] == r1["id"]
             row["near_tie"] = r["gap_top1_top2"] <= NEAR_TIE_LOGITS
             # the chip's own values for the reference's two best tokens, when they are in its top five

@@ -82,7 +82,10 @@ class _Tensors:
 
     def __getitem__(self, name):
         with safe_open(self._where[name], framework="pt") as f:
-            return f.get_tensor(name)
+            # PACKAGING CHANGE (the only difference from the stage 3 port): `get_tensor` returns a tensor backed by the memory-mapped file. With the
+            # PyPI ttnn 0.80.0 wheel, `ttnn.from_torch` of such a tensor (the 200,029 x 2,048 embedding table) did not return in 120 s at 100 percent
+            # CPU (a server that loaded it never became ready in 25 minutes), and the source-built ttnn of the bring-up run took 0.26 s. A copy in ordinary memory uploads in 0.2 s with the wheel too.
+            return f.get_tensor(name).clone()
 
     def _slice(self, name):
         with safe_open(self._where[name], framework="pt") as f:

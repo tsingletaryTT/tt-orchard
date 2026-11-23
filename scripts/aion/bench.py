@@ -32,9 +32,10 @@ DECODE_PROMPTS = [
 ]
 DECODE_TOKENS = 64
 REPEATS = 3
+COUNTING = "\nCount from 1 to 100, separated by commas: 1, 2, 3,"
 FILLER = "The grass is green. The sky is blue. The sun is warm. Here we go again. "
-PREFILL_TARGETS = [128, 512, 2048, 8192]
-DECODE_AT = [512, 2048, 8192]        # prompt lengths for the decode rate with a long context: the port has no key-value cache, so each token runs the whole sequence again
+PREFILL_TARGETS = [128, 512, 2048, 6800]      # filler text gives about 1.12 tokens per target unit; 6800 gives a prompt under the 8192 limit (8192 gave 9101 tokens and a 400)
+DECODE_AT = [512, 2048, 6800]        # prompt lengths for the decode rate with a long context: the port has no key-value cache, so each token runs the whole sequence again
 DECODE_AT_TOKENS = 9              # one prefill token plus eight decode steps
 DECODE_AT_REPEATS = 2
 
@@ -94,7 +95,7 @@ def main():
     save()
     at = []
     for target in DECODE_AT:
-        text = FILLER * max(1, target // 18)
+        text = FILLER * max(1, target // 18) + COUNTING      # a counting prompt keeps the model going; a plain filler prompt ended after one token
         rates, ntok = [], None
         for _ in range(DECODE_AT_REPEATS):
             code, out = post(a.port, "/v1/completions", {"prompt": text, "max_tokens": DECODE_AT_TOKENS})

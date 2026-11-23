@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 
 FILLER = "The grass is green. The sky is blue. The sun is warm. Here we go again. "
-PASSKEYS = [("about 256", 256, "48217"), ("about 2048", 2048, "73905"), ("about 8192", 7800, "20653")]
+PASSKEYS = [("about 256", 256, "48217"), ("about 2048", 2048, "73905"), ("about 7800", 6800, "20653")]
 QUESTIONS = [("What is the capital of France? Answer in one word.", "paris"), ("What is 17 plus 25? Reply with just the number.", "42"),
              ("Which planet is known as the Red Planet? Answer in one word.", "mars"), ("What is the chemical symbol for water? Give the formula.", "h2o"),
              ("Name the author of the play Hamlet. Answer with the name only.", "shakespeare")]

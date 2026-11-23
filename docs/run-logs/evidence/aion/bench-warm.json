@@ -1,0 +1,138 @@
+{
+  "schema": "aion-1.0-instruct-2.3b-bench/1",
+  "cache_state": "warm",
+  "repeats": 3,
+  "load_before": [
+    2.154296875,
+    1.98974609375,
+    1.7001953125
+  ],
+  "started": "2026-11-23T01:45:34Z",
+  "first_request_s": 0.48,
+  "decode": {
+    "prompts": 5,
+    "new_tokens_each": 64,
+    "runs": 15,
+    "tok_s": {
+      "n": 15,
+      "min": 10.126,
+      "median": 11.344,
+      "max": 12.446
+    },
+    "tokens_per_run": {
+      "n": 15,
+      "min": 64,
+      "median": 64,
+      "max": 64
+    }
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 141,
+      "seconds": {
+        "n": 3,
+        "min": 0.22,
+        "median": 0.234,
+        "max": 0.236
+      },
+      "tok_s_median": 602.8
+    },
+    {
+      "prompt_tokens": 561,
+      "seconds": {
+        "n": 3,
+        "min": 0.656,
+        "median": 0.668,
+        "max": 0.709
+      },
+      "tok_s_median": 840.1
+    },
+    {
+      "prompt_tokens": 2261,
+      "seconds": {
+        "n": 3,
+        "min": 2.531,
+        "median": 2.54,
+        "max": 2.551
+      },
+      "tok_s_median": 890.1
+    },
+    {
+      "target": 8192,
+      "error": "400 {\"error\": {\"message\": \"the prompt is 9101 tokens and the context limit is 8192\"}}"
+    }
+  ],
+  "decode_at_length": [
+    {
+      "prompt_tokens": 561,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 2,
+        "min": 1.416,
+        "median": 1.437,
+        "max": 1.457
+      }
+    },
+    {
+      "prompt_tokens": 2261,
+      "new_tokens": 9,
+      "tok_s": {
+        "n": 0
+      }
+    },
+    {
+      "target": 8192,
+      "error": "400 {\"error\": {\"message\": \"the prompt is 9101 tokens and the context limit is 8192\"}}"
+    }
+  ],
+  "concurrency": {
+    "two_at_once_status_codes": [
+      200,
+      503
+    ],
+    "batching": "not supported: a second request gets 503 while one runs"
+  },
+  "load_after": [
+    2.7060546875,
+    2.63037109375,
+    2.0556640625
+  ],
+  "reference_match": [
+    {
+      "prompt": "The capital of France is",
+      "compared": 128,
+      "leading_match": 128,
+      "matching_positions": 128
+    },
+    {
+      "prompt": "Water boils at a temperature of",
+      "compared": 128,
+      "leading_match": 18,
+      "matching_positions": 20
+    },
+    {
+      "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+      "compared": 128,
+      "leading_match": 128,
+      "matching_positions": 128
+    },
+    {
+      "prompt": "In 1969, the first humans to walk on the",
+      "compared": 128,
+      "leading_match": 51,
+      "matching_positions": 51
+    },
+    {
+      "prompt": "<|system|>You are Aion Instruct, a large",
+      "compared": 128,
+      "leading_match": 6,
+      "matching_positions": 6
+    },
+    {
+      "prompt": "<|system|>You are Aion Instruct, a large",
+      "compared": 128,
+      "leading_match": 27,
+      "matching_positions": 127
+    }
+  ]
+}

@@ -197,7 +197,8 @@ def diag(tmp_path, **over):
            "first_difference_at_token_index": 1,
            "reference_top2": [{"id": 13, "text": ".", "logit": 9.3125}, {"id": 11, "text": ",", "logit": 9.25}], "reference_gap": 0.0625,
            "chip_top2": [{"id": 13, "text": ".", "logit": 9.25}, {"id": 11, "text": ",", "logit": 9.1875}], "chip_gap": 0.0625,
-           "near_tie": True, "reference_generate_choice": {"id": 11, "text": ","}, "reference_generate_choice_differs_from_its_full_forward_top1": True,
+           "near_tie": True, "chip_top2_same_tokens_as_reference_top2": True, "chip_exact_tie_in_top2": False,
+           "reference_generate_choice": {"id": 11, "text": ","}, "reference_generate_choice_differs_from_its_full_forward_top1": True,
            "served_repeats": {"runs": 6, "token_at_index": [13] * 6, "all_identical": True}}
     row.update(over)
     other = {"prompt": "Water", "compared": 32, "leading_match": 32, "matching_positions": 32, "matched_fully": True}
@@ -218,30 +219,31 @@ def render(tmp_path, diag_path):
     quality = {"near_tie_logits": 0.25, "prompts": [{"prompt": "p", "positions": 10, "top1_vs_reference_text": 1.0, "top1_vs_reference_top1": 1.0}],
                "total": {"positions": 10, "top1_vs_reference_text_fraction": 1.0, "top1_vs_reference_top1_fraction": 1.0, "misses": 0, "near_tie_misses": 0}}
     (tmp_path / "q.json").write_text(json.dumps(quality))
-    served = {"passkey": [{"length": "about 256", "prompt_tokens": 250, "found": True}], "chat": [{"question": "q", "expected": "x", "found": True}]}
+    served = {"passkey": [{"length": "about 256", "prompt_tokens": 250, "found": True}], "chat": [{"question": "q", "expected": "x", "found": True, "answer": "x"}]}
     (tmp_path / "served.json").write_text(json.dumps(served))
+    (tmp_path / "long.json").write_text(json.dumps({"load_before": [1, 1, 1], "load_after": [2, 2, 2], "prefill": [{"prompt_tokens": 7500, "seconds": spread, "tok_s_median": 700.0}],
+                                                   "decode_at_length": [{"prompt_tokens": 7500, "new_tokens": 9, "tok_s": spread}]}))
     (tmp_path / "harness.json").write_text(json.dumps({"benchmark": {"decode_tok_s": spread, "floor": {"floor_tok_s": 400.0}}}))
     out = tmp_path / "card.md"
     subprocess.run([sys.executable, str(ROOT / "scripts" / "aion" / "make_card.py"), "--warm", str(tmp_path / "bench.json"), "--cold", str(tmp_path / "cold.json"),
-                    "--cold-start-s", "100", "--warm-start-s", "50", "--quality", str(tmp_path / "q.json"), "--served", str(tmp_path / "served.json"),
+                    "--cold-start-s", "100", "--warm-start-s", "50", "--quality", str(tmp_path / "q.json"), "--served", str(tmp_path / "served.json"), "--long", str(tmp_path / "long.json"),
                     "--diag", str(diag_path), "--harness-result", str(tmp_path / "harness.json"), "--out", str(out)], check=True)
     return out.read_text()
 
 
 def test_the_near_tie_explanation_needs_the_records_to_back_it(tmp_path):
     good = render(tmp_path, diag(tmp_path))
-    assert "this difference is a near tie" in good and "the reference's own generation took" in good
+    assert "this difference is a near tie" in good and "the port's top two are the same two tokens" in good
 
 
 @pytest.mark.parametrize("over", [
-    {"chip_top2": [{"id": 11, "text": ",", "logit": 9.3}, {"id": 13, "text": ".", "logit": 9.2}]},                  # the chip ranks them the other way
-    {"chip_top2": [{"id": 13, "text": ".", "logit": 9.25}, {"id": 99, "text": "!", "logit": 9.1875}]},                # a different second token
-    {"reference_generate_choice": {"id": 13, "text": "."}, "reference_generate_choice_differs_from_its_full_forward_top1": False},   # no reversal
-    {"reference_generate_choice": {"id": 77, "text": "?"}, "reference_generate_choice_differs_from_its_full_forward_top1": True},   # a third token
+    {"chip_top2_same_tokens_as_reference_top2": False},                   # the port's top two are not the reference's top two
+    {"chip_gap": 1.5},                                                   # the port separates them by more than a bf16 tie
+    {"near_tie": False, "reference_gap": 3.0},                           # the reference separates them clearly
 ])
 def test_a_contradicted_explanation_is_reported_as_unexplained(tmp_path, over):
     card = render(tmp_path, diag(tmp_path, **over))
-    assert "this difference is a near tie" not in card and "the reference's own generation took" not in card
+    assert "this difference is a near tie" not in card and "the port's top two are the same two tokens" not in card
     assert "not explained" in card
 
 

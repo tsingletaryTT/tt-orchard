@@ -1,0 +1,69 @@
+{
+ "near_tie_logits": 0.25,
+ "prompts": [
+  {
+   "prompt": "The capital of France is",
+   "positions": 128,
+   "top1_vs_reference_text": 1.0,
+   "top1_vs_reference_top1": 1.0,
+   "misses": 0,
+   "near_tie_misses": 0,
+   "misses_ref_choice_in_port_top2": 0
+  },
+  {
+   "prompt": "Water boils at a temperature of",
+   "positions": 128,
+   "top1_vs_reference_text": 0.9609,
+   "top1_vs_reference_top1": 0.9688,
+   "misses": 5,
+   "near_tie_misses": 5,
+   "misses_ref_choice_in_port_top2": 5
+  },
+  {
+   "prompt": "def fibonacci(n): \"\"\"Return the n-th Fibonacci number.\"\"\"",
+   "positions": 128,
+   "top1_vs_reference_text": 1.0,
+   "top1_vs_reference_top1": 1.0,
+   "misses": 0,
+   "near_tie_misses": 0,
+   "misses_ref_choice_in_port_top2": 0
+  },
+  {
+   "prompt": "In 1969, the first humans to walk on the Moon were",
+   "positions": 128,
+   "top1_vs_reference_text": 0.9766,
+   "top1_vs_reference_top1": 0.9766,
+   "misses": 3,
+   "near_tie_misses": 3,
+   "misses_ref_choice_in_port_top2": 3
+  },
+  {
+   "prompt": "<|system|>You are Aion Instruct, a large language model trai",
+   "positions": 128,
+   "top1_vs_reference_text": 0.9844,
+   "top1_vs_reference_top1": 0.9844,
+   "misses": 2,
+   "near_tie_misses": 1,
+   "misses_ref_choice_in_port_top2": 1
+  },
+  {
+   "prompt": "<|system|>You are Aion Instruct, a large language model trai",
+   "positions": 128,
+   "top1_vs_reference_text": 0.9922,
+   "top1_vs_reference_top1": 0.9922,
+   "misses": 1,
+   "near_tie_misses": 1,
+   "misses_ref_choice_in_port_top2": 1
+  }
+ ],
+ "total": {
+  "positions": 768,
+  "top1_vs_reference_text": 757,
+  "top1_vs_reference_top1": 758,
+  "near_tie_misses": 10,
+  "misses": 11,
+  "misses_ref_choice_in_port_top2": 10,
+  "top1_vs_reference_text_fraction": 0.9857,
+  "top1_vs_reference_top1_fraction": 0.987
+ }
+}

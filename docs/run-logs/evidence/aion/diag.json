@@ -1,0 +1,199 @@
+{
+ "near_tie_logits": 0.25,
+ "prompts": [
+  {
+   "prompt": "The capital of France is",
+   "compared": 128,
+   "leading_match": 128,
+   "matching_positions": 128,
+   "matched_fully": true
+  },
+  {
+   "prompt": "Water boils at a temperature of",
+   "compared": 128,
+   "leading_match": 18,
+   "matching_positions": 20,
+   "matched_fully": false,
+   "first_difference_at_token_index": 18,
+   "reference_top2": [
+    {
+     "id": 1434,
+     "text": "50",
+     "logit": 16.75
+    },
+    {
+     "id": 16,
+     "text": "1",
+     "logit": 16.625
+    }
+   ],
+   "reference_gap": 0.125,
+   "chip_top2": [
+    {
+     "id": 16,
+     "text": "1",
+     "logit": 16.625
+    },
+    {
+     "id": 1434,
+     "text": "50",
+     "logit": 16.625
+    }
+   ],
+   "chip_gap": 0.0,
+   "chip_top2_same_tokens_as_reference_top2": true,
+   "chip_exact_tie_in_top2": true,
+   "chip_agrees_with_reference_top1_in_teacher_forcing": false,
+   "near_tie": true,
+   "reference_generate_choice": {
+    "id": 1434,
+    "text": "50"
+   },
+   "reference_generate_choice_differs_from_its_full_forward_top1": false,
+   "chip_logit_of_reference_top1": 16.625,
+   "chip_logit_of_reference_top2": 16.625
+  },
+  {
+   "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+   "compared": 128,
+   "leading_match": 128,
+   "matching_positions": 128,
+   "matched_fully": true
+  },
+  {
+   "prompt": "In 1969, the first humans to walk on the",
+   "compared": 128,
+   "leading_match": 51,
+   "matching_positions": 51,
+   "matched_fully": false,
+   "first_difference_at_token_index": 51,
+   "reference_top2": [
+    {
+     "id": 3613,
+     "text": " another",
+     "logit": 21.375
+    },
+    {
+     "id": 290,
+     "text": " the",
+     "logit": 21.25
+    }
+   ],
+   "reference_gap": 0.125,
+   "chip_top2": [
+    {
+     "id": 290,
+     "text": " the",
+     "logit": 21.375
+    },
+    {
+     "id": 3613,
+     "text": " another",
+     "logit": 21.25
+    }
+   ],
+   "chip_gap": 0.125,
+   "chip_top2_same_tokens_as_reference_top2": true,
+   "chip_exact_tie_in_top2": false,
+   "chip_agrees_with_reference_top1_in_teacher_forcing": false,
+   "near_tie": true,
+   "reference_generate_choice": {
+    "id": 3613,
+    "text": " another"
+   },
+   "reference_generate_choice_differs_from_its_full_forward_top1": false,
+   "chip_logit_of_reference_top1": 21.25,
+   "chip_logit_of_reference_top2": 21.375
+  },
+  {
+   "prompt": "<|system|>You are Aion Instruct, a large",
+   "compared": 128,
+   "leading_match": 6,
+   "matching_positions": 6,
+   "matched_fully": false,
+   "first_difference_at_token_index": 6,
+   "reference_top2": [
+    {
+     "id": 326,
+     "text": " and",
+     "logit": 21.875
+    },
+    {
+     "id": 306,
+     "text": " in",
+     "logit": 21.75
+    }
+   ],
+   "reference_gap": 0.125,
+   "chip_top2": [
+    {
+     "id": 326,
+     "text": " and",
+     "logit": 21.375
+    },
+    {
+     "id": 306,
+     "text": " in",
+     "logit": 21.375
+    }
+   ],
+   "chip_gap": 0.0,
+   "chip_top2_same_tokens_as_reference_top2": true,
+   "chip_exact_tie_in_top2": true,
+   "chip_agrees_with_reference_top1_in_teacher_forcing": true,
+   "near_tie": true,
+   "reference_generate_choice": {
+    "id": 326,
+    "text": " and"
+   },
+   "reference_generate_choice_differs_from_its_full_forward_top1": false,
+   "chip_logit_of_reference_top1": 21.375,
+   "chip_logit_of_reference_top2": 21.375
+  },
+  {
+   "prompt": "<|system|>You are Aion Instruct, a large",
+   "compared": 128,
+   "leading_match": 27,
+   "matching_positions": 127,
+   "matched_fully": false,
+   "first_difference_at_token_index": 27,
+   "reference_top2": [
+    {
+     "id": 6318,
+     "text": " Return",
+     "logit": 24.25
+    },
+    {
+     "id": 9609,
+     "text": " Returns",
+     "logit": 24.125
+    }
+   ],
+   "reference_gap": 0.125,
+   "chip_top2": [
+    {
+     "id": 9609,
+     "text": " Returns",
+     "logit": 24.25
+    },
+    {
+     "id": 6318,
+     "text": " Return",
+     "logit": 24.125
+    }
+   ],
+   "chip_gap": 0.125,
+   "chip_top2_same_tokens_as_reference_top2": true,
+   "chip_exact_tie_in_top2": false,
+   "chip_agrees_with_reference_top1_in_teacher_forcing": false,
+   "near_tie": true,
+   "reference_generate_choice": {
+    "id": 6318,
+    "text": " Return"
+   },
+   "reference_generate_choice_differs_from_its_full_forward_top1": false,
+   "chip_logit_of_reference_top1": 24.125,
+   "chip_logit_of_reference_top2": 24.25
+  }
+ ]
+}

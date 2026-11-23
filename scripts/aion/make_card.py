@@ -12,6 +12,7 @@ of it, as for the Olmo card. The card carries no bring-up history and no opinion
 """
 import argparse
 import json
+import unicodedata
 
 NAME = "aion-1.0-instruct-2.3b-blackhole"
 BASE = "microsoft/Aion-1.0-Instruct-2.3B"
@@ -34,7 +35,10 @@ def main():
     ap.add_argument("--cold-start-s", type=float, required=True)
     ap.add_argument("--warm-start-s", type=float, required=True)
     ap.add_argument("--quality", required=True)
-    ap.add_argument("--served", required=True)
+    ap.add_argument("--served", required=True, help="SERVED.json of served_checks.py (the one the card's passkey and chat tables come from)")
+    ap.add_argument("--chat", help="bench_chat.py record taken on a quiet host: the decode rate through the chat route")
+    ap.add_argument("--boot-rate", type=float, help="decode tok/s of the 64-token chat answer in the can boot check (cold kernel cache, one run)")
+    ap.add_argument("--long", required=True, help="bench_long.py record: the long-prompt prefill and the decode rate with a long context")
     ap.add_argument("--diag", required=True)
     ap.add_argument("--harness-result", required=True)
     ap.add_argument("--out", required=True)
@@ -44,16 +48,28 @@ def main():
     hb = h["benchmark"]["decode_tok_s"]
     t = q["total"]
     dec = w["decode"]["tok_s"]
-    prefill = [p for p in w["prefill"] if "seconds" in p]
-    prefill_err = [p for p in w["prefill"] if "error" in p]
-    at = [p for p in w.get("decode_at_length", []) if "tok_s" in p]
+    lg = json.load(open(a.long))
+    prefill = [p for p in lg["prefill"] if "seconds" in p]          # prefill and long-context rows are from one session of bench_long.py, taken quiet
+    prefill_err = [p for p in lg["prefill"] if "error" in p]
+    at = [p for p in lg.get("decode_at_length", []) if "tok_s" in p and p["tok_s"]["n"]]
+    at_missing = [p for p in lg.get("decode_at_length", []) if "error" in p or not p.get("tok_s", {}).get("n")]
+    longest = max([p["prompt_tokens"] for p in prefill] + [r["prompt_tokens"] or 0 for r in sv["passkey"]])
 
+    chat_text = ""
+    if a.chat:
+        ch = json.load(open(a.chat))
+        chat_text = (f"Through the chat route every prompt starts with a system header of about 40 tokens, so the context is longer at the same answer length. Five prompts that ask for a paragraph, "
+                     f"{ch['tok_s']['n'] // 5} runs each, 64 new tokens, prompts of {ch['prompt_tokens']['min']} to {ch['prompt_tokens']['max']} tokens, warm kernel cache, host load {load_text(ch)}: "
+                     f"decode median {ch['tok_s']['median']:.2f} tok/s (min {ch['tok_s']['min']:.2f}, max {ch['tok_s']['max']:.2f}, {ch['tok_s']['n']} runs). ")
+        if a.boot_rate:
+            chat_text += f"The boot check's single 64-token chat answer, on an empty kernel cache, ran at {a.boot_rate:.2f} tok/s. "
+        chat_text += "\n\n"
     # --- tables -----------------------------------------------------------------------------------------------------------------
     speed = ["| measure | context (prompt tokens) | new tokens | N | value |", "| --- | ---: | ---: | ---: | --- |",
-             f"| decode, batch 1 | about 10 to 20 (5 prompts) | {w['decode']['new_tokens_each']} | {dec['n']} | median {dec['median']:.2f} tok/s (min {dec['min']:.2f}, max {dec['max']:.2f}) |"]
+             f"| decode, batch 1 | 5 to 14 (5 prompts) | {w['decode']['new_tokens_each']} | {dec['n']} | median {dec['median']:.2f} tok/s (min {dec['min']:.2f}, max {dec['max']:.2f}) |"]
     for p in at:
         s = p["tok_s"]
-        speed.append(f"| decode, batch 1 | {p['prompt_tokens']} | {p['new_tokens']} | {s['n']} | median {s['median']:.2f} tok/s (min {s['min']:.2f}, max {s['max']:.2f}) |")
+        speed.append(f"| decode, batch 1 | {p['prompt_tokens']} | {p['new_tokens']} | {s['n']} | median {s['median']:.3f} tok/s (min {s['min']:.3f}, max {s['max']:.3f}) |")
     for p in prefill:
         s = p["seconds"]
         speed.append(f"| prefill (time to the end of the prompt) | {p['prompt_tokens']} | 1 | {s['n']} | median {s['median']:.2f} s (min {s['min']:.2f}, max {s['max']:.2f}), {p['tok_s_median']:.0f} tok/s |")
@@ -68,6 +84,7 @@ def main():
     for r in sv["passkey"]:
         pk.append(f"| {r['length']} tokens | {r['prompt_tokens']} | {'yes' if r['found'] else 'no'} |")
     chat_found = sum(1 for r in sv["chat"] if r["found"])
+    chat_found_nfkc = sum(1 for r in sv["chat"] if r["expected"] in unicodedata.normalize("NFKC", r["answer"]).lower())          # H2O written with a subscript two
     free = ["| prompt | tokens compared | free run |", "| --- | ---: | --- |"]
     ex = ""
     for r in dg["prompts"]:
@@ -77,15 +94,17 @@ def main():
             continue
         r1, r2 = r["reference_top2"]
         c1, c2 = r["chip_top2"]
-        gen = r.get("reference_generate_choice") or {}
-        same_order = c1["id"] == r1["id"] and c2["id"] == r2["id"]
-        reversal = gen.get("id") == r2["id"] and bool(r.get("reference_generate_choice_differs_from_its_full_forward_top1"))
-        if r["near_tie"] and same_order and reversal:
-            ex += (f"\nFirst difference of `{' '.join(r['prompt'].split())[:40]}` (token {r['first_difference_at_token_index']}): the reference's full forward ranks {r1['text']!r} above {r2['text']!r} by "
-                   f"{r['reference_gap']} logits, the port ranks the same two tokens in the same order, and the reference's own generation took {r2['text']!r}. A gap that small is within "
-                   f"bf16 rounding, so this difference is a near tie.\n")
+        label = " ".join(r["prompt"].split())[:40]
+        # Written only when the records back every part of it: the reference's gap between its top two is within a bf16 tie, the port ranks the same
+        # two tokens first and second, and the port's own gap between them is within the same tie (it may be zero: equal logits).
+        explained = bool(r["near_tie"] and r.get("chip_top2_same_tokens_as_reference_top2") and r["chip_gap"] <= dg["near_tie_logits"])
+        if explained:
+            ex += (f"\nFirst difference of `{label}` (token {r['first_difference_at_token_index']}): the reference's logits for {r1['text']!r} and {r2['text']!r} are {r1['logit']} and {r2['logit']} "
+                   f"(a gap of {r['reference_gap']}), and the port's top two are the same two tokens, {c1['text']!r} at {c1['logit']} and {c2['text']!r} at {c2['logit']} (a gap of {r['chip_gap']}"
+                   + ("; equal logits, so which of them greedy decoding takes depends on how the tie is broken" if r.get("chip_exact_tie_in_top2") else "")
+                   + f"). A gap that small is within bf16 rounding (neighbouring bf16 values near 20 are 0.125 apart), so this difference is a near tie.\n")
         else:
-            ex += (f"\nFirst difference of `{' '.join(r['prompt'].split())[:40]}` (token {r['first_difference_at_token_index']}): the records do not support an explanation, so it is not explained.\n")
+            ex += (f"\nFirst difference of `{label}` (token {r['first_difference_at_token_index']}): the records do not support an explanation, so it is not explained.\n")
 
     card = f"""---
 tags:
@@ -118,7 +137,7 @@ Packaged with tt-model-manager 0.1.0 (manifest schema 6).
 | --- | --- |
 | Architecture | decoder-only transformer, 28 layers, 21 sliding-window and 7 full attention, YaRN rotary scaling on the full-attention layers |
 | Parameters | 2.3 billion |
-| Context | 32,768 tokens in the model; this server accepts up to 8,192 (prompt plus answer) by default, the longest length checked |
+| Context | 32,768 tokens in the model; this server accepts up to 8,192 (prompt plus answer) by default; the longest prompt measured was {longest:,} tokens |
 | Hardware | p300x2 (four Blackhole chips, mesh 1x4) |
 | Precision on the chips | bfloat16, one full copy of the model on each chip |
 | Decoding | greedy by default; `temperature`, `top_p` and `seed` are honoured |
@@ -133,7 +152,8 @@ Question answering, summarization, rewriting and chat in the model's eight langu
 - The [Tenstorrent CLI](https://github.com/tenstorrent/tt-cli/blob/main/docs/prerequisites.md), `tt`: `uv tool install tenstorrent` (or use tt-model alone, see the Quickstart)
 - Tenstorrent hardware: **p300x2**, or any machine where four Blackhole chips are free
 - 1 GB hugepages mounted at `/dev/hugepages-1G`
-- About 6 GB of free disk for the checkpoint, plus the Python environment `install.sh` builds
+- SFPI 7.85.0 or newer on the host (the version `ttnn` 0.80.0 declares). `install.sh` stops with a message when the host's SFPI is older. The figures below were taken with SFPI 7.85.0, tt-kmd 2.11.0 and Blackhole firmware bundle 19.17.1
+- About 8 GB of free disk: the checkpoint (4.6 GB), the Python environment `install.sh` builds (1.9 GB) and the compiled-kernel cache (1.4 GB after the runs below)
 
 ## Quickstart
 
@@ -166,11 +186,11 @@ curl -s http://127.0.0.1:20180/v1/chat/completions -H 'Content-Type: application
 
 ## Expected performance
 
-Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was {load_text(w)} the decode and prefill runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host.
+Measured through this bundle's own `run.sh` on four Blackhole chips (two p300 boards) with `ttnn` 0.80.0, one request at a time, greedy decoding, wall time through the server, warm kernel cache. Each figure is the median of the runs stated in the N column. The host load average (1, 5 and 15 minutes) was {load_text(w)} the short-prompt decode runs. The port runs part of its work on the host CPU, so the decode rate falls when other jobs use the host. The load average also rises because of the server itself: during the long-prompt runs below it was {load_text(lg)}, because the host work uses many cores, so a load average above 1 does not by itself mean another job was running.
 
 {chr(10).join(speed)}
 {('Prefill sizes that did not complete: ' + '; '.join(str(e) for e in prefill_err)) if prefill_err else ''}
-The port has no key-value cache: each new token runs the whole sequence again, so the time per token grows with the length of the prompt and the answer together, as the rows with a longer context show. The in-process decode benchmark of the bring-up harness, which ran on one prompt with 32 steps and no server, gave a median of {hb['median']:.1f} tok/s (min {hb['min']:.1f}, max {hb['max']:.1f}, {hb['n']} runs). A second measurement run, started with an empty kernel cache, gave a served decode median of {c['decode']['tok_s']['median']:.2f} tok/s (min {c['decode']['tok_s']['min']:.2f}, max {c['decode']['tok_s']['max']:.2f}, {c['decode']['tok_s']['n']} runs; host load {load_text(c)}); its first request took {c['first_request_s']} s. The two runs ran at different times with other jobs on the host, so the difference between their medians says nothing about the kernel cache.
+{chat_text}The port has no key-value cache: each new token runs the whole sequence again, so the time per token grows with the length of the prompt and the answer together, as the rows with a longer context show. The in-process decode benchmark of the bring-up harness, which ran on one prompt with 32 steps and no server, gave a median of {hb['median']:.1f} tok/s (min {hb['min']:.1f}, max {hb['max']:.1f}, {hb['n']} runs). A second measurement run, started with an empty kernel cache, gave a served decode median of {c['decode']['tok_s']['median']:.2f} tok/s (min {c['decode']['tok_s']['min']:.2f}, max {c['decode']['tok_s']['max']:.2f}, {c['decode']['tok_s']['n']} runs; host load {load_text(c)}); its first request took {c['first_request_s']} s. The two runs ran at different times, so the difference between their medians says nothing about the kernel cache.
 
 Accuracy against the model's own implementation, run on the CPU in bf16 (transformers, custom code of the pinned revision), on exactly the same token ids. For each prompt the reference generated 128 tokens greedily, and both implementations then read the same text one position at a time:
 
@@ -190,14 +210,14 @@ Served checks (greedy, chat route): a passkey hidden in filler text and five sho
 
 {chr(10).join(f"- `{r['question']}` expected `{r['expected']}`: {'found' if r['found'] else 'not found'}" for r in sv['chat'])}
 
-Questions answered with the expected fact: {chat_found} of {len(sv['chat'])}. The substring check cannot tell a good answer from a lucky one.
+Questions answered with the expected fact by the plain substring check: {chat_found} of {len(sv['chat'])}. {('The miss is the formula for water, which the model wrote with a subscript two (H₂O) where the check looked for H2O; after Unicode compatibility normalisation of the answer the count is ' + str(chat_found_nfkc) + ' of ' + str(len(sv['chat'])) + '.') if chat_found_nfkc != chat_found else ''} The substring check cannot tell a good answer from a lucky one.
 
 ## Limitations
 
-- Four chips are needed, and each chip holds a full copy of the model: the other three chips add no speed. One request runs at a time; a request that arrives while one is running gets `503`.
+- Four chips are needed. Each chip holds a full copy of the model and runs the same work; this package was measured on four chips only, and it makes no claim that the extra chips make it faster. One request runs at a time; a request that arrives while one is running gets `503`.
 - Decode speed is modest. The measured rate is far below the memory-bandwidth limit of the boards (the harness's in-process median is {hb['median'] / h['benchmark']['floor']['floor_tok_s'] * 100:.1f} percent of an estimated floor of {h['benchmark']['floor']['floor_tok_s']:.0f} tok/s for decode with one token in flight, assuming bf16 weights), and it falls as the context grows (see the rows above), because the port has no key-value cache and runs the whole sequence again for every token.
 - The decode rate depends on host load, because part of the work runs on the host CPU.
-- Prompt plus answer is limited to {8192:,} tokens by default (`AION_MAX_LEN`). The model supports 32,768 tokens; lengths above 8,192 were not checked on the chips.
+- Prompt plus answer is limited to 8,192 tokens by default (`AION_MAX_LEN`). The longest prompt measured was {longest:,} tokens. The model supports 32,768 tokens; lengths above {longest:,} tokens were not checked on the chips.
 - Only the sliding-window mask, rotary scaling and attention paths exercised by the checks above were verified. Quality on other prompts, other languages, sampled decoding, long generations and tool use was not evaluated. Tool calls and the model's tool format are not supported.
 - Greedy decoding was used for every number here.
 - Message text with control tokens is refused (see Capabilities). The server has no sign-in, no TLS and no rate limit. It binds 127.0.0.1 by default; `HOST=0.0.0.0` listens on every interface, which is only for a network you trust.
@@ -222,7 +242,7 @@ Questions and reports: the Discussions tab of this repository, or support@tensto
 | component | built from |
 | --- | --- |
 | weights | `{BASE}` at `{REV}`, downloaded at first start, not in this bundle |
-| port | `extra_code/aion_port.py`, generated by the tt-orchard bring-up harness and checked against the CPU reference |
+| port | `extra_code/aion_port.py`, generated by the tt-orchard bring-up harness and checked against the CPU reference. One change was made for this bundle: the tensor reader copies each tensor out of the memory-mapped checkpoint (`.clone()`), because with the PyPI `ttnn` 0.80.0 wheel, `ttnn.from_torch` of a memory-mapped tensor (the embedding table) did not return in 120 s, while a copy uploads in 0.2 s |
 | server | `extra_code/aion_asgi.py` (ASGI app served by uvicorn) |
 | runner | `aion_model.py` at the bundle root, which re-exports the app for tt-model's packager |
 | bring-up and measurement records | `docs/run-logs/2026-11-22-aion-can.md` and `docs/run-logs/evidence/aion/` in the tt-orchard repository |

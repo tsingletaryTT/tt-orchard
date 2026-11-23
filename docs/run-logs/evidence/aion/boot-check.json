@@ -1,0 +1,55 @@
+{
+  "name": "aion-1.0-instruct-2.3b-blackhole",
+  "checks": {
+    "bundle_copy": {
+      "ok": true,
+      "detail": "the copy matches the bundle"
+    },
+    "health": {
+      "ok": true,
+      "detail": "200 from /health"
+    },
+    "models": {
+      "ok": true
+    },
+    "chat": {
+      "ok": true,
+      "detail": "status 200; expected /Paris/"
+    },
+    "decode_rate": {
+      "ok": true,
+      "detail": "3.7142 tok/s reported over 64 tokens; at least 1.0 wanted"
+    },
+    "stream": {
+      "ok": true,
+      "detail": "status 200; the event stream ends with [DONE]"
+    },
+    "health_after": {
+      "ok": true
+    },
+    "log contains \"event\": \"ready\"": {
+      "ok": true
+    },
+    "log contains \"mesh\": \"1x4\"": {
+      "ok": true
+    }
+  },
+  "passed": true,
+  "server_pid": 992289,
+  "ready_s": 18.0,
+  "answer": "Paris",
+  "timings": {
+    "prompt_tokens": 51,
+    "prefill_s": 6.9907,
+    "completion_tokens": 1,
+    "decode_s": 0.094,
+    "decode_tok_s": null
+  },
+  "rate_timings": {
+    "prompt_tokens": 51,
+    "prefill_s": 0.093,
+    "completion_tokens": 64,
+    "decode_s": 16.9617,
+    "decode_tok_s": 3.7142
+  }
+}
