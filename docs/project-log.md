@@ -5909,6 +5909,7 @@ Settled from the issue's list. Size: at 4,000 positions the sampled file is 64 K
 Not settled. The CPU time of a 4,000-token reference on a 2B and a 7B model was not measured: the suite was running and chips and the CPU stand-in were not to be touched, so the README says "not yet measured". The cached sampling loop was checked on a tiny random Qwen2 only (its log-probabilities equal an uncached forward pass to 5e-7); it was not run on a hybrid model such as Olmo-Hybrid-7B or Aion, whose caches may not return `past_key_values` the way the loop expects (the failure would be recorded as a skipped reference and the stage would not fail). The second chip pass was run against the fake `ttnn` only. If a sampled token is the end-of-sequence token the loop continues past it.
 
 Checks. 79 new tests (18 in `tests/test_reference_fidelity_tokens.py`, 43 in `tests/test_port_check_sampled_fidelity.py`, 12 in `tests/test_fidelity_tokens_option.py`, 1 in `tests/test_run_view.py`, 5 in `tests/test_port_check_fidelity.py`, plus helpers in `tests/port_check_fakes.py`); 41 mutations across the stage 1 script, the stage 2 template, the gate and the option wiring, all red once two weak tests were fixed (the cache test used a tolerance of 0.15 and let a loop with no cache pass; the gate's call site had no test through `gate_full_port`).
+
 ## 2026-11-22: text corrected to match what the runs showed (claims-match-reality)
 Prompt (operator): "update literature and instructions and claims to match realities." This entry changes text only. No code changed.
 
