@@ -6060,3 +6060,13 @@ findings did not hold. Not done and owed: a run of `speech-check` against a real
 duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
+
+## 2026-11-23, speech route (branch speech-route)
+
+Operator: "1 YES!" to a real speech route, and on the licence "we aren't going to distribute the model itself right? just enable those to use it and they'll be under the terms. we carry the model's terms as best we can. it's not our work, just a little packaging".
+A run started with `tt-orchard bringup MODEL --speech-clips DIR` on `mistralai/Voxtral-Mini-3B-2507` or `mistralai/Voxtral-4B-TTS-2603` now takes the speech route (`orchard/speech_route.py`, `SPEECH_TABLE` in
+`orchard/stages.py`): stage 0 reads the bundle table, stage 1 records a CPU reference in the reference interpreter, stage 2 serves the published bundle under a one-board lease, checks it with the `speech-check` functions, saves
+every answer and stops it, and stage 8 builds the operator bundle. No coder boots, stages 3 to 7 are skipped, and no code path packages or uploads weights (a test reads the route's code for it). Each stage's gate recomputes its numbers
+from the saved clips, audio and transcripts. Every record and the operator bundle carry the bundle's licence as the card states it. The pattern is the text-runtime route's, not the scoring route's: a speech run has no port module for a check to
+run on. Details, bars and what is owed: `docs/run-logs/2026-11-23-speech-route.md` and `docs/superpowers/specs/2026-11-23-speech-route-design.md`. Not run on a chip; the reference producer has not run on real weights; the bars are provisional.
+
