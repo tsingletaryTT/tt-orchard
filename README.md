@@ -1062,6 +1062,25 @@ DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and
 two measured points (bfp8 9.991, bfp4 9.821 on one 7B port; docs/project-log.md, issue 731). A score below the bar removes the row. Without a score,
 a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`.
 
+#### Before a download, for a mixture-of-experts model: `tt-orchard tier-plan`
+
+`tt-orchard tier-plan SOURCE` answers the question the plan command answers, but from the model's `config.json` alone, so it can run before the
+checkpoint is on disk. SOURCE is a Hugging Face repository id (only `config.json` and `model.safetensors.index.json` are fetched, with no token and
+no weight file), a `config.json`, or a directory that holds one. It prints, for 1, 2 and 4 chips (`--chips 1,2,4`) and each weight format mix, a
+verdict: **fits on chips** (replicated, or with the experts split over the chips), **fits with host experts** (the always-resident weights and as many
+experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
+chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
+on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
+with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. A second table gives the layout of
+the published hybrid bundles, whole layers on the chips and only the other layers' experts in host memory. `--host-free-gib` marks a row that needs more
+host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change the chip memory, the per-chip reserve and the KV cache allowance, and
+`--json` prints every number with its source (config-derived, assumed constant, estimate or the caller's flag). The command measures neither speed nor
+quality, and the host path for experts is not written yet (issue 739, step 3). A dense model is refused with a pointer to `tt-orchard plan`, and a
+model whose layers the parameter count does not know is reported as an unknown family. When the config names hyper-connections, a sparse-attention indexer,
+a hashed n-gram embedding, a multi-token-prediction layer or a vision tower, the count leaves them out, the command says so, and the always-resident
+figure is printed as a lower bound.
+The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`.
+
 ### 4.1 Before you start
 
 - `gozer status` shows every chip `FREE` and no other lease.

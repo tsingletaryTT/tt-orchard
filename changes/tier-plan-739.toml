@@ -1,0 +1,2 @@
+target = "0.9.195"
+summary = "tt-orchard tier-plan: from a mixture-of-experts model's config alone, say which precision and expert placement fit on 1, 2 and 4 chips and what host memory the rest would need (issue 739, step 1)."
