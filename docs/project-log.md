@@ -6036,3 +6036,26 @@ note said to wait for the llama.cpp backend while Tenstorrent now ships hybrid-o
 `orchard/cli.py` passes only `--chips`, `--chip-gib`, `--weight-share` and `--json` through, so `--fidelity-bfp4` and `--fidelity-tokens` are accepted
 by the parser and then ignored when the command runs through `tt-orchard`.
 Addition (operator): `sunandbean/qwen3.8-flash-next-p100a` was added as a second reference (table in the run log). The count is right for the parts it reads, the config names five features it leaves out (hyper-connections, the indexer, the n-gram embedding, the draft layer, the vision tower), so the command lists them and marks the always-resident figure a lower bound. The plan's host figure for that port is 1.6 to 1.9 times the card's because the plan has no input for the host format.
+
+## 2026-11-23: Voxtral speech models, `speech-model` preflight block and `tt-orchard speech-check` (branch voxtral-speech)
+
+Operator: "the voxtral's sound worth trying to make tt-orchard aware and understand how to work with. with that kind of focus, go ahead. use the coder model
+as needed to look at it and work on it." Two Voxtral models have published Tenstorrent bundles: Voxtral-Mini-3B-2507 (speech to text) and Voxtral-4B-TTS-2603
+(text to speech). Before this change the preflight treated the Mini model as text (a warning that its card names no base model, then the text stages) and
+blocked the TTS model on `Ministral-3-3B-Base-2512`, a text model no bundle serves. Neither row said that these are speech models. The baseline, the
+components of each model (what is on the chip and what is on the host, with the source of each fact), the endpoints, the licences and the way each card
+measured quality are in `docs/run-logs/2026-11-23-voxtral-speech-models.md`.
+What was built: `orchard/speech_models.py` recognises a speech model from the Hub's pipeline tag, then the tag list, then the architecture name
+`VoxtralForConditionalGeneration` (the upstream Mini card has no tag), and holds a two-row table of the known bundles. The base row for a speech model is
+a block with the reason `speech-model` (added to `CLASSIFICATION_BLOCKS`): it says the harness has no speech stage, names the bundle and its endpoints,
+notes that the TTS licence is non-commercial, and names the check command. `tt-orchard speech-check URL --task speech-to-text|text-to-speech` checks a
+running server: transcription of clips with a stated word error rule, speech requests with WAV rules (24 kHz, 16-bit, mono, audible, 0.02 to 0.4 seconds
+per character), optional streaming and optional transcription through a second server, and a 4xx check for malformed requests. The address needs a port,
+must be on this machine, and may not use 8000 or 8100 to 8103; redirects are not followed. It opens no device. No speech kind was added to
+`model_kind.py` or `audio_facts.py`: a speech model never reaches stage 0, so no record would be read.
+Test first: 201 tests (39 and 162). Sixty-one mutations each turned a test red; the first pass of 57 left five green (a dead guard, a test that could not
+fail, the timeout message, `--max-wer` validation, the JSON exit code), and each was fixed. The coder was asked once to review the new command; its six
+findings did not hold. Not done and owed: a run of `speech-check` against a real bundle on a chip (the fakes copy what the bundles' code does, and the
+duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
+separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
+One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).

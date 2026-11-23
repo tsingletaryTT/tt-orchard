@@ -17,6 +17,7 @@
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
+    tt-orchard speech-check URL --task speech-to-text|text-to-speech [--clip FILE --expect TEXT ...] [--text TEXT] [--voice NAME] [--stream] [--asr-url URL] [--max-wer F] [--json]
     tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
@@ -277,6 +278,9 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import tier_plan as _tier_plan
     sub.add_parser("tier-plan", parents=[common, _tier_plan.parser(add_help=False)],
                    help="what precision and expert placement a mixture-of-experts model needs on 1, 2 or 4 chips, from its config alone (reads two small files, read-only)")
+    from orchard import speech_check as _speech_check
+    sub.add_parser("speech-check", parents=[common, _speech_check.parser(add_help=False)],
+                   help="check a running speech server on this machine: transcribe known clips, or request speech and check the audio (no device, no lease)")
     sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
                    help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
     dwp = sub.add_parser("drop-watch", parents=[common],
@@ -906,6 +910,8 @@ def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, 
 
 
 def _base_help(check, model: str, out) -> None:
+    if (check.data or {}).get("speech"):
+        return              # the row names the bundle that serves a speech model and the command that checks it
     if (check.data or {}).get("audio"):
         return              # the bundle help does not apply: an audio model needs no bundle, and its row says what it needs
     cands = (check.data or {}).get("candidates") or []
@@ -1288,6 +1294,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "tier-plan":
         from orchard import tier_plan as _tier_plan_mod
         return _tier_plan_mod.run(args, out)
+    if args.cmd == "speech-check":
+        from orchard import speech_check as _speech_check_mod
+        return _speech_check_mod.run(args, out)
     if args.cmd == "drop-check":
         from orchard import drop_check
         try:

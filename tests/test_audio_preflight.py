@@ -432,7 +432,8 @@ def test_the_base_is_looked_up_once_for_the_row_and_the_disk(tmp_path):
 
 def test_a_text_to_speech_model_is_not_audio_for_this_rule(tmp_path):
     by = rows(tmp_path, world(local=full_snaps(tmp_path), pipeline="text-to-speech"))
-    assert by["base"].reason == "nearest-model-missing"
+    # Not audio: the audio track does not take it. A speech model has its own row now (orchard/speech_models.py), which blocks because no stage handles it.
+    assert by["base"].reason == "speech-model" and not (by["base"].data or {}).get("audio")
 
 
 def test_a_model_whose_hub_lookup_failed_is_not_audio_even_with_a_local_audio_layout(tmp_path):

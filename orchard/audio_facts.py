@@ -70,7 +70,7 @@ def serving_of(base_repo, installed) -> str:
 # Limits. Anything unclear is "not audio", which keeps the old behaviour (the base row asks for an installed bundle): unknown tags, a file list
 # that cannot be read, both config files present, a hub lookup that failed. The rule says nothing about whether the files are valid:
 # stage 0 reads `model_config.json` and refuses what it cannot parse. Speech models (`text-to-speech`, `automatic-speech-recognition`) are
-# not in scope and are served by other paths.
+# not in scope here: orchard/speech_models.py recognises them and the preflight blocks with `speech-model`.
 
 AUDIO_PIPELINE_TAGS = ("text-to-audio", "audio-to-audio")
 AUDIO_CONFIG, TEXT_CONFIG = "model_config.json", "config.json"

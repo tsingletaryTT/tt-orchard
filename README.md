@@ -1081,6 +1081,20 @@ a hashed n-gram embedding, a multi-token-prediction layer or a vision tower, the
 figure is printed as a lower bound.
 The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`.
 
+#### Speech models: `tt-orchard speech-check`
+
+A speech model takes speech in and gives text, or takes text and gives speech. The harness has no stage for either, so a preflight for one ends with a
+block (`speech-model`) that names the model's task, the published bundle that serves it (known for the two Voxtral bundles on 2026-11-23) and the
+command below. `tt-orchard speech-check URL --task speech-to-text --clip FILE --expect TEXT` transcribes each clip on a running server and passes it
+when the word error rate against the expected text is at most `--max-wer` (default 0.10). `--task text-to-speech` requests speech and checks that
+the answer is a WAV at the expected sample rate (24000), 16-bit, mono, audible, and between 0.02 and 0.4 seconds long for each character of the
+text; `--voice` (repeatable) tries voices, `--stream` checks the raw PCM stream, and `--asr-url` sends the speech to a speech-to-text server on this
+machine and compares the words (default limit 0.15). Both tasks also check `/health`, `/v1/models` and that a malformed request gets a 4xx answer.
+The server must be on this machine, the port is required (nothing is assumed), and ports 8000 and 8100 to 8103 are refused. The command opens no
+device and takes no lease; start the bundle with `tt-model serve` under a gozer lease first. `--json` prints every check with its measured values and
+the rule it applied. The note on the two bundles is `docs/run-logs/2026-11-23-voxtral-speech-models.md`; the command has not yet been run against a
+real bundle on a chip.
+
 ### 4.1 Before you start
 
 - `gozer status` shows every chip `FREE` and no other lease.
