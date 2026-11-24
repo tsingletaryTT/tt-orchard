@@ -6071,3 +6071,29 @@ read so far are kept and one ledger decision, `the evidence scan stopped`, names
 10 tests (a fake `os.scandir` that serves 300,000 entries, a tree deeper than the bound, links, a linked evidence directory, the once-per-step note, the order) and
 10 mutations each turn a test red. Still open under #457: `port_facts.copy_skeleton` (writes by path) and `scoring_check._source_reasons` (an unbounded scan); the
 fingerprint's read-beneath change is also listed in the issue. The issue stays open.
+## 2026-11-23: the hardware-phase decision records what `decide_park` saw (issue 591, branch park-decision-facts-591)
+
+Run 24b parked the coder with `free_boards=[]` while `gozer status` showed two chips FREE, and the ledger held only the board lists, so the cause was not
+readable afterwards. The three "hardware phase" decisions in `supervisor.py` (the plain phase, the wide phase and stage 4's plan) now carry `board_facts`
+from `handoff.decision_facts`: each board's chips with state and `who`, whether the coder's lease holds the board, the reason a board was not counted free
+(the coder holds it, a named chip is busy, a FREE chip lists a `who`, or the chips have no board serial) and the chips that look FREE on a board that was not counted free.
+`decide_park` and the facts share one rule (`_busy_chip`), so they cannot disagree. The decision itself is unchanged. This does not find the cause of run 24b;
+it makes the next occurrence readable from the ledger alone. 11 tests (`tests/test_park_decision_facts_591.py`) and 11 mutations (the rule, the coder flag, the
+free-chip list, the stringified `who`, and each of the three wirings) each turn a test red. The issue stays open: it needs a second occurrence to confirm a cause.
+## 2026-11-23: the named bundle's files are recorded at the start and compared at stages 2 and 4 (issue 662, branch record-bundle-capabilities-digest-662)
+
+Stage 0 judges a model against the named bundle's `orchard-capabilities.json`, and nothing showed whether the bundle changed between stage 0 and stage 2
+(`tt-model pull --force`, a hand edit). `tt-orchard bringup` now records `bundle_capabilities_sha256` (`none` for a bundle with no file, `unreadable` for
+a file that cannot be read) and `bundle_manifest_sha256` in the run's inputs. `swap_draft._named_bundle`, which stage 2's draft, stage 4's draft and both
+agent-config checks go through, compares them with the files on disk (`nearest.bundle_changes`) and refuses a changed bundle with a message that names the file.
+A resume keeps the recorded values. A run that started before this change has no record and is not compared; recording it now would hide a change made
+since stage 0. 21 new tests (`tests/test_bundle_record_662.py`); 11 mutations of the record, the comparison, the resume rule and the three wirings each turn a test red.
+The folded #663 (link tests for the real-path comparison of bundle directories) is in the same PR: 5 tests (`tests/test_bundle_link_663.py`), and 4 mutations (each real-path comparison replaced by a string comparison) each turn a test red. Not done: the folded #664 (name the base bundle in bringup.toml). Not run on a chip.
+## 2026-11-23: an operator pause that an earlier poll read is kept when the stage budget runs out (issue 616, branch fix-616-operator-pause-kept)
+
+`RunActuator.pause()` set the stop to `pause` whatever it held. When an earlier stop poll had read the operator's `pause` or `abort` (the control file is
+consumed on the read and `stop_reason()` keeps the command as the stop) and the stage's wall-clock budget then ran out during the helper wait, the budget's
+pause replaced it. The next poll found no file, and the rescue recorded `stage-budget` without the operator's decision. `pause()` now leaves an
+`operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
+(the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
+runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
