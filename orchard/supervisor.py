@@ -349,7 +349,7 @@ class RunActuator:
 
     def pause(self, reason: str, evidence: dict) -> None:
         # An operator's abort or pause that an earlier poll already read stays in effect: the control file is gone, so a stop lowered to the
-        # watchdog's `pause` here could not be read again and the rescue would record the budget instead of the operator's decision (issue 616).
+        # watchdog's `pause` here could not be read again and the rescue would record the budget and lose the operator's decision (issue 616).
         if self._stop not in ("abort", "operator-pause"):
             self._stop = "pause"
         # A pause the stage's wall-clock budget caused is kept apart: no helper rescue lifts it (review of PR 496, round 3).
