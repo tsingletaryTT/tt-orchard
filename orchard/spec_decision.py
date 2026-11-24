@@ -45,7 +45,7 @@ def _number(value, what: str, *, positive: bool = False) -> float:
         raise SpecRecordError(f"{what} must be above 0")
     if value < 0:
         raise SpecRecordError(f"{what} must be at least 0")
-    return float(value)
+    return float(value)             # finite: ok safeio.fits_float above refused a bool, a non-number, NaN, an infinity and an integer too large for a float
 
 
 def _sampling(value) -> dict:
