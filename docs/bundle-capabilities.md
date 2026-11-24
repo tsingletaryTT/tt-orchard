@@ -21,6 +21,12 @@ those.
   when the bundle ships the file. Without it, stage 2 serves the nearest model's config as before. Stage 7 packages the config
   stage 2 served (`base_config/config.json`), so the package serves the same file.
 
+- The bring-up command records two values in the `run_start` inputs when it starts a run with a bundle: `bundle_capabilities_sha256`
+  (the file's sha256, `none` when the bundle ships no file, `unreadable` when it cannot be read) and `bundle_manifest_sha256` (the
+  manifest's). Stages 2 and 4 compare the files on disk with them (`orchard/nearest.py`, `bundle_changes`) when they draft a
+  configuration and when they check one the agent wrote. A file that changed blocks the stage with a message that names it. A resume
+  keeps the recorded values, and a run that recorded none (it started before the record existed) is not compared (issue 662).
+
 - The release-day check (`tt-orchard drop-check`, `orchard/drop_check.py`) judges a release's config with
   `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config)`, which runs the stage 0 template's own code
   (`capability_config_reasons`). It takes plain dicts, needs no run directory, and returns named reasons (none when the file covers the

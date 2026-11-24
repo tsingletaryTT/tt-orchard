@@ -145,7 +145,7 @@ from orchard.defaults import (AGENT_STAGE_CAPS_BLOCK, AGENT_STAGE_CAPS_RESTART, 
                               ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
-from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
+from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, decision_facts, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
@@ -348,7 +348,10 @@ class RunActuator:
         self._stop = self._stop or "escalate"
 
     def pause(self, reason: str, evidence: dict) -> None:
-        self._stop = "pause"
+        # An operator's abort or pause that an earlier poll already read stays in effect: the control file is gone, so a stop lowered to the
+        # watchdog's `pause` here could not be read again and the rescue would record the budget and lose the operator's decision (issue 616).
+        if self._stop not in ("abort", "operator-pause"):
+            self._stop = "pause"
         # A pause the stage's wall-clock budget caused is kept apart: no helper rescue lifts it (review of PR 496, round 3).
         findings = evidence.get("findings") if isinstance(evidence, dict) else None
         # Sticky: a later pause from the coder ladder must not lower the flag a budget pause raised, because the agent step goes on feeding events
@@ -599,8 +602,8 @@ def file_stamp(path: Path) -> tuple | None:
     return (st.st_size, st.st_mtime_ns)
 
 
-EVIDENCE_LIST_ENTRIES = 2000     # the evidence listing of a wrap-up reads at most this many entries of evidence/ (issue 457)
-EVIDENCE_LIST_DEPTH = 12         # and at most this many directory levels below it
+EVIDENCE_LIST_ENTRIES = boundedwalk.EVIDENCE_ENTRIES     # the evidence listing of a wrap-up reads at most this many entries of evidence/ (issue 457)
+EVIDENCE_LIST_DEPTH = boundedwalk.EVIDENCE_DEPTH         # and at most this many directory levels below it
 
 
 def evidence_listing(run_dir: Path, stage_dir: Path) -> tuple[list[str], str | None]:
@@ -5250,7 +5253,7 @@ class Supervisor:
                                     budget_s=spec.budget_s, home=self.home)
         return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                        operator_home=self.paths.operator_home, counts=[t.chips for t in tests],
-                                                                       bundle=self._run_bundle())
+                                                                       bundle=self._run_bundle(), recorded=self._run_bundle_record())
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -5290,6 +5293,12 @@ class Supervisor:
         value = (getattr(self, "inputs", None) or {}).get("bundle")
         return value if isinstance(value, str) and value else None
 
+    def _run_bundle_record(self) -> dict:
+        """The run's record of the bundle's files (nearest.RECORD_KEYS in the run_start inputs, issue 662); empty for a run that started
+        before it was kept. Stages 2 and 4 compare the files on disk with it."""
+        inputs = getattr(self, "inputs", None) or {}
+        return {k: inputs[k] for k in nearest.RECORD_KEYS if k in inputs}
+
     def _read_test(self, stage_dir: Path) -> tuple[dict | None, list[str]]:
         problems = []
         got = {name: safeio.read_json_checked(stage_dir / name, max_bytes=RUN_JSON_MAX) for name in ("hw_test.json", "handoff.json")}
@@ -5303,7 +5312,7 @@ class Supervisor:
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
         if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json", tt_model_root=self.paths.tt_model_root,
-                                                operator_home=self.paths.operator_home, bundle=self._run_bundle())):
+                                                operator_home=self.paths.operator_home, bundle=self._run_bundle(), recorded=self._run_bundle_record())):
             problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
@@ -5344,7 +5353,8 @@ class Supervisor:
         # A run that has not booted a coder (the audio stages need none) has no coder boards to park: a free board is leased, or the lease waits.
         d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
-                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards),
+                           board_facts=decision_facts(d.server_boards, chips))
         if d.park_needed:
             h = self._handoff(n, self.coder_lease)
             lease = h.park()
@@ -5644,7 +5654,8 @@ class Supervisor:
         # none: there is nothing to park, so every board comes from a lease of its own, which waits while the boards are busy (review of PR 490).
         d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
-                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards),
+                           board_facts=decision_facts(d.server_boards, chips))
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
         if d.action == "use_free" or self.coder_lease is None:
@@ -6174,7 +6185,7 @@ class Supervisor:
             self.ledger.append("decision", n, decision="hardware test plan refused, so the prepare step runs again", file=PLAN, reason=why)
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                               operator_home=self.paths.operator_home,
-                                                                              counts=[t.chips for t in tests], bundle=self._run_bundle())):
+                                                                              counts=[t.chips for t in tests], bundle=self._run_bundle(), recorded=self._run_bundle_record())):
             return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)
@@ -6216,7 +6227,7 @@ class Supervisor:
         d = decide_park(self.coder_lease.units, chips, test.boards)
         self.ledger.append("decision", n, decision="hardware phase", config=test.chips,
                            action=d.action, free_boards=list(d.free_boards),
-                           server_boards=list(d.server_boards))
+                           server_boards=list(d.server_boards), board_facts=decision_facts(d.server_boards, chips))
         first_chip = {c.board: c.bdf for c in reversed(chips)}       # each board's first chip
         if d.action == "use_free":
             exact = first_chip[d.free_boards[0]] if test.boards == 1 else None
