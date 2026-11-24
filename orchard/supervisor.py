@@ -131,7 +131,7 @@ from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
-from orchard import bundle_capabilities, full_port_result, runaway, text_runtime
+from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, LOG_LINES_MARK, block_code, last_pause
@@ -164,7 +164,7 @@ from orchard import device_holders
 from orchard.server import (BootStalled, CoderExited, NotReady, ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec,
                             StopCheck)
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, MASK_INPUTS_DECISION, mask_input_entries, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
-                            reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+                            reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, SPEECH_SPECS, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -1452,7 +1452,7 @@ class Supervisor:
                             run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
                             audio_runtime=audio_runtime.selected(entries) is not None,
                             text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries),
-                            kind=run_model_kind(entries))
+                            kind=run_model_kind(entries), speech_route=speech_route.selected(entries) is not None)
             if spec is FULL_PORT_STAGE_3 and self._stage_3_chips() is None:
                 spec = dataclasses.replace(spec, skip=SKIP_3_FULL_PORT)       # stage 2's board is the configured chip count: nothing new to show
             if spec is FULL_PORT_STAGE_4 and not self.required_chips:
@@ -1497,6 +1497,8 @@ class Supervisor:
             return False
         if text_runtime.selected(entries) is not None:
             return False          # the harness's text runtime is the full port for this model (orchard/text_runtime.py)
+        if speech_route.selected(entries) is not None:
+            return False          # a published bundle is the port of a speech model (orchard/speech_route.py)
         if full_port_enabled(entries) and run_class(entries, self.run_dir) == "full-port":
             return False          # the operator started the run with --full-port; `unknown` and `restricted-head` keep their pauses
         # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
@@ -1560,6 +1562,8 @@ class Supervisor:
             return False
         if audio_runtime.selected(entries) is not None:
             return False                  # the harness has a runtime for this model, so the audio path is built for it
+        if speech_route.selected(entries) is not None:
+            return False                  # a speech run has its own stages (orchard/speech_route.py); its facts say modality audio
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") == AUDIO_UNBUILT for e in entries)
 
@@ -2700,6 +2704,8 @@ class Supervisor:
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
         if spec in TEXT_SPECS:
             return self._text_body(spec, stage_dir, resumed)
+        if spec in SPEECH_SPECS:
+            return self._speech_body(spec, stage_dir, resumed)
         if spec.harness:
             if spec.number == 0:
                 return self._stock_triage_body(spec, stage_dir)
@@ -3282,6 +3288,164 @@ class Supervisor:
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
+    # ---- the speech route (orchard/speech_route.py, orchard/stages.py `SPEECH_TABLE`) -----------------------------------------------
+
+    def _speech_python(self) -> str:
+        """The interpreter that runs the CPU reference producer: the run's `reference_python` input, else $ORCHARD_REFERENCE_PYTHON, else the reference
+        environment under the operator's home."""
+        given = self.inputs.get("reference_python") or os.environ.get("ORCHARD_REFERENCE_PYTHON")
+        return str(given) if given else str(Path(self.paths.operator_home) / "orchard-venvs" / "reference" / "bin" / "python")
+
+    def _speech_body(self, spec, stage_dir: Path, resumed: bool):
+        """Stages 0, 1 and 2 of a speech run, as supervisor code. No model is asked anything, so no coder boots. Stage 2 uses the hardware phase that runs a single test: a lease for
+        one board, one command that serves the published bundle, checks it and stops it, the lease back. The route never packages or uploads a model's weights."""
+        n = spec.number
+        task = speech_route.selected(self.ledger.read())
+        if task is None:
+            return "fail", ["the run was not started with a speech_route input (speech-to-text or text-to-speech)"], None
+        if self.lab is not None:
+            return "fail", ["the speech route does not run in lab mode"], None
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if n == 0:
+                return self._speech_triage_body(spec, stage_dir, task)
+            if n == 1:
+                if not (resumed and (stage_dir / speech_route.REFERENCE_FILE).is_file()):
+                    self._speech_stage_1(stage_dir, task)
+            else:
+                failed = self._speech_stage_2(spec, stage_dir, task, resumed)
+                if failed:
+                    return "fail", failed, None
+        except speech_route.SpeechRouteError as exc:
+            return "fail", [str(exc)], None
+        self.ledger.append("evidence", n, what="speech stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _speech_script_hashes(self) -> dict:
+        return {p.name: hashlib.sha256(safeio.read_bytes(p, max_bytes=RUN_JSON_MAX)).hexdigest()
+                for p in (speech_route.HW_SCRIPT, speech_route.PRODUCER, Path(speech_route.__file__))}
+
+    def _speech_triage_body(self, spec, stage_dir: Path, task: str):
+        """Stage 0: read the bundle table and the operator's inputs, write delta.json and its evidence, record the selection and the licence line, run the gate."""
+        n = spec.number
+        base_id = str(self.model_id).split("@", 1)[0]
+        bundle = speech_route.bundle_for_task(task, base_id)
+        if bundle is None:
+            return "fail", [f"for task {task}, no known bundle serves {base_id!r}: the speech route runs a model that a published bundle serves "
+                            "(orchard/speech_models.py lists the known ones)"], None
+        clips_dir = self.inputs.get(speech_route.CLIPS_INPUT)
+        if not clips_dir:
+            return "fail", [f"a speech run needs the input {speech_route.CLIPS_INPUT}=DIR: a directory of clips, each with a NAME.txt holding what it says "
+                            "(`tt-orchard bringup --speech-clips DIR`)"], None
+        clips = speech_route.discover_clips(clips_dir)
+        if task == "speech-to-text" and not self.inputs.get("model"):
+            return "fail", ["a speech-to-text run needs the input model (the snapshot directory): the CPU reference loads the upstream weights from it"], None
+        if task == "text-to-speech":
+            speech_route.read_prompts(self.inputs.get(speech_route.PROMPTS_INPUT))
+            if any(c["expected"] is None for c in clips):
+                missing = [c["name"] for c in clips if c["expected"] is None]
+                return "fail", [f"a text-to-speech run calibrates the scorer on the clips, so each needs a NAME.txt: {', '.join(missing)}"], None
+        python = self._speech_python()
+        if not os.access(python, os.X_OK):
+            return "fail", [f"the reference interpreter {python} is missing or not executable. Give the run `reference_python` (bringup.toml, or --input "
+                            "reference_python=PATH) or build the reference environment with `tt-orchard setup-machine`"], None
+        (stage_dir / "evidence").mkdir(exist_ok=True)
+        license_rec = speech_route.license_record(bundle)
+        scripts = self._speech_script_hashes()
+        evidence = {"task": task, "model": base_id, "bundle": bundle.bundle, "endpoints": list(bundle.endpoints), "python": python, "scripts": scripts,
+                    "clips": [{"name": c["name"], "expected_text_given": c["expected"] is not None} for c in clips], "known_on": speech_models.KNOWN_ON}
+        _put((stage_dir / "evidence" / "triage.json"), json.dumps(evidence, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        hazards = []
+        if bundle.non_commercial:
+            hazards.append({"area": "license", "evidence": ["stages/0/evidence/triage.json"],
+                            "finding": f"the bundle's licence is {bundle.license} (non-commercial use only); results from this run are used under that licence"})
+        delta = {"model": self.model_id, "nearest_model": f"none: the published bundle {bundle.bundle} serves it", "path": "full-port", "class": "full-port",
+                 "path_reasons": [f"the published bundle {bundle.bundle} serves this {task} model; the harness checks it and writes no port"],
+                 "differences": [{"area": "architecture", "evidence": ["stages/0/evidence/triage.json"],
+                                  "finding": f"a {task} model served by {bundle.bundle} ({' and '.join(bundle.endpoints)})"}],
+                 "hazards": hazards, "facts": {"form": "full", "serving": "container", "modality": "audio"},
+                 "speech": {"task": task, "upstream": bundle.upstream, "bundle": bundle.bundle, "license": license_rec}}
+        _put((stage_dir / "delta.json"), json.dumps(delta, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        self.ledger.append("decision", n, decision=speech_route.SPEECH_ROUTE_SELECTED, task=task, bundle=bundle.bundle, python=python, scripts=scripts, model=self.model_id)
+        self.ledger.append("decision", n, decision="speech licence", license=license_rec)
+        self.ledger.append("evidence", n, what="speech triage", **evidence_record(self.run_dir, stage_dir / "delta.json"))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _speech_producer(self, stage_dir: Path, name: str, mode: str, config: dict) -> dict:
+        """Run the CPU reference producer in the run's interpreter on `config` and return its output record. A failure is a SpeechRouteError with the end of stderr."""
+        sel = speech_route.selection(self.ledger.read())
+        if not sel or not isinstance(sel.get("python"), str):
+            raise speech_route.SpeechRouteError("the ledger holds no speech route selection with its interpreter")
+        cfg_path, out_path = stage_dir / f"{name}_config.json", stage_dir / f"{name}_out.json"
+        _put(cfg_path, json.dumps(config, indent=1) + "\n", encoding="utf-8")
+        out_path.unlink(missing_ok=True)
+        env = speech_route.producer_env({**os.environ, **({"HF_HOME": str(self.paths.hf_home)} if getattr(self.paths, "hf_home", None) else {})})
+        code, err = speech_route.run_producer(speech_route.producer_command(sel["python"], mode, cfg_path, out_path),
+                                              timeout_s=speech_route.REFERENCE_DEADLINE_S, env=env)
+        if code != 0:
+            raise speech_route.SpeechRouteError(f"the CPU reference producer ({mode}) failed" + (f" with exit code {code}" if code is not None else "") + f": {err.strip()[-600:]}")
+        try:
+            doc = safeio.read_json(out_path, max_bytes=speech_route.JSON_LIMIT, expect=dict)
+        except (safeio.SafeReadError, OSError, ValueError) as exc:
+            raise speech_route.SpeechRouteError(f"the CPU reference producer wrote no readable output: {exc}") from None
+        if not isinstance(doc.get("texts"), dict) or not isinstance(doc.get("engine"), dict):
+            raise speech_route.SpeechRouteError("the CPU reference producer's output has no texts and engine records")
+        return doc
+
+    def _speech_stage_1(self, stage_dir: Path, task: str) -> None:
+        base_id = str(self.model_id).split("@", 1)[0]
+        entries = speech_route.save_clips(speech_route.discover_clips(self.inputs.get(speech_route.CLIPS_INPUT)), stage_dir)
+        saved = [{"name": e["name"], "path": str((stage_dir / speech_route.CLIP_DIR / e["name"]).resolve())} for e in entries]
+        if task == "speech-to-text":
+            model_dir = str(Path(self.inputs["model"]).resolve())
+            config = speech_route.producer_config(base_id, model_dir, saved, language=self.inputs.get("speech_language"))
+            out = self._speech_producer(stage_dir, "producer", "asr", config)
+            prompts = None
+        else:
+            out = self._speech_producer(stage_dir, "producer", "score", speech_route.producer_config(speech_route.SCORER_MODEL, None, saved))
+            prompts = speech_route.read_prompts(self.inputs.get(speech_route.PROMPTS_INPUT))
+        doc = speech_route.build_reference(task, base_id, entries, out["engine"], out["texts"], prompts)
+        _put((stage_dir / speech_route.REFERENCE_FILE), json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _speech_stage_2(self, spec, stage_dir: Path, task: str, resumed: bool) -> list[str] | None:
+        """The hardware phase and, for text to speech, the host's scoring of the saved audio. A list of reasons when the stage fails before its gate."""
+        ref_dir = self.run_dir / "stages" / "1"
+        try:
+            ref = safeio.read_json(ref_dir / speech_route.REFERENCE_FILE, max_bytes=speech_route.JSON_LIMIT, expect=dict)
+        except (safeio.SafeReadError, OSError, ValueError) as exc:
+            return [f"stage 1's reference cannot be read: {exc}"]
+        bad = speech_route.reference_problems(ref, ref_dir)
+        if bad:
+            return ["stage 1's reference no longer passes its own checks: " + "; ".join(bad[:3])]
+        if not (resumed and (stage_dir / "test-result.json").is_file()):
+            _put((stage_dir / speech_route.CONFIG_FILE), json.dumps(speech_route.hw_config(ref, ref_dir, stage_dir), indent=1) + "\n", encoding="utf-8")
+            command = speech_route.hw_command(stage_dir)
+            try:
+                check_string(command, self.run_dir)
+            except Denied as exc:
+                return [f"the test command is refused: {exc}"]
+            test = {"command": command, "deadline_s": speech_route.CHIP_DEADLINE_S}
+            _put((stage_dir / "hw_test.json"), json.dumps(test) + "\n", encoding="utf-8")
+            _put((stage_dir / "handoff.json"), json.dumps({
+                "goal": f"serve the published speech bundle on one board and check its answers ({task})", "stage": 2,
+                "evidence": f"stages/2/{speech_route.CONFIG_FILE}", "next_action": "the supervisor runs the serve, check and stop command under its own lease",
+                "check_on_return": "stages/2/test-result.json"}) + "\n", encoding="utf-8")
+            self._hardware_phase(spec, stage_dir, test)
+        failed = hardware_test_failure(stage_dir)
+        if failed:
+            return [failed["problem"] + "; see stages/2/evidence/hw-test-output.txt and stages/2/log"]
+        if task == "text-to-speech":
+            try:
+                result = safeio.read_json(stage_dir / speech_route.RESULT_FILE, max_bytes=speech_route.JSON_LIMIT, expect=dict)
+            except (safeio.SafeReadError, OSError, ValueError) as exc:
+                return [f"the hardware command wrote no readable {speech_route.RESULT_FILE}: {exc}"]
+            if not all(isinstance(p, dict) and (p.get("audio") is None or isinstance(p.get("heard"), str)) for p in result.get("prompts") or []):
+                out = self._speech_producer(stage_dir, "score", "score", speech_route.score_config(result, stage_dir))
+                _put((stage_dir / speech_route.RESULT_FILE), json.dumps(speech_route.merge_scores(result, out["texts"]), indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        return None
+
     # ---- the audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py) ---------------------------------------------
 
     # ---- the text runtime path (orchard/text_runtime.py, orchard/text_stages.py) ----------------------------------------------------
@@ -3485,7 +3649,7 @@ class Supervisor:
 
     def _audio_body(self, spec, stage_dir: Path, resumed: bool):
         """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. The numeric work runs in the configured
-        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the one-test hardware phase
+        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the hardware phase that runs a single test
         of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
         from orchard import audio_plan, audio_remote
         from orchard.audio_plan import AudioStageError
@@ -3612,7 +3776,8 @@ class Supervisor:
         # An audio run's other stages already use the scripts of the checkout that is running (audio_runtime.TEMPLATES), so its bundle builder is that
         # checkout's too: a run started under an older checkout can then finish with the audio section. Other runs keep the recorded checkout.
         orchard_dir = (Path(__file__).resolve().parent.parent
-                       if (audio_runtime.selected(self.ledger.read()) is not None or text_runtime.selected(self.ledger.read()) is not None)
+                       if (audio_runtime.selected(self.ledger.read()) is not None or text_runtime.selected(self.ledger.read()) is not None
+                           or speech_route.selected(self.ledger.read()) is not None)
                        else Path(self.paths.orchard_dir))
         shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
         _put((stage_dir / "bundle_config.json"), 
@@ -6833,6 +6998,12 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         if given_route is not None and given_route != recorded_route:
             raise ValueError(f"this run started with text_runtime {recorded_route!r}; --input text_runtime={given_route} differs. Leave the input out to "
                              "resume with the recorded route, or move this run's directory aside and start a new run")
+    if progress.started:                        # a resumed run keeps its speech task as well
+        recorded_task = ((progress.run_start or {}).get("inputs") or {}).get(speech_route.ROUTE_INPUT)
+        given_task = inputs.get(speech_route.ROUTE_INPUT)
+        if given_task is not None and given_task != recorded_task:
+            raise ValueError(f"this run started with speech_route {recorded_task!r}; --input speech_route={given_task} differs. Leave the input out to "
+                             "resume with the recorded task, or move this run's directory aside and start a new run")
     full_port_req = bool(getattr(args, "full_port", False))
     full_port_added = False
     if progress.started and full_port_req and not full_port_enabled(entries):
