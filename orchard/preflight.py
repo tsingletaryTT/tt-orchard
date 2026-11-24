@@ -862,6 +862,22 @@ def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bo
                      "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": None, "text_runtime": rtm.name})
 
 
+def _speech_check(model_id: str, hub: HubInfo | None) -> Check | None:
+    """The base row for a speech model (orchard/speech_models.py): a block that says what the model is, which published bundle serves it and
+    how to check a server. The harness has no speech stage, so no run starts, and an operator's --base does not change that. A model that is
+    not a speech model, and a model the Hub could not be asked about, return None and go the earlier way."""
+    if hub is None:
+        return None
+    from orchard import speech_models
+    task = speech_models.task_of(hub.pipeline_tag, hub.tags, hub.architectures)
+    if task is None:
+        return None
+    bundle = speech_models.bundle_for(model_id)
+    return Check("base", BLOCK, speech_models.row_text(model_id, task, bundle), "speech-model",
+                 data={"speech": {"task": task, "bundle": bundle.bundle if bundle else None}, "base": None, "snapshot": None, "bundle": None,
+                       "needs_fetch": False, "candidates": [], "report": None})
+
+
 PIN_WHY_MAX = 300           # the longest reason --nearest-why takes: one line, recorded in run_start and shown in the base row
 
 
@@ -907,6 +923,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     bundle serves it, and the stages that serve through a bundle meet the gap when they run."""
     from orchard import nearest, weights_source
     if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
+        return found
+    if not audio and (found := _speech_check(model_id, hub)) is not None:
         return found
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
     inferred = False
@@ -1592,10 +1610,10 @@ def blocked(checks: list[Check]) -> list[Check]:
     return [c for c in checks if c.status == BLOCK]
 
 
-# The block reasons that make a dry classification impossible (issue 705): the model or its nearest model cannot be found or the config
-# cannot be used. Every other block describes the machine or the run (disk, port, chips, lease, coder, tiers, credentials, licence, fit) and
+# The block reasons that make a dry classification impossible (issue 705): the model or its nearest model cannot be found, the config
+# cannot be used, or the model is a speech model that no stage handles (orchard/speech_models.py). Every other block describes the machine or the run (disk, port, chips, lease, coder, tiers, credentials, licence, fit) and
 # is listed as "would block a real run" while the classification goes on.
-CLASSIFICATION_BLOCKS = ("config-invalid", "model-unavailable", "nearest-model-missing")
+CLASSIFICATION_BLOCKS = ("config-invalid", "model-unavailable", "nearest-model-missing", "speech-model")
 
 
 def split_for_dry_run(stops: list[Check]) -> tuple[list[Check], list[Check]]:

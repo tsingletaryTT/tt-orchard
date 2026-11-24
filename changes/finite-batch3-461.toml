@@ -1,0 +1,3 @@
+target = "0.9.197"
+summary = "An integer too large for a float (10**400) in a ledger amount, a baseline speed or a perplexity reference is refused or shown as a bound in telegraph_view, speedwatch, text_stages and text_bars; no OverflowError (issue 461, batch 3)."
+kind = "fix"

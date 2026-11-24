@@ -138,6 +138,17 @@ def test_a_perplexity_reference_that_is_not_a_number_is_refused(done):
     assert any("positive finite" in p for p in gates(done)[0])
 
 
+@pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400)], ids=["huge-int", "negative-huge-int"])
+def test_a_perplexity_reference_no_float_can_hold_is_refused_and_does_not_crash(done, value, monkeypatch):
+    """Issue 461: `math.isfinite(10**400)` raises OverflowError. The gate answers with a problem, as it does for -3. The reader's digit cap is
+    lifted for this test so that the value reaches the gate, the way a caller with another parser would deliver it."""
+    s1, *_ = dirs(done)
+    edit(s1 / st.PPL_REFERENCE_FILE, lambda d: d.update(perplexity=value))
+    monkeypatch.setattr(st, "load_json", lambda path, name: json.loads(Path(path).read_text()))
+    problems = gates(done)[0]
+    assert any("positive finite" in p for p in problems)
+
+
 def test_a_record_for_another_runtime_is_refused(done):
     s1, *_ = dirs(done)
     edit(s1 / rt.REFERENCE_FILE, lambda d: d.update(runtime="granite"))

@@ -16,6 +16,8 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
+    tt-orchard speech-check URL --task speech-to-text|text-to-speech [--clip FILE --expect TEXT ...] [--text TEXT] [--voice NAME] [--stream] [--asr-url URL] [--max-wer F] [--json]
     tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
@@ -273,6 +275,12 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import plan as _plan
     sub.add_parser("plan", parents=[common, _plan.parser(add_help=False)],
                    help="what precision and placement a checkpoint needs on N chips, from its safetensors headers alone (read-only)")
+    from orchard import tier_plan as _tier_plan
+    sub.add_parser("tier-plan", parents=[common, _tier_plan.parser(add_help=False)],
+                   help="what precision and expert placement a mixture-of-experts model needs on 1, 2 or 4 chips, from its config alone (reads two small files, read-only)")
+    from orchard import speech_check as _speech_check
+    sub.add_parser("speech-check", parents=[common, _speech_check.parser(add_help=False)],
+                   help="check a running speech server on this machine: transcribe known clips, or request speech and check the audio (no device, no lease)")
     sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
                    help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
     dwp = sub.add_parser("drop-watch", parents=[common],
@@ -902,6 +910,8 @@ def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, 
 
 
 def _base_help(check, model: str, out) -> None:
+    if (check.data or {}).get("speech"):
+        return              # the row names the bundle that serves a speech model and the command that checks it
     if (check.data or {}).get("audio"):
         return              # the bundle help does not apply: an audio model needs no bundle, and its row says what it needs
     cands = (check.data or {}).get("candidates") or []
@@ -1281,6 +1291,12 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         from orchard import plan as _plan_mod
         return _plan_mod.main([args.snapshot, "--chips", str(args.chips), "--chip-gib", str(args.chip_gib), "--weight-share", str(args.weight_share)]
                               + (["--json"] if args.json else []), out)
+    if args.cmd == "tier-plan":
+        from orchard import tier_plan as _tier_plan_mod
+        return _tier_plan_mod.run(args, out)
+    if args.cmd == "speech-check":
+        from orchard import speech_check as _speech_check_mod
+        return _speech_check_mod.run(args, out)
     if args.cmd == "drop-check":
         from orchard import drop_check
         try:
@@ -1492,10 +1508,17 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
         stock_dir = recorded_stock
         # Stage 0 judged the model against the bundle the run started with (its orchard-capabilities.json), so a resume keeps it.
-        recorded_bundle = (_run_start_inputs(run_dir) or {}).get("bundle")
+        recorded_start = _run_start_inputs(run_dir) or {}
+        recorded_bundle = recorded_start.get("bundle")
         bundle_dir = recorded_bundle if isinstance(recorded_bundle, str) and recorded_bundle else None
+        # The files' digests are kept the same way, and a run that recorded none gets none now: recording the bundle as it is today would
+        # hide a change made since stage 0 judged it (issue 662).
+        bundle_record = {k: recorded_start[k] for k in nearest.RECORD_KEYS if isinstance(recorded_start.get(k), str)} if bundle_dir else {}
+    else:
+        # Stages 2 and 4 compare the bundle's files with this record (nearest.bundle_changes, issue 662).
+        bundle_record = nearest.bundle_record(bundle_dir) if bundle_dir else {}
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
-              **({"bundle": bundle_dir} if bundle_dir else {}),
+              **({"bundle": bundle_dir} if bundle_dir else {}), **bundle_record,
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {}),

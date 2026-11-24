@@ -6019,3 +6019,86 @@ Prompt (operator): bring the open PRs together and make the text match the runs.
 
 ## 2026-11-23: reference venv moved to transformers 5.24.0
 `tt-orchard updates` showed torch, transformers and tokenizers behind in the reference venv. A copy was upgraded and compared with the live venv on four models (Aion with remote code, SmolLM2-135M, Olmo-Hybrid-7B, tiny-qwen4-moe): top-1 agreement 100 percent, largest logit difference 0.0000, greedy tokens identical, and Aion's stage 1 gate gave the same verdict and ids. The live venv was then upgraded (the 5.19.0 venv is kept as a backup) and `orchard/setup_machine.py` now pins `transformers==5.24.0`. Not tested: OLMoE, MiniCPM3, prompts over 2,400 tokens, sampling, the audio reference venvs. Details: `docs/run-logs/2026-11-23-reference-venv-5-24.md`.
+## 2026-11-23: `tt-orchard tier-plan`, step 1 of issue 739 (branch fit-plan-739)
+
+Operator: "let's see about 739! start implementing." Step 1 of the issue is a plan command that works before any download. `tt-orchard plan` already
+priced a snapshot from its safetensors headers, so this adds the part that was missing: `tt-orchard tier-plan SOURCE` reads only `config.json` and the
+weight index (of a repository, a file or a directory), counts the parameter groups with `orchard/decode_floor.py`, and prints for 1, 2 and 4 chips and
+each format mix whether the model fits on the chips (replicated or with the experts split), fits with experts in host memory, or does not fit. A
+host-experts row gives the experts per layer that stay on the chips, the host memory needed (every expert pinned plus a 10 GiB margin, the rule in the
+issue) and the share of picks that would land on a resident expert, which is an estimate from the OLMoE-1B-7B skew (PR 746) unless `--skew` gives figures
+for the model. A second layout, whole layers on the chips with host memory only for the other layers, is printed beside it. Every number carries its source.
+Written test first (209 tests, 28 mutations each turned a test red). Two things the tests did not find and a live run did: the Hub answers a `resolve/`
+request with a redirect to `api/resolve-cache/models/<repo>/...`, which the drop-check reader refuses outside its one allowed organisation, so the
+command has its own reader that accepts a redirect only to the Hub's content hosts or to the same repository; and a first design that kept the same
+number of experts in every layer overstated MiniMax-M2.7's host memory three times against its card, so the whole-layer layout was added.
+The comparison with the MiniMax-M2.7, Inkling-Small and Ornith-1.5-397B cards is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`. Not
+done: expert-use skew on a 512-expert model (step 2), and the host-expert path in a port (step 3), which needs an operator decision because the earlier
+note said to wait for the llama.cpp backend while Tenstorrent now ships hybrid-offload bundles. Also seen, not changed: the `tt-orchard plan` wrapper in
+`orchard/cli.py` passes only `--chips`, `--chip-gib`, `--weight-share` and `--json` through, so `--fidelity-bfp4` and `--fidelity-tokens` are accepted
+by the parser and then ignored when the command runs through `tt-orchard`.
+Addition (operator): `sunandbean/qwen3.8-flash-next-p100a` was added as a second reference (table in the run log). The count is right for the parts it reads, the config names five features it leaves out (hyper-connections, the indexer, the n-gram embedding, the draft layer, the vision tower), so the command lists them and marks the always-resident figure a lower bound. The plan's host figure for that port is 1.6 to 1.9 times the card's because the plan has no input for the host format.
+
+## 2026-11-23: Voxtral speech models, `speech-model` preflight block and `tt-orchard speech-check` (branch voxtral-speech)
+
+Operator: "the voxtral's sound worth trying to make tt-orchard aware and understand how to work with. with that kind of focus, go ahead. use the coder model
+as needed to look at it and work on it." Two Voxtral models have published Tenstorrent bundles: Voxtral-Mini-3B-2507 (speech to text) and Voxtral-4B-TTS-2603
+(text to speech). Before this change the preflight treated the Mini model as text (a warning that its card names no base model, then the text stages) and
+blocked the TTS model on `Ministral-3-3B-Base-2512`, a text model no bundle serves. Neither row said that these are speech models. The baseline, the
+components of each model (what is on the chip and what is on the host, with the source of each fact), the endpoints, the licences and the way each card
+measured quality are in `docs/run-logs/2026-11-23-voxtral-speech-models.md`.
+What was built: `orchard/speech_models.py` recognises a speech model from the Hub's pipeline tag, then the tag list, then the architecture name
+`VoxtralForConditionalGeneration` (the upstream Mini card has no tag), and holds a two-row table of the known bundles. The base row for a speech model is
+a block with the reason `speech-model` (added to `CLASSIFICATION_BLOCKS`): it says the harness has no speech stage, names the bundle and its endpoints,
+notes that the TTS licence is non-commercial, and names the check command. `tt-orchard speech-check URL --task speech-to-text|text-to-speech` checks a
+running server: transcription of clips with a stated word error rule, speech requests with WAV rules (24 kHz, 16-bit, mono, audible, 0.02 to 0.4 seconds
+per character), optional streaming and optional transcription through a second server, and a 4xx check for malformed requests. The address needs a port,
+must be on this machine, and may not use 8000 or 8100 to 8103; redirects are not followed. It opens no device. No speech kind was added to
+`model_kind.py` or `audio_facts.py`: a speech model never reaches stage 0, so no record would be read.
+Test first: 206 tests (39 and 167). Sixty-three mutations each turned a test red; the first pass of 57 left five green (a dead guard, a test that could not
+fail, the timeout message, `--max-wer` validation, the JSON exit code), and each was fixed. The first full suite failed three repository checks (float ratchet,
+hostile-reader registry, README flag list); server answers are now parsed with `safeio.parse_json_bytes` and registered as hostile-input readers. The coder was asked once to review the new command; its six
+findings did not hold. Not done and owed: a run of `speech-check` against a real bundle on a chip (the fakes copy what the bundles' code does, and the
+duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
+separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
+One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
+
+## 2026-11-23: Issue 461, third batch of float checks (branch finite-461-batch3)
+An integer of more than 308 digits raises OverflowError in `math.isfinite`, `float()` and `math.isclose`. This batch converts the modules the issue still listed as not converted that read JSON from a parser the safe reader does not guard: `telegraph_view` (ledger amounts, derived sums, percent of a cap, time stamps, dollars, row amounts), `speedwatch` (baseline file entries and the `judge` baseline), `text_stages` (the perplexity reference and `agree`), and `text_bars` (`ppl_problems`). A ledger amount, a derived sum or a baseline speed that a float cannot hold is refused with the module's own error. A percent of a huge whole number is computed with whole numbers and capped. Dollars of such a number show `>$1e308`. Calls whose argument is matched text, an argparse float or a value an earlier line already checked carry a `# finite: ok <reason>` marker. The ratchet baseline fell from 254 to 235 calls in 80 files.
+Test first: 32 new tests in `tests/test_finite_batch3.py` and one in `tests/test_text_stages.py` (12 failures before the change). Twelve mutations each turned a test red; the first pass of 12 left two green (the percent paths covered each other), and two tests for a quotient no float holds and for a mixed float and huge integer fixed that. Not done in issue 461: `audio_facts`, `full_port_bundle`, `port_construction`, `scoring_check`, `step_bars` (audio area, left to the speech work), the skill templates that cannot import orchard, and the counted `float(` calls on numpy results.
+## 2026-11-23: the agent step's evidence snapshot is bounded (issue 457, branch bound-agent-evidence-snapshot-457)
+
+`AgentStep._snapshot` listed `evidence/` with `sorted(rglob("*"))` after every tool call and kept one entry per file for the step. PR 778 bounded the gate's port
+check, the repair fingerprint and the wrap-up listing; this was the site named after it. The snapshot now reads through `boundedwalk.Walk` with the bounds
+the wrap-up listing uses (`boundedwalk.EVIDENCE_ENTRIES` 2000 and `EVIDENCE_DEPTH` 12, now defined once and used by both). A link inside `evidence/` is no longer
+listed (it used to count when it pointed at another file inside `evidence/`), and a link standing where `evidence/` should be is not read. Past a bound the files
+read so far are kept and one ledger decision, `the evidence scan stopped`, names the bound and the entries read (once per step). The snapshot is sorted by path as before.
+10 tests (a fake `os.scandir` that serves 300,000 entries, a tree deeper than the bound, links, a linked evidence directory, the once-per-step note, the order) and
+10 mutations each turn a test red. Still open under #457: `port_facts.copy_skeleton` (writes by path) and `scoring_check._source_reasons` (an unbounded scan); the
+fingerprint's read-beneath change is also listed in the issue. The issue stays open.
+## 2026-11-23: the hardware-phase decision records what `decide_park` saw (issue 591, branch park-decision-facts-591)
+
+Run 24b parked the coder with `free_boards=[]` while `gozer status` showed two chips FREE, and the ledger held only the board lists, so the cause was not
+readable afterwards. The three "hardware phase" decisions in `supervisor.py` (the plain phase, the wide phase and stage 4's plan) now carry `board_facts`
+from `handoff.decision_facts`: each board's chips with state and `who`, whether the coder's lease holds the board, the reason a board was not counted free
+(the coder holds it, a named chip is busy, a FREE chip lists a `who`, or the chips have no board serial) and the chips that look FREE on a board that was not counted free.
+`decide_park` and the facts share one rule (`_busy_chip`), so they cannot disagree. The decision itself is unchanged. This does not find the cause of run 24b;
+it makes the next occurrence readable from the ledger alone. 11 tests (`tests/test_park_decision_facts_591.py`) and 11 mutations (the rule, the coder flag, the
+free-chip list, the stringified `who`, and each of the three wirings) each turn a test red. The issue stays open: it needs a second occurrence to confirm a cause.
+## 2026-11-23: the named bundle's files are recorded at the start and compared at stages 2 and 4 (issue 662, branch record-bundle-capabilities-digest-662)
+
+Stage 0 judges a model against the named bundle's `orchard-capabilities.json`, and nothing showed whether the bundle changed between stage 0 and stage 2
+(`tt-model pull --force`, a hand edit). `tt-orchard bringup` now records `bundle_capabilities_sha256` (`none` for a bundle with no file, `unreadable` for
+a file that cannot be read) and `bundle_manifest_sha256` in the run's inputs. `swap_draft._named_bundle`, which stage 2's draft, stage 4's draft and both
+agent-config checks go through, compares them with the files on disk (`nearest.bundle_changes`) and refuses a changed bundle with a message that names the file.
+A resume keeps the recorded values. A run that started before this change has no record and is not compared; recording it now would hide a change made
+since stage 0. 21 new tests (`tests/test_bundle_record_662.py`); 11 mutations of the record, the comparison, the resume rule and the three wirings each turn a test red.
+The folded #663 (link tests for the real-path comparison of bundle directories) is in the same PR: 5 tests (`tests/test_bundle_link_663.py`), and 4 mutations (each real-path comparison replaced by a string comparison) each turn a test red. Not done: the folded #664 (name the base bundle in bringup.toml). Not run on a chip.
+## 2026-11-23: an operator pause that an earlier poll read is kept when the stage budget runs out (issue 616, branch fix-616-operator-pause-kept)
+
+`RunActuator.pause()` set the stop to `pause` whatever it held. When an earlier stop poll had read the operator's `pause` or `abort` (the control file is
+consumed on the read and `stop_reason()` keeps the command as the stop) and the stage's wall-clock budget then ran out during the helper wait, the budget's
+pause replaced it. The next poll found no file, and the rescue recorded `stage-budget` without the operator's decision. `pause()` now leaves an
+`operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
+(the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
+runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.

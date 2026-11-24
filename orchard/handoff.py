@@ -92,8 +92,7 @@ def decide_park(server_boards, chips: list[ChipState], boards_needed: int) -> Pa
         raise ValueError(f"server boards {sorted(unknown)} are not in the chip list")
     if not 1 <= boards_needed <= len(boards):
         raise ValueError(f"boards_needed must be 1 to {len(boards)}, got {boards_needed}")
-    free = tuple(b for b, cs in boards.items()
-                 if b not in server and all(c.state == "FREE" and not c.who for c in cs))
+    free = tuple(b for b, cs in boards.items() if b not in server and _busy_chip(b, cs) is None)
     if len(free) >= boards_needed:
         action = "use_free"
     elif server and len(free) + len(server) >= boards_needed:
@@ -101,6 +100,38 @@ def decide_park(server_boards, chips: list[ChipState], boards_needed: int) -> Pa
     else:
         action = "wait"
     return ParkDecision(action, free, tuple(sorted(server)), boards_needed)
+
+
+def _busy_chip(serial: str, chips: list[ChipState]) -> str | None:
+    """Why a board is not free by the chips on it, or None when every chip is FREE with no lease. The one rule `decide_park` and
+    `decision_facts` share, so the facts cannot disagree with the decision."""
+    if not serial:
+        return "its chips list no board serial, so gozer's board grouping is not known"
+    for c in chips:
+        if c.state != "FREE":
+            return f"chip {c.bdf} is {c.state}" + (f" (who: {c.who})" if c.who else "")
+        if c.who:
+            return f"chip {c.bdf} is FREE but lists who: {c.who}"
+    return None
+
+
+def decision_facts(server_boards, chips: list[ChipState]) -> dict:
+    """What `decide_park` saw, for the ledger (issue 591): {"boards": {serial: {"coder": bool, "chips": [{bdf, state, who}]}},
+    "not_counted_free": [{"board", "why"}], "free_chips_not_on_free_boards": [bdf]}. A board is not counted free when the coder's lease holds it
+    or `_busy_chip` names a chip. The last list holds the chips that look FREE (no lease, no who) on a board that was not counted free: the picture of
+    run 24b, where the supervisor parked the coder while gozer showed two chips FREE."""
+    server = set(server_boards)
+    boards = boards_of(chips)
+    out = {"boards": {}, "not_counted_free": [], "free_chips_not_on_free_boards": []}
+    for serial, cs in boards.items():
+        out["boards"][serial] = {"coder": serial in server,
+                                 "chips": [{"bdf": c.bdf, "state": c.state, "who": None if c.who is None else str(c.who)} for c in cs]}
+        why = "the coder's lease holds this board" if serial in server else _busy_chip(serial, cs)
+        if why is None:
+            continue
+        out["not_counted_free"].append({"board": serial, "why": why})
+        out["free_chips_not_on_free_boards"] += [c.bdf for c in cs if c.state == "FREE" and not c.who]
+    return out
 
 
 def chips_quiet(chips: list[ChipState], lease: Lease, accept=("CLAIMED",)) -> tuple[bool, dict[str, str]]:
