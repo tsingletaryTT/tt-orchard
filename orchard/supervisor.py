@@ -130,7 +130,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
-from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
+from orchard import audio_reference_env, audio_runtime, spec_decision, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
@@ -3950,6 +3950,29 @@ class Supervisor:
                 self.ledger.append("decision", n, decision="served chat check not written", path=os.path.relpath(d / served_chat.FILE, self.run_dir),
                                    reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _spec_decision_record(self, n: int, stage_dir: Path) -> None:
+        """Issue 182. When stage 2's directory holds a measurement record (`evidence/spec-measure.json`: plain step time, verify pass time and accepted tokens per
+        pass by prompt kind on real text), decide from it (`orchard/spec_decision.py`), write `evidence/spec-decision.json` and record a ledger decision and the
+        file's evidence entry. A record that cannot be read or fails its checks is a ledger decision with the reason; it never fails a passing stage. Without a
+        record nothing is written. No measuring run exists yet, so a record appears only when one is placed there."""
+        try:
+            record = spec_decision.read_measure(stage_dir)
+            if record is None:
+                return
+            decision = spec_decision.decide(record)
+        except spec_decision.SpecRecordError as exc:
+            self.ledger.append("decision", n, decision=spec_decision.REFUSED_DECISION, reason=str(exc)[:300])
+            return
+        try:
+            _put(stage_dir / spec_decision.DECISION_FILE, spec_decision.decision_json(decision))
+            result = decision["verdict"]["result"]
+            self.ledger.append("decision", n, decision=spec_decision.LEDGER_DECISION, enable_drafter=decision["enable_drafter"], verdict=result["verdict"],
+                               ratio=round(result["ratio"], 3), kind_used=decision["verdict"]["kind_used"], greedy_only=decision["greedy_only"],
+                               path=os.path.relpath(stage_dir / spec_decision.DECISION_FILE, self.run_dir))
+            self.ledger.append("evidence", n, what="speculative decision", **evidence_record(self.run_dir, stage_dir / spec_decision.DECISION_FILE))
+        except (OSError, ValueError) as exc:        # a full disk must not end a passing stage
+            self.ledger.append("decision", n, decision=spec_decision.REFUSED_DECISION, reason=f"the decision could not be written: {type(exc).__name__}"[:300])
+
     def _decode_floor_record(self, n: int, stage_dir: Path) -> None:
         """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
         decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
@@ -4139,6 +4162,8 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             if n in (0, 2, 4):
                 self._decode_floor_record(n, stage_dir)
+            if n == 2:
+                self._spec_decision_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
             kind_rec = self._classify_kind() if n == 0 else None
