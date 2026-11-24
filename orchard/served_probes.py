@@ -23,6 +23,7 @@ import json
 import symtable
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -44,6 +45,18 @@ REPLY_CHARS = 80                  # choice: a reply kept in a result is cut to t
 QUESTION_WORD = "What is the secret word? Answer with the word only."
 QUESTION_CODE = "What is the code number? Answer with the number only."
 _FILLER = "The quick brown fox jumps over the lazy dog. "
+MAX_CONCURRENT = 16               # choice: the Lottolabs cards check 16 concurrent users; more is not sent whatever the can declares
+CONC_TOKENS = 24                  # choice: a short greedy reply, so a server that is merely not bit-exact over a long reply is not failed for it
+CONTROL_REPEATS = 4               # choice: how many prompts are asked alone a second time to show the server repeats itself
+CANCEL_AFTER_EVENTS = 3           # choice: the stream is cut after this many events
+CANCEL_TOKENS = 256               # choice: long enough that the cancel lands mid-decode
+CANCEL_SETTLE_S = 1.0             # choice: the time the server gets to process the abort before the settled request is sent
+MAX_STREAM_BYTES = 1 << 20
+MAX_STREAM_LINE = 1 << 16
+MAX_TOOL_INDEX = 64
+MAX_TOOL_ARGS_CHARS = 1 << 16
+_TOPICS = ("the sea", "a clock", "winter", "a bicycle", "bread", "a library", "thunder", "a garden", "the moon", "a bridge", "coffee", "a mountain",
+           "a violin", "rain", "a lighthouse", "a train")
 
 
 def _result(name: str, state: str, detail: str, **more) -> dict:
@@ -541,3 +554,386 @@ def probe_prefix_shared_suffix(base: str, model: str, extra: dict | None = None,
     if first is None or warm is None or cold is None:
         return _result(name, "not_checked", "a request did not get a 200 with a reply, so the replies cannot be compared", advisory=True)
     return judge_prefix_shared_suffix(first[0], warm[0], cold[0], cached_tokens=warm[1], declared=declared)
+
+
+# ---- concurrent requests equal the same request alone, A-B-A, cancel, speculation, tool calls (Lottolabs study, 2026-11-24) -----------------
+#
+# The Lottolabs Blackhole cards list these checks for a batched server: each of 16 concurrent requests returns the tokens it returns alone, a request
+# between others is unaffected and leaves nothing behind, a stream cut mid-decode leaves the next request exact, speculation on equals speculation off,
+# a streamed tool call never arrives with `{}` arguments, and vLLM answers 400 to min_p, logit_bias and min_tokens under speculation. Every probe here is
+# advisory (`advisory: True`): it is listed and never fails a boot. Each has a control, because a server that does not repeat itself alone cannot be
+# judged under load. A card says its own kernels round differently by batch composition in some modes (Qwen3.6 batched), so a fail names the
+# requests that changed and does not say the server is wrong. The first run on a chip is owed.
+
+def _is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _advisory(name: str, state: str, detail: str, **more) -> dict:
+    return _result(name, state, detail, advisory=True, **more)
+
+
+def concurrent_prompts(n: int) -> list[str]:
+    """`n` different short prompts. Their replies differ, so a reply that carries another request's text is visible."""
+    return [f"Write one short sentence about {_TOPICS[i % len(_TOPICS)]}. Sentence number {i}." for i in range(n)]
+
+
+def _body_of(model, extra, prompt, max_tokens: int) -> dict:
+    return {**(extra or {}), "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": max_tokens}
+
+
+def _greedy_text(base, model, extra, prompt, max_tokens, timeout) -> str | None:
+    """The reply text of one greedy request, or None when the server did not answer 200 with text. A transport failure raises."""
+    status, doc, _ = _chat(base, _body_of(model, extra, prompt, max_tokens), timeout)
+    choices = doc.get("choices") if isinstance(doc, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    return content if status == 200 and isinstance(content, str) else None
+
+
+def _burst(base, model, extra, jobs, timeout) -> list:
+    """Send `jobs` ((prompt, max_tokens) pairs) at once and return the reply text of each (None for a request that failed or did not finish
+    within `timeout` in all)."""
+    out: list = [None] * len(jobs)
+
+    def send(i):
+        try:
+            out[i] = _greedy_text(base, model, extra, jobs[i][0], jobs[i][1], timeout)
+        except (OSError, ValueError, http.client.HTTPException):
+            out[i] = None
+    threads = [threading.Thread(target=send, args=(i,), daemon=True) for i in range(len(jobs))]
+    started = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(max(0.0, timeout - (time.monotonic() - started)))
+    return [None if t.is_alive() else r for t, r in zip(threads, out)]
+
+
+def judge_concurrent_equals_alone(alone, repeat, concurrent) -> dict:
+    """`alone` is the reply to each prompt asked by itself, `repeat` the replies to the first few asked alone a second time (the control), and
+    `concurrent` the replies to all of them sent at once. No verdict when an alone reply is missing, when every prompt got the same reply (a server that
+    ignores the prompt cannot show crosstalk) or when the server did not repeat itself alone."""
+    name = "concurrent_equals_alone"
+    n = len(alone)
+    if any(r is None for r in alone) or any(r is None for r in repeat):
+        return _advisory(name, "not_checked", "a request asked alone did not get a reply, so there is nothing to compare the concurrent replies with")
+    if len(set(alone)) < 2:
+        return _advisory(name, "not_checked", "every prompt got the same reply alone, so the probe cannot tell one request's text from another's; "
+                         "it needs different replies to different prompts")
+    if any(r != alone[i] for i, r in enumerate(repeat)):
+        return _advisory(name, "not_checked", "the server did not repeat itself on greedy decoding when a prompt was asked alone twice, so a "
+                         "difference under load cannot be tied to the concurrency")
+    facts = {"requests": n}
+    missing = [i for i, r in enumerate(concurrent) if r is None]
+    if missing:
+        return _advisory(name, "fail", f"{len(missing)} of {n} concurrent requests got no reply (a failure or a time-out)", differing=missing, **facts)
+    differing = [i for i, r in enumerate(concurrent) if r != alone[i]]
+    if differing:
+        shown = "; ".join(f"request {i}: {_clip(concurrent[i])!r} against {_clip(alone[i])!r} alone" for i in differing[:2])
+        return _advisory(name, "fail", f"{len(differing)} of {n} concurrent replies differ from the same request alone ({shown}). Some batched kernels "
+                         "round differently by batch composition, so this names the requests that changed and does not say the server is wrong",
+                         differing=differing, **facts)
+    return _advisory(name, "pass", f"each of {n} concurrent requests returned the reply it returns alone", **facts)
+
+
+def probe_concurrent_equals_alone(base: str, model: str, extra: dict | None = None, *, n, max_tokens: int = CONC_TOKENS,
+                                  timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """Ask `n` different prompts one at a time (at most MAX_CONCURRENT), the first few again (the control), then all at once, all greedy for
+    `max_tokens` tokens, and compare each concurrent reply with its alone reply (`judge_concurrent_equals_alone`). Needs `n` of at least 2."""
+    name = "concurrent_equals_alone"
+    if not _is_count(n) or n < 2:
+        return _advisory(name, "not_checked", "the probe needs at least 2 concurrent requests")
+    n = min(n, MAX_CONCURRENT)
+    prompts = concurrent_prompts(n)
+    try:
+        alone = [_greedy_text(base, model, extra, p, max_tokens, timeout) for p in prompts]
+        repeat = [_greedy_text(base, model, extra, p, max_tokens, timeout) for p in prompts[:CONTROL_REPEATS]]
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while asking the prompts alone: {type(exc).__name__}")
+    concurrent = _burst(base, model, extra, [(p, max_tokens) for p in prompts], timeout)
+    return judge_concurrent_equals_alone(alone, repeat, concurrent)
+
+
+def judge_aba(reference, repeat, loaded, after) -> dict:
+    """A is asked alone (`reference`, and `repeat` as the control), then while other streams run (`loaded`), then alone again (`after`)."""
+    name = "aba_isolation"
+    if reference is None or repeat is None:
+        return _advisory(name, "not_checked", "the request asked alone did not get a reply")
+    if reference != repeat:
+        return _advisory(name, "not_checked", "the server did not repeat itself on greedy decoding when the request was asked alone twice")
+    if loaded is None:
+        return _advisory(name, "fail", "the request got no reply while other streams were running")
+    if loaded != reference:
+        return _advisory(name, "fail", f"the reply changed under load: {_clip(loaded)!r} against {_clip(reference)!r} alone")
+    if after is None:
+        return _advisory(name, "fail", "the request got no reply when it was asked alone again afterwards")
+    if after != reference:
+        return _advisory(name, "fail", f"the reply changed afterwards: {_clip(after)!r} against {_clip(reference)!r} before the other streams")
+    return _advisory(name, "pass", "the request returned the same reply alone, while other streams ran, and alone again afterwards")
+
+
+def probe_aba_isolation(base: str, model: str, extra: dict | None = None, *, others=3, max_tokens: int = CONC_TOKENS,
+                        timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """A alone (twice, the control), then A together with `others` other prompts that run longer (at most MAX_CONCURRENT - 1 of them), then A
+    alone again. A must return the same reply each time (`judge_aba`)."""
+    name = "aba_isolation"
+    if not _is_count(others) or others < 1:
+        return _advisory(name, "not_checked", "the probe needs at least 1 other stream")
+    others = min(others, MAX_CONCURRENT - 1)
+    prompts = concurrent_prompts(others + 1)
+    a = prompts[0]
+    try:
+        reference = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        repeat = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        loaded = _burst(base, model, extra, [(a, max_tokens)] + [(p, max_tokens * 2) for p in prompts[1:]], timeout)[0]
+        after = _greedy_text(base, model, extra, a, max_tokens, timeout)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while checking isolation: {type(exc).__name__}")
+    r = judge_aba(reference, repeat, loaded, after)
+    r["others"] = others
+    return r
+
+
+def stream_events(url: str, body: dict, timeout: float, *, max_events: int | None = None) -> tuple[int, list, bool]:
+    """POST `body` and read the server-sent events: (status, the JSON object of each `data:` line, whether `[DONE]` arrived). Stops reading at
+    `max_events` events and closes the connection, which cancels the request on the server. Reads at most MAX_STREAM_BYTES bytes. A refusal
+    returns its status and no events. Raises OSError, ValueError or HTTPException for a transport failure."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return exc.code, [], False
+    events: list = []
+    done = False
+    seen = 0
+    try:
+        while seen < MAX_STREAM_BYTES and not (max_events is not None and len(events) >= max_events):
+            line = resp.readline(MAX_STREAM_LINE + 1)
+            if not line:
+                break
+            seen += len(line)
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text.startswith("data:"):
+                continue
+            payload = text[5:].strip()
+            if payload == "[DONE]":
+                done = True
+                break
+            try:
+                doc = json.loads(payload)
+            except ValueError:
+                continue
+            if isinstance(doc, dict):
+                events.append(doc)
+    finally:
+        resp.close()
+    return resp.status, events, done
+
+
+def judge_after_cancel(reference, repeat, after, healthy) -> dict:
+    """The request A asked alone (`reference`, `repeat` as the control), then after a stream was cut mid-decode (`after`: one reply or a list of
+    replies, for example one sent at once and one sent after the server had time to process the abort), and whether the server still answered a
+    health request."""
+    name = "cancel_mid_decode"
+    replies = list(after) if isinstance(after, (list, tuple)) else [after]
+    if reference is None or repeat is None:
+        return _advisory(name, "not_checked", "the request asked alone did not get a reply")
+    if reference != repeat:
+        return _advisory(name, "not_checked", "the server did not repeat itself on greedy decoding when the request was asked alone twice")
+    if any(r is None for r in replies):
+        return _advisory(name, "fail", "the request got no reply after the stream was cut")
+    if any(r != reference for r in replies):
+        bad = next(r for r in replies if r != reference)
+        return _advisory(name, "fail", f"the reply changed after the stream was cut: {_clip(bad)!r} against {_clip(reference)!r} before")
+    if not healthy:
+        return _advisory(name, "fail", "the server did not answer a health request after the stream was cut")
+    return _advisory(name, "pass", "after a stream was cut mid-decode the next request returned the reply it returns alone and the server answered a health request")
+
+
+def _healthy(base: str, timeout: float) -> bool:
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/v1/models", timeout=timeout) as r:
+            return r.status == 200
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+
+
+def probe_cancel_mid_decode(base: str, model: str, extra: dict | None = None, *, max_tokens: int = CONC_TOKENS, settle: float = CANCEL_SETTLE_S,
+                            timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """A alone twice (the control); a streamed request for CANCEL_TOKENS tokens cut after CANCEL_AFTER_EVENTS events; then A at once and A again
+    after `settle` seconds; then a health request (`judge_after_cancel`). A server that does not stream, or ends the stream before it is cut, gets no verdict."""
+    name = "cancel_mid_decode"
+    a = concurrent_prompts(1)[0]
+    try:
+        reference = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        repeat = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        body = {**_body_of(model, extra, concurrent_prompts(2)[1], CANCEL_TOKENS), "stream": True, "ignore_eos": True}
+        status, events, _ = stream_events(base.rstrip("/") + "/v1/chat/completions", body, timeout, max_events=CANCEL_AFTER_EVENTS)
+        if status != 200 or len(events) < CANCEL_AFTER_EVENTS:       # fewer events than the cut means the stream ended (or never came) first
+            return _advisory(name, "not_checked", f"the server did not stream the request (status {status}, {len(events)} events), so there was nothing to cut")
+        try:
+            first = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        except (OSError, ValueError, http.client.HTTPException):
+            first = None
+        time.sleep(max(0.0, settle))
+        try:
+            later = _greedy_text(base, model, extra, a, max_tokens, timeout)
+        except (OSError, ValueError, http.client.HTTPException):
+            later = None
+        healthy = _healthy(base, timeout)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while checking a cancel: {type(exc).__name__}")
+    return judge_after_cancel(reference, repeat, [first, later], healthy)
+
+
+def judge_spec_equals_plain(spec, plain, repeat) -> dict:
+    """The reply to each prompt with speculation on (`spec`), with it off (`plain`) and with it on a second time (`repeat`, the control)."""
+    name = "spec_equals_plain"
+    if any(r is None for r in (*spec, *plain, *repeat)):
+        return _advisory(name, "not_checked", "a request did not get a reply, so the replies cannot be compared")
+    if list(spec[:len(repeat)]) != list(repeat):
+        return _advisory(name, "not_checked", "the server did not repeat itself with speculation on, so a difference from speculation off cannot be tied to it")
+    differing = [i for i, (a, b) in enumerate(zip(spec, plain)) if a != b]
+    if differing:
+        i = differing[0]
+        return _advisory(name, "fail", f"{len(differing)} of {len(spec)} replies differ with speculation on: {_clip(spec[i])!r} against {_clip(plain[i])!r} with it off",
+                         differing=differing)
+    return _advisory(name, "pass", f"all {len(spec)} greedy replies are the same with speculation on and off")
+
+
+def probe_spec_equals_plain(base: str, model: str, *, spec_extra, plain_extra, max_tokens: int = CONC_TOKENS, timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """Three prompts greedy with `spec_extra` merged into each request, then with `plain_extra`, then with `spec_extra` again. The caller supplies
+    both: a server has no standard per-request switch for speculation, so with None for either the probe sends nothing (restart the server with
+    speculation off and compare the replies with `judge_spec_equals_plain`)."""
+    name = "spec_equals_plain"
+    if not isinstance(spec_extra, dict) or not isinstance(plain_extra, dict):
+        return _advisory(name, "not_checked", "no per-request switch for speculation was given, so the probe sends nothing; restart the server with "
+                         "speculation off and compare the replies with judge_spec_equals_plain")
+    if spec_extra == plain_extra:
+        return _advisory(name, "not_checked", "the two request options are the same, so the probe would compare the server with itself")
+    prompts = concurrent_prompts(3)
+    try:
+        spec = [_greedy_text(base, model, spec_extra, p, max_tokens, timeout) for p in prompts]
+        plain = [_greedy_text(base, model, plain_extra, p, max_tokens, timeout) for p in prompts]
+        repeat = [_greedy_text(base, model, spec_extra, p, max_tokens, timeout) for p in prompts]
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while comparing speculation on and off: {type(exc).__name__}")
+    return judge_spec_equals_plain(spec, plain, repeat)
+
+
+TOOL_SCHEMA = {"type": "function", "function": {
+    "name": "get_weather", "description": "Get the weather for a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}},
+                   "required": ["city"]}}}
+TOOL_PROMPT = "What is the weather in Paris in celsius? Use the get_weather tool."
+
+
+def tool_calls_of_stream(events) -> list[dict]:
+    """The tool calls of a stream, rebuilt from the fragments: [{"name", "arguments"}] by index. A fragment that is not well formed is skipped, an index
+    must be a whole number below MAX_TOOL_INDEX, and each call's arguments are capped at MAX_TOOL_ARGS_CHARS characters."""
+    calls: dict[int, dict] = {}
+    for ev in events if isinstance(events, list) else []:
+        choices = ev.get("choices") if isinstance(ev, dict) else None
+        for choice in choices if isinstance(choices, list) else []:
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            fragments = delta.get("tool_calls") if isinstance(delta, dict) else None
+            for frag in fragments if isinstance(fragments, list) else []:
+                idx = frag.get("index") if isinstance(frag, dict) else None
+                fn = frag.get("function") if isinstance(frag, dict) else None
+                if not _is_count(idx) or not 0 <= idx < MAX_TOOL_INDEX or not isinstance(fn, dict):
+                    continue
+                if not isinstance(fn.get("name"), str) and not isinstance(fn.get("arguments"), str):
+                    continue
+                call = calls.setdefault(idx, {"name": "", "arguments": ""})
+                if isinstance(fn.get("name"), str) and not call["name"]:
+                    call["name"] = fn["name"]
+                if isinstance(fn.get("arguments"), str) and len(call["arguments"]) + len(fn["arguments"]) <= MAX_TOOL_ARGS_CHARS:
+                    call["arguments"] += fn["arguments"]
+    return [calls[i] for i in sorted(calls)]
+
+
+def _plain_tool_calls(doc) -> list[dict]:
+    choices = doc.get("choices") if isinstance(doc, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, dict) else None
+    raw = message.get("tool_calls") if isinstance(message, dict) else None
+    out = []
+    for c in raw if isinstance(raw, list) else []:
+        fn = c.get("function") if isinstance(c, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str) and isinstance(fn.get("arguments"), str):
+            out.append({"name": fn["name"], "arguments": fn["arguments"]})
+    return out
+
+
+def _arguments_object(text):
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def judge_streamed_tool_call(streamed, plain, *, required=("city",)) -> dict:
+    """`streamed` and `plain` are lists of {"name", "arguments"} from the streamed and the non-streamed answer to the same request. A streamed
+    call must carry arguments that parse to an object holding every required key, and must equal the plain one. An empty object where keys are
+    required is the failure the LFM3 card found with speculation: the whole call arrives in a few events and the server's incremental parser sends it with `{}`."""
+    name = "streamed_tool_call"
+    if not plain:
+        return _advisory(name, "not_checked", "the model made no tool call when the request was not streamed, so there is nothing to compare")
+    if not streamed:
+        return _advisory(name, "fail", "the stream carried no tool call although the request that was not streamed did")
+    for call in streamed:
+        args = _arguments_object(call["arguments"])
+        if args is None:
+            return _advisory(name, "fail", f"a streamed tool call's arguments are not a JSON object ({_clip(call['arguments'])!r})")
+        if not args and required:
+            return _advisory(name, "fail", "a streamed tool call arrived with {} arguments although the tool requires " + ", ".join(required))
+        missing = [k for k in required if k not in args]
+        if missing:
+            return _advisory(name, "fail", f"a streamed tool call is missing the required {', '.join(missing)}")
+    if [(c["name"], _arguments_object(c["arguments"])) for c in streamed] != [(c["name"], _arguments_object(c["arguments"])) for c in plain]:
+        return _advisory(name, "fail", f"the streamed tool call differs from the tool call of the reply that was not streamed: {_clip(json.dumps(streamed))!r} against {_clip(json.dumps(plain))!r}")
+    return _advisory(name, "pass", "the streamed tool call carries the same name and arguments as the tool call of the reply that was not streamed")
+
+
+def probe_streamed_tool_call(base: str, model: str, extra: dict | None = None, *, timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """One request that forces the `get_weather` tool, sent once without and once with streaming (`judge_streamed_tool_call`). The tool is a schema
+    only; the probe never runs anything."""
+    name = "streamed_tool_call"
+    body = {**_body_of(model, extra, TOOL_PROMPT, 128), "tools": [TOOL_SCHEMA], "tool_choice": {"type": "function", "function": {"name": "get_weather"}}}
+    try:
+        status, doc, _ = _chat(base, body, timeout)
+        if status != 200:
+            return _advisory(name, "not_checked", f"the server answered {status} to a request with a tool")
+        s_status, events, _ = stream_events(base.rstrip("/") + "/v1/chat/completions", {**body, "stream": True}, timeout)
+        if s_status != 200:
+            return _advisory(name, "not_checked", f"the server answered {s_status} to the streamed request with a tool")
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while checking a streamed tool call: {type(exc).__name__}")
+    return judge_streamed_tool_call(tool_calls_of_stream(events), _plain_tool_calls(doc))
+
+
+SPEC_SAMPLING_OPTIONS = (("min_p", 0.05), ("logit_bias", {"1": -1}), ("min_tokens", 2))
+SPEC_SAMPLING_LABEL = ("vLLM validates these options and answers HTTP 400 when speculative decoding is on (the Lottolabs Qwen3.6, Qwen3.8-27B and Gemma 4 cards "
+                       "say so; a claim of the cards that was not measured here). A 200 means speculation is off or the server accepts the option; a 5xx is a server error")
+
+
+def probe_sampling_params_under_speculation(base: str, model: str, extra: dict | None = None, *, timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """One short greedy request for each of min_p, logit_bias and min_tokens. A 200, a 400 or a 422 is a clean answer (a 400 is what vLLM gives under
+    speculation); any other status is a fail. The result lists each status."""
+    name = "sampling_params_under_speculation"
+    statuses: dict[str, int] = {}
+    try:
+        for key, value in SPEC_SAMPLING_OPTIONS:
+            status, _, _ = _chat(base, {**_body_of(model, extra, "Say hello.", 4), key: value}, timeout)
+            statuses[key] = status
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _advisory(name, "not_checked", f"no answer while sending the options: {type(exc).__name__}", statuses=statuses, label=SPEC_SAMPLING_LABEL)
+    bad = {k: v for k, v in statuses.items() if v not in (200, 400, 422)}
+    if bad:
+        shown = ", ".join(f"{k} answered {v}" for k, v in bad.items())
+        return _advisory(name, "fail", f"the server did not answer cleanly: {shown}", statuses=statuses, label=SPEC_SAMPLING_LABEL)
+    return _advisory(name, "pass", "every option got a clean answer (" + ", ".join(f"{k} {v}" for k, v in statuses.items()) + ")", statuses=statuses, label=SPEC_SAMPLING_LABEL)
