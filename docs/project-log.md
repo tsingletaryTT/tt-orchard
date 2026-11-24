@@ -6102,3 +6102,12 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 `operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
+
+## 2026-11-24: KL and top-1 limits beside the perplexity bar (Lottolabs study, learnings 3 and 5; branch lotto-fidelity-floors)
+
+`FIDELITY_BAR = 9.9` is a perplexity ratio. The Lottolabs LFM2.5 card passes it (+0.29 percent) with a KL of 0.0458 and top-1 0.915, and the LFM3 card states its own rule (KL at most 0.03,
+|perplexity change| at most 1 percent). `orchard/plan.py` now has `FidelityRule`, the named rules `perplexity` (the default, behaviour unchanged) and `lfm3-card`, a gate that names its reason, and the options
+`--fidelity-kl`, `--fidelity-top1`, `--fidelity-dppl-percent`, `--fidelity-rule`, `--fidelity-kl-max`, `--fidelity-top1-min` on `plan` and `tier-plan`. The `tt-orchard plan` wrapper had dropped
+`--fidelity-bfp4` and `--fidelity-tokens`; it passes all of them now. `scripts/fidelity_score.py` prints the options to paste. Stage 2's records have no KL (they hold the log-probability of each sampled token only), so
+the KL limit applies to scores from `scripts/fidelity_score.py`; the CPU fake-quant row beside the device row needs the port's distribution and is not added. Run log:
+`docs/run-logs/2026-11-24-fidelity-floors-vs-published-cards.md`. 76 new tests (`tests/test_fidelity_floors.py`); 58 mutations each turn a test red.
