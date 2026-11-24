@@ -70,10 +70,19 @@ class Selection:
     notes: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
     total_tests: int = 0
+    alternatives: dict[str, int] = field(default_factory=dict)      # test files `--eager` and `--direct` would select, when this selection is large
 
     def args(self, fast: bool = False) -> list[str]:
         out = ["tests"] if self.full else sorted(self.files) + sorted(self.nodes)
         return out + (["-m", "not slow"] if fast else [])
+
+
+@dataclass
+class Fixture:
+    """A fixture of tests/conftest.py that a test has to ask for: the modules its body imports and the fixtures it asks for."""
+    refs: set = field(default_factory=set)
+    lazy_refs: set = field(default_factory=set)
+    args: set = field(default_factory=set)
 
 
 @dataclass
@@ -84,6 +93,8 @@ class Node:
     tokens: set = field(default_factory=set)      # file names found in its strings
     words: set = field(default_factory=set)       # path segments and words found in its strings
     dynamic: bool = False                         # imports a module chosen at run time
+    names: set = field(default_factory=set)       # parameter names and identifier-like strings: what a test can ask a fixture by
+    fixtures: dict = field(default_factory=dict)  # tests/conftest.py only: the fixtures a test must ask for, by name
     parsed: bool = True
 
 
@@ -146,6 +157,26 @@ def _from_base(rel: str, module: str | None, level: int) -> str:
     return module or ""
 
 
+def _fixture_info(stmt) -> tuple[str, bool] | None:
+    """(fixture name, autouse) for a function decorated with pytest.fixture, else None."""
+    if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    for dec in stmt.decorator_list:
+        call = dec if isinstance(dec, ast.Call) else None
+        target = call.func if call else dec
+        label = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+        if label != "fixture":
+            continue
+        name, autouse = stmt.name, False
+        for kw in (call.keywords if call else []):
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                name = kw.value.value
+            if kw.arg == "autouse":
+                autouse = not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+        return name, autouse
+    return None
+
+
 def read_node(root: Path, rel: str) -> Node:
     node = Node(rel)
     try:
@@ -164,8 +195,8 @@ def read_node(root: Path, rel: str) -> Node:
             node.refs.add(base)
             node.refs.update(f"{base}.{n.strip().split(' as ')[0]}" for n in names.split(",") if n.strip() and n.strip() != "*")
         return node
-    def visit(n, lazy: bool) -> None:
-        target = node.lazy_refs if lazy else node.refs
+    def visit(n, lazy: bool, sink: Node) -> None:
+        target = sink.lazy_refs if lazy else sink.refs
         if isinstance(n, ast.Import):
             target.update(a.name for a in n.names)
         elif isinstance(n, ast.ImportFrom):
@@ -180,12 +211,25 @@ def read_node(root: Path, rel: str) -> Node:
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
                     target.add(first.value)
                 else:
-                    node.dynamic = True
+                    sink.dynamic = True
         inner = lazy or isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         for child in ast.iter_child_nodes(n):
-            visit(child, inner)
+            visit(child, inner, sink)
 
-    visit(tree, False)
+    if rel == f"{TESTS_DIR}/conftest.py":
+        for stmt in tree.body:
+            info = _fixture_info(stmt)
+            if info and not info[1]:                                 # a fixture a test must ask for; an autouse one applies to every test
+                sink = Node(rel)
+                visit(stmt, False, sink)
+                node.fixtures[info[0]] = Fixture(sink.refs, sink.lazy_refs, {a.arg for a in ast.walk(stmt) if isinstance(a, ast.arg)} - {"self"})
+                node.dynamic = node.dynamic or sink.dynamic
+            else:
+                visit(stmt, False, node)
+    else:
+        visit(tree, False, node)
+    node.names = {a.arg for a in ast.walk(tree) if isinstance(a, ast.arg)} | {
+        c for c in _constants(tree) if c.isidentifier() and len(c) <= 80}
     _scan_strings(node, _constants(tree))
     return node
 
@@ -217,6 +261,31 @@ class Graph:
                 self.by_basename.setdefault(base, set()).add(rel)
         self.deps: dict[str, set[str]] = {rel: self._deps_of(n, lazy=True) - {rel} for rel, n in self.nodes.items()}
         self.eager_deps: dict[str, set[str]] = {rel: self._deps_of(n, lazy=False) - {rel} for rel, n in self.nodes.items()}
+        conftest = f"{TESTS_DIR}/conftest.py"
+        if conftest in self.nodes:
+            # pytest loads conftest.py before every test, so every test depends on it (its hooks and autouse fixtures run for all of them).
+            # A fixture a test has to ask for adds its imports only to the test files that name it, directly or through another fixture.
+            fixtures = self.nodes[conftest].fixtures
+            for rel, node in self.nodes.items():
+                if not (rel.startswith(f"{TESTS_DIR}/test_") and rel.count("/") == 1):
+                    continue
+                self.deps[rel].add(conftest)
+                self.eager_deps[rel].add(conftest)
+                wanted, queue = set(), deque(node.names & fixtures.keys())
+                while queue:
+                    name = queue.popleft()
+                    if name in wanted:
+                        continue
+                    wanted.add(name)
+                    queue.extend((fixtures[name].args & fixtures.keys()) - wanted)
+                for name in wanted:
+                    for ref in fixtures[name].refs:
+                        self.deps[rel] |= self._resolve(ref)
+                        self.eager_deps[rel] |= self._resolve(ref)
+                    for ref in fixtures[name].lazy_refs:
+                        self.deps[rel] |= self._resolve(ref)
+                self.deps[rel].discard(rel)
+                self.eager_deps[rel].discard(rel)
         self.rdeps = self._reverse(self.deps)
         self.eager_rdeps = self._reverse(self.eager_deps)
 
@@ -406,6 +475,10 @@ def select(root, changes, direct: bool = False, eager: bool = False) -> Selectio
     sel.files = sorted(files)
     sel.nodes = sorted(nodes)
     sel.why = chain_of
+    if seeds and not direct and not eager and len(chosen) * 2 > len(test_files):
+        for label, kw in (("eager", {"eager": True}), ("direct", {"direct": True})):
+            narrow = select(root, changes, **kw)
+            sel.alternatives[label] = len(narrow.files)
     return sel
 
 
@@ -424,6 +497,11 @@ def _map_other(graph: Graph, path: str, sel: Selection) -> set[str]:
 
 def _git(root: Path, *args: str):
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
+
+
+def _toplevel(cwd: Path) -> Path | None:
+    out = _git(cwd, "rev-parse", "--show-toplevel")
+    return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
 
 
 def git_changes(root: Path, base: str):
@@ -468,18 +546,22 @@ def explain(sel: Selection, fast: bool, direct: bool, eager: bool = False) -> st
     lines += [f"  {rel}  ({'; '.join(sel.why.get(rel, ['selected']))})" for rel in sel.files]
     lines += [f"  {n}  (guard: always selected)" for n in sel.nodes]
     lines += [f"note: {n}" for n in sel.notes]
+    if sel.alternatives:
+        lines.append(f"this change reaches most tests through chains of imports: --eager would select {sel.alternatives['eager']} files "
+                     f"(follows only imports that run when a module loads) and --direct {sel.alternatives['direct']} "
+                     f"(only tests that import the changed file themselves); each leaves out tests that reach it another way")
     return "\n".join(lines)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Print the pytest arguments for the tests a diff needs.")
     ap.add_argument("--base", default="origin/main", help="the ref the diff starts from (default origin/main)")
-    ap.add_argument("--root", default=str(ROOT), help="the repository (default: this one)")
+    ap.add_argument("--root", default=None, help="the repository (default: the one the current directory is in, else the one this script is in)")
     ap.add_argument("--direct", action="store_true", help="only the tests that import a changed module themselves (fastest, least safe)")
     ap.add_argument("--eager", action="store_true", help="follow only the imports that run when a module loads, not the ones inside functions (faster, less safe)")
     ap.add_argument("--fast", action="store_true", help="add -m 'not slow'")
     ns = ap.parse_args(argv)
-    root = Path(ns.root).resolve()
+    root = Path(ns.root).resolve() if ns.root else _toplevel(Path.cwd()) or ROOT
     changes, problem = git_changes(root, ns.base)
     if problem:
         sel = Selection(full=True, reasons=[problem])

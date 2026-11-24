@@ -182,6 +182,64 @@ def test_the_eager_and_direct_flags_are_accepted_by_the_command_and_named_in_the
     assert r.returncode == 0 and "imports that run at load only" in r.stderr
 
 
+def test_every_test_depends_on_conftest_so_a_module_its_fixtures_import_selects_every_test(tmp_path):
+    """pytest runs `tests/conftest.py` before every test, and its autouse fixtures import modules inside the fixture functions."""
+    make_repo(tmp_path, {
+        "orchard/b.py": "X = 1\n",
+        "tests/conftest.py": "import pytest\n\n\n@pytest.fixture(autouse=True)\ndef guard():\n    from orchard import b\n    yield\n",
+    })
+    sel = pick(tmp_path, ["orchard/b.py"])
+    assert {"tests/test_unrelated.py", "tests/test_guard.py"} <= set(sel.files)
+    assert "tests/conftest.py" in " ".join(sel.why["tests/test_unrelated.py"])
+
+
+CONFTEST_FIXTURES = (
+    "import pytest\n\n\n"
+    "@pytest.fixture\ndef wants_b():\n    from orchard import b\n    yield\n\n\n"
+    "@pytest.fixture\ndef wraps_b(wants_b):\n    yield\n\n\n"
+    "@pytest.fixture(name='renamed_b')\ndef some_name():\n    from orchard import b\n    yield\n\n\n"
+    "def pytest_runtest_makereport(item, call):\n    from orchard import hook_mod\n"
+)
+
+
+def test_a_fixture_a_test_has_to_ask_for_selects_only_the_tests_that_ask_for_it(tmp_path):
+    make_repo(tmp_path, {
+        "orchard/b.py": "X = 1\n", "orchard/hook_mod.py": "Y = 1\n",
+        "tests/conftest.py": CONFTEST_FIXTURES,
+        "tests/test_asks.py": "def test_a(wants_b):\n    pass\n",
+        "tests/test_asks_through.py": "def test_a(wraps_b):\n    pass\n",
+        "tests/test_asks_by_name.py": "def test_a(renamed_b):\n    pass\n",
+        "tests/test_uses.py": "import pytest\n\n\n@pytest.mark.usefixtures('wants_b')\ndef test_a():\n    pass\n",
+    })
+    sel = pick(tmp_path, ["orchard/b.py"])
+    assert {"tests/test_asks.py", "tests/test_asks_through.py", "tests/test_asks_by_name.py", "tests/test_uses.py"} <= set(sel.files)
+    assert "tests/test_unrelated.py" not in sel.files                       # it asks for no fixture that imports b
+
+
+def test_a_pytest_hook_in_conftest_applies_to_every_test(tmp_path):
+    make_repo(tmp_path, {"orchard/hook_mod.py": "Y = 1\n", "orchard/b.py": "", "tests/conftest.py": CONFTEST_FIXTURES})
+    assert "tests/test_unrelated.py" in pick(tmp_path, ["orchard/hook_mod.py"]).files
+
+
+def test_a_fixture_nobody_asks_for_selects_nothing(tmp_path):
+    make_repo(tmp_path, {"orchard/b.py": "", "tests/conftest.py": CONFTEST_FIXTURES.replace("def pytest_runtest_makereport(item, call):\n    from orchard import hook_mod\n", "")})
+    assert only_guards(pick(tmp_path, ["orchard/b.py"]))
+
+
+def test_a_selection_that_reaches_most_tests_names_the_narrower_choices(tmp_path):
+    """In a tightly linked package one change can reach most tests through chains of imports. The explanation then says how many tests
+    `--eager` and `--direct` would select, so the person can choose a smaller loop knowing what each leaves out."""
+    files = {"orchard/a.py": "X = 1\n", "orchard/b.py": "def f():\n    from orchard import a\n    return a.X\n"}
+    files.update({f"tests/test_via_b{i}.py": "from orchard import b\n\n\ndef test_t():\n    pass\n" for i in range(12)})
+    files["tests/test_direct.py"] = "from orchard import a\n\n\ndef test_t():\n    pass\n"
+    make_repo(tmp_path, files)
+    sel = pick(tmp_path, ["orchard/a.py"])
+    assert sel.alternatives == {"eager": 2, "direct": 2}                    # test_direct.py and the guard file
+    assert "reaches most tests" in tfd.explain(sel, fast=False, direct=False)
+    narrow = pick(tmp_path, ["orchard/a.py"], eager=True)
+    assert narrow.alternatives == {} and "reaches most tests" not in tfd.explain(narrow, fast=False, direct=False, eager=True)
+
+
 def test_a_file_in_scripts_is_an_importable_node_too(tmp_path):
     make_repo(tmp_path, {
         "scripts/tool.py": "X = 1\n",
@@ -519,3 +577,13 @@ def test_the_fast_and_direct_flags_are_accepted_by_the_command(tmp_path):
     (tmp_path / "orchard" / "a.py").write_text("X = 2\n")
     r = run_script(tmp_path, "--base", "HEAD", "--fast", "--direct")
     assert r.returncode == 0 and shlex.split(r.stdout)[-2:] == ["-m", "not slow"]
+
+
+def test_the_command_uses_the_repository_of_the_current_directory_by_default(tmp_path):
+    make_repo(tmp_path, {"orchard/a.py": "X = 1\n", "tests/test_a.py": "from orchard import a\n\n\ndef test_a():\n    pass\n"})
+    git(tmp_path, "init", "-q", "-b", "main")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    (tmp_path / "orchard" / "a.py").write_text("X = 2\n")
+    r = subprocess.run([sys.executable, str(REPO / "scripts" / "tests_for_diff.py"), "--base", "HEAD"], cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode == 0 and "tests/test_a.py" in shlex.split(r.stdout) and "changed: orchard/a.py" in r.stderr
