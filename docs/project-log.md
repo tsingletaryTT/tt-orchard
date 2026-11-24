@@ -6103,6 +6103,14 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-24: runtime hazards from the Lottolabs cards (study learnings 22 to 24 and 31; branch lotto-runtime-hazards)
+
+The Lottolabs cards report four failures that a config cannot predict: a trace replay that overwrites a tensor allocated after the capture (a page table, vision rows), a device hang about once in 20,000 decode steps (the LM head waits in a
+NoC barrier), `TT_FATAL` for a host read during trace capture, and a converted-tensor cache keyed by name and shape that serves wrong weights after a checkpoint change. `orchard/hazards.py` has a second table, `RUNTIME_HAZARD_TABLE`
+(`python3 -m orchard.hazards --runtime`), and `docs/runtime-hazards.md` lists the rows. Each row names the card and the section, says it is a card claim that this repository has not reproduced, says what a stage should run, and says what orchard checks today:
+trace captures and replays are counted (issue 547) and nothing checks tensors allocated after a capture, no stage runs a 20,000-step decode, and the `.orchard-model` cache marker names the model and not the checkpoint or the image. The
+existing sampler row (`vocab_per_die_above_65536`) now says it describes the stock sampler op: the Inkling-2-Mini and Qwen3.6 cards run vocabularies of 201,024 and 248,320 on one die with a custom top-k scan. The scan of a config is unchanged.
+16 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
 ## 2026-11-24: KL and top-1 limits beside the perplexity bar (Lottolabs study, learnings 3 and 5; branch lotto-fidelity-floors)
 
 `FIDELITY_BAR = 9.9` is a perplexity ratio. The Lottolabs LFM2.5 card passes it (+0.29 percent) with a KL of 0.0458 and top-1 0.915, and the LFM3 card states its own rule (KL at most 0.03,
