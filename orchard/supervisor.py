@@ -145,7 +145,7 @@ from orchard.defaults import (AGENT_STAGE_CAPS_BLOCK, AGENT_STAGE_CAPS_RESTART, 
                               ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
-from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
+from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, decision_facts, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
@@ -5353,7 +5353,8 @@ class Supervisor:
         # A run that has not booted a coder (the audio stages need none) has no coder boards to park: a free board is leased, or the lease waits.
         d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
-                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards),
+                           board_facts=decision_facts(d.server_boards, chips))
         if d.park_needed:
             h = self._handoff(n, self.coder_lease)
             lease = h.park()
@@ -5653,7 +5654,8 @@ class Supervisor:
         # none: there is nothing to park, so every board comes from a lease of its own, which waits while the boards are busy (review of PR 490).
         d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
-                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards),
+                           board_facts=decision_facts(d.server_boards, chips))
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
         if d.action == "use_free" or self.coder_lease is None:
@@ -6225,7 +6227,7 @@ class Supervisor:
         d = decide_park(self.coder_lease.units, chips, test.boards)
         self.ledger.append("decision", n, decision="hardware phase", config=test.chips,
                            action=d.action, free_boards=list(d.free_boards),
-                           server_boards=list(d.server_boards))
+                           server_boards=list(d.server_boards), board_facts=decision_facts(d.server_boards, chips))
         first_chip = {c.board: c.bdf for c in reversed(chips)}       # each board's first chip
         if d.action == "use_free":
             exact = first_chip[d.free_boards[0]] if test.boards == 1 else None

@@ -6061,6 +6061,15 @@ duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest 
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
 
+## 2026-11-23: the hardware-phase decision records what `decide_park` saw (issue 591, branch park-decision-facts-591)
+
+Run 24b parked the coder with `free_boards=[]` while `gozer status` showed two chips FREE, and the ledger held only the board lists, so the cause was not
+readable afterwards. The three "hardware phase" decisions in `supervisor.py` (the plain phase, the wide phase and stage 4's plan) now carry `board_facts`
+from `handoff.decision_facts`: each board's chips with state and `who`, whether the coder's lease holds the board, the reason a board was not counted free
+(the coder holds it, a named chip is busy, a FREE chip lists a `who`, or the chips have no board serial) and the chips that look FREE on a board that was not counted free.
+`decide_park` and the facts share one rule (`_busy_chip`), so they cannot disagree. The decision itself is unchanged. This does not find the cause of run 24b;
+it makes the next occurrence readable from the ledger alone. 11 tests (`tests/test_park_decision_facts_591.py`) and 11 mutations (the rule, the coder flag, the
+free-chip list, the stringified `who`, and each of the three wirings) each turn a test red. The issue stays open: it needs a second occurrence to confirm a cause.
 ## 2026-11-23: the named bundle's files are recorded at the start and compared at stages 2 and 4 (issue 662, branch record-bundle-capabilities-digest-662)
 
 Stage 0 judges a model against the named bundle's `orchard-capabilities.json`, and nothing showed whether the bundle changed between stage 0 and stage 2
