@@ -15,6 +15,8 @@ Bytes per token. Counted per layer from the config (shapes in `_attention_params
   * the dense MLP, or for a mixture-of-experts layer the router, the top-k routed experts and the shared expert,
   * the LM head (read in full for every token, even when it is tied to the embedding table; the embedding lookup reads one row and is
     left out).
+A config with `loop_config` runs a block of layers several times for each token (Inkling-2-Mini: layers 6 to 17, 3 passes). Those layers
+are read once per pass, so their bytes count once per pass. The LM head runs once.
 Norm weights, biases, the shared-expert gate, rotary tables, the KV cache and recurrent state are not counted.
 
 Bandwidth. `per_die_bandwidth_gb_s` is a required input with no default. `BOARDS` holds the figure for each board type with the
@@ -40,7 +42,8 @@ GROUPS = ("attention", "dense_mlp", "router", "routed_experts", "shared_experts"
 
 ASSUMPTIONS = ("batch of one, one token per pass (no speculative decoding); weights spread evenly over the dies so their bandwidth adds; "
                "datasheet peak bandwidth; the KV cache, recurrent state, norms, biases, rotary tables and the embedding lookup are "
-               "not counted; the dtype policy is whatever the caller gives and is not read from the bundle.")
+               "not counted; the small gate weights a looped block reads on each pass (loop controllers) are not counted; the dtype policy is "
+               "whatever the caller gives and is not read from the bundle.")
 
 # Where the peak figures come from. The public Tenstorrent docs site (repository tenstorrent/tenstorrent.github.io), page
 # core/aibs/blackhole/index.md, table "Memory Bandwidth" row: p100a 448 GB/sec, p150a and p150b 512 GB/sec; and
@@ -196,21 +199,24 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
 
     active: dict[str, float] = {g: 0 for g in GROUPS}
     stored = 0
+    # A looped layer (`loop_config`) is stored once and read once per pass, so its active bytes count `passes[i]` times and its stored size once.
+    passes = d.loop_passes or (1,) * d.layers
     for i in range(d.layers):
+        n = passes[i]
         attn = _mixer_params(d, d.layer_types[i])
-        active["attention"] += attn
+        active["attention"] += attn * n
         stored += attn
         if d.moe_layers[i]:
             router = d.hidden * d.routed_experts
             expert = _mlp_params(d, d.moe_intermediate)
             shared = _mlp_params(d, d.shared_intermediate) if d.shared_intermediate else 0
-            active["router"] += router
-            active["routed_experts"] += d.top_k * expert
-            active["shared_experts"] += shared
+            active["router"] += router * n
+            active["routed_experts"] += d.top_k * expert * n
+            active["shared_experts"] += shared * n
             stored += router + d.routed_experts * expert + shared
         else:
             mlp = _mlp_params(d, d.intermediate)
-            active["dense_mlp"] += mlp
+            active["dense_mlp"] += mlp * n
             stored += mlp
     head = d.hidden * d.vocab
     active["lm_head"] = head
@@ -229,7 +235,8 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
                "layer_types": kinds, "moe_layers": list(d.moe_layers), "routed_experts": d.routed_experts,
                "experts_per_token": d.top_k, "moe_intermediate_size": d.moe_intermediate,
                "shared_intermediate_size": d.shared_intermediate, "linear_attention": dict(d.linear), "mamba": dict(d.mamba),
-               "multi_latent_attention": dict(d.mla)}
+               "multi_latent_attention": dict(d.mla), "loop_applications": sum(passes), "loop_passes_by_layer": list(passes),
+               "loop_variable": d.loop_variable}
     return DecodeFloor(bytes_per_token=total, by_group=by_group, active_params=sum(active.values()), stored_params=stored,
                        floor_ms=floor_ms, floor_tok_s=1000.0 / floor_ms, dies=dies, per_die_bandwidth_gb_s=bw, dtype_policy=policy,
                        board=board, model_summary=summary)

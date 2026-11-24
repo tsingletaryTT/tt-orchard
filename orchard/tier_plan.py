@@ -159,6 +159,9 @@ def caveats(config) -> list[str]:
         out.append("a hashed n-gram embedding (ngram_ and ple_ keys): its table is not counted and can be large")
     if has("mtp_num_hidden_layers", "num_nextn_predict_layers"):
         out.append("a multi-token-prediction layer (mtp keys): its weights are not counted")
+    if isinstance(cfg.get("loop_config"), dict):
+        out.append("looped layers (loop_config): the gate weights a looped block reads on each pass (loop controllers) are not counted. The fit counts "
+                   "each looped layer's weights once; decode reads them once per pass (orchard/decode_floor.py)")
     if top.get("vision_config") or cfg.get("vision_config"):
         out.append("a vision tower (vision_config): only the language model is counted")
     return out
