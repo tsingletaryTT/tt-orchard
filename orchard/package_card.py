@@ -39,6 +39,16 @@ LICENSES = {"cc-by-nc-4.0": ("CC BY-NC 4.0", "https://creativecommons.org/licens
             "apache-2.0": ("Apache 2.0", "https://www.apache.org/licenses/LICENSE-2.0"),
             "mit": ("MIT", "https://opensource.org/licenses/MIT")}
 PERMISSIVE = frozenset({"apache-2.0", "mit", "cc-by-4.0"})
+# One sentence for each known licence other than Apache 2.0: the restriction a user is held to. It is a summary and the card says so; the licence text at the
+# link governs (the Lottolabs cards put the licence limits near the top, study of 2026-11-24). A licence this module does not know, and `other`, keep the
+# non-commercial treatment and get no summary, because a model whose licence is `other` quotes the agreement word for word (docs/can-cards.md).
+LICENSE_RESTRICTIONS = {
+    "cc-by-nc-4.0": "Credit is required.",
+    "cc-by-nc-sa-4.0": "Credit is required, and anything adapted from the weights must be shared under the same licence.",
+    "cc-by-nc-nd-4.0": "Credit is required, and adapted versions may not be shared.",
+    "cc-by-4.0": "Credit is required and changes must be indicated.",
+    "mit": "The copyright and licence notice must stay with copies of the weights.",
+}
 NC_LINE = "Non-commercial use only."
 # Wording that implies commercial use. Checked case-insensitively on cards for non-commercial models.
 COMMERCIAL_CLAIMS = (r"(?<!non-)(?<!non )commercial (?:use|deployments?|purposes?|products?|"
@@ -49,6 +59,14 @@ NUMBERS_HEAD = "## Expected performance"
 REPORTED_HEAD = "## Reported by the authors"
 NOT_MEASURED_SENTENCE = "were not measured here"
 CARD_TAGS = ("tt-model-cache", "vllm", "thin")       # the tags tt-model's own push adds to a v6 bundle
+# What the numbers do not show. The Lottolabs cards state the scope of their proofs in a sentence; this is ours. It names no number, so the check that
+# refuses a number with a unit outside the table accepts it.
+PROOF_SCOPE = ("These rows show what they name and no more: that the package serves, and how far its greedy tokens agree with the CPU reference on the "
+               "prompts the run used. They do not show agreement on other prompts, equality with the original model's output on a GPU, quality on any "
+               "benchmark, or that speculative decoding keeps the output distribution of plain decoding.")
+MAX_STAGE = 8                    # the harness has stages 0 to 8; a path under another number is not a stage's result
+_STAGE_PATH = re.compile(r"^stages/(\d+)/")
+_VERSION = re.compile(r"^[0-9][0-9A-Za-z._+-]{0,39}$")
 
 
 def read_license(snapshot) -> str | None:
@@ -84,6 +102,37 @@ class Reported:
     name: str                        # the benchmark, as the authors name it
     value: str                       # as the authors wrote it, for example "81.8" or "93.8%"
     note: str = ""                   # the protocol or metric, if the authors state one
+
+
+def numbers_source_sentence(numbers) -> str | None:
+    """Where the measured rows came from, read from the first evidence file of each (the file the value was read from): stage 7 booted this package, so
+    its rows were measured on it; stages 2 and 4 measured the model's staged configuration earlier in the run. None when no measured row has a stage path."""
+    stages = set()
+    for n in numbers:
+        if n.label == "measured" and n.evidence:
+            m = _STAGE_PATH.match(n.evidence[0])
+            if m and int(m.group(1)) <= MAX_STAGE:
+                stages.add(int(m.group(1)))
+    if not stages:
+        return None
+    parts = []
+    if 7 in stages:
+        parts.append("Rows whose result file is under `stages/7/` were measured on this package.")
+    earlier = sorted(stages - {7})
+    if earlier:
+        parts.append("Rows whose result file is under " + ", ".join(f"`stages/{s}/`" for s in earlier) + " were measured earlier in the run, on the "
+                     "model's staged configuration, before this package was built.")
+    parts.append("No row is copied from another package or from the model's authors.")
+    return " ".join(parts)
+
+
+def _version(value: str, what: str) -> str:
+    """A firmware or tt-kmd version as the card prints it: digits first, then letters, digits and `._+-`, at most 40 characters. An empty value is unknown."""
+    if value == "":
+        return ""
+    if not isinstance(value, str) or not _VERSION.match(value):
+        raise ValueError(f"{what} must be a version such as 19.17.1 (digits first; letters, digits and ._+- after)")
+    return value
 
 
 def _cell(text: str) -> str:
@@ -129,6 +178,8 @@ class CardFacts:
     drafter_off_by_sampling: bool = False   # stage 2 chose the drafter-off configuration because the model needs sampling (every profile)
     sampling_trial_chips: int | None = None  # the chip count the sampling trial ran on (stage 2's), which may differ from this profile's
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
+    firmware: str = ""               # the board firmware the package was tested with ("" when the run did not record it)
+    kmd: str = ""                    # the tt-kmd version the package was tested with ("" when the run did not record it)
 
 
 def _own_config_lines(f: CardFacts) -> list[str]:
@@ -251,11 +302,13 @@ def render_card(f: CardFacts) -> str:
              f"{f.chips} Tenstorrent {f.arch} chips (mesh {f.mesh}). The tt-orchard harness staged it "
              "from a run of that model.", "",
              "## License", ""]
+    restriction = LICENSE_RESTRICTIONS.get(f.license_id)
+    summary = f" {restriction} This is a summary of {lic_name}; the licence text at the link governs." if restriction else ""
     if non_commercial(f.license_id):
         lines.append(f"The weights this bundle points to are licensed {lic}. {NC_LINE} "
-                     "Commercial use is not permitted by that license.")
+                     f"Commercial use is not permitted by that license.{summary}")
     else:
-        lines.append(f"The weights this bundle points to are licensed {lic}.")
+        lines.append(f"The weights this bundle points to are licensed {lic}.{summary}")
     lines += ["The bundle ships no weights. `tt-model` downloads them from "
               f"{f.model_id} with your own Hugging Face account.", "",
               "## What it runs", "",
@@ -327,6 +380,7 @@ def render_card(f: CardFacts) -> str:
               "holds the value. The files are in this repository under `evidence/`, at the paths "
               "shown, with the run's directory, the home directory and the host name replaced by "
               "`<RUN_DIR>`, `<HOME>` and `<HOST>`. `TODO` means not measured.", "",
+              *([source] if (source := numbers_source_sentence(f.numbers)) else []), PROOF_SCOPE, "",
               "| Number | Value | Label | Evidence |", "|---|---|---|---|"]
     for n in f.numbers:
         ev = ", ".join(f"`{e}`" for e in n.evidence) if n.label == "measured" else "-"
@@ -342,6 +396,10 @@ def render_card(f: CardFacts) -> str:
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
+    firmware, kmd = _version(f.firmware, "firmware"), _version(f.kmd, "tt-kmd")
+    if firmware or kmd:
+        limits.append("Tested with " + " and ".join(x for x in (f"firmware {firmware}" if firmware else "", f"tt-kmd {kmd}" if kmd else "") if x)
+                      + "; other versions are not claimed by this bundle.")
     if f.graft:
         rate = (f"The share of the drafter's guesses that are accepted on this model is in the table above ({f.acceptance_from})."
                 if f.acceptance_measured else

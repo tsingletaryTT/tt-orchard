@@ -6102,3 +6102,10 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 `operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
+
+## 2026-11-24: statements for the package card (Lottolabs study, learnings 25 and 32; branch lotto-card-statements)
+
+The Lottolabs cards say where each number came from and whether it was measured on the package, what their proofs do not show, the firmware and tt-kmd they were tested with, and the licence's limit near the top. `render_card`
+now says, under Expected performance, which stage each measured row came from (stage 7 rows were measured on this package; stage 2 and 4 rows on the staged configuration before it was built) and that no row is copied; adds `PROOF_SCOPE` (what the rows do not show); prints
+`CardFacts.firmware` and `kmd` in Limitations when set (nothing sets them yet: a run records neither); and adds one summary sentence for MIT, CC BY 4.0 and the three non-commercial CC licences. A reproduce block was not added (see `docs/can-cards.md`).
+38 new tests in `tests/test_card_statements.py`; the existing card tests pass unchanged.
