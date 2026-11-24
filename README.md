@@ -219,6 +219,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
 - **Pure analysis modules.** `orchard/decode_floor.py` (share of the memory-bandwidth floor), `orchard/hazards.py` (model dimensions that trip known op
   limits), `orchard/first_divergence.py` (the first layer that leaves the noise) and `orchard/noise_floor.py` (bars from measured CPU floors and a known-bad control).
   None of them touches a device. [Floor and hazards](docs/run-logs/2026-10-28-decode-floor-break-even-hazards.md),
+  [runtime hazards that the Lottolabs cards and the Inkling-2-Mini bundle report](docs/runtime-hazards.md),
   [divergence and noise floor](docs/run-logs/2026-10-28-first-divergence-and-noise-floor.md).
 
 Limits that apply to all of it: single prompts for most agreement and speed checks, a shared host, and speed numbers that vary with its load.
@@ -1060,14 +1061,19 @@ largest format mix whose weights fit in a share of the DRAM. `--chips N` sets th
 DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and `--json` prints the result as JSON. bfp8 is the default format below bf16. A row that uses bfp4 is recommended only with a score measured on the model's own port: pass it with
 `--fidelity-bfp4` (the score, 0 to 10) and `--fidelity-tokens` (the scored tokens, at least 4000). The bar is 9.9, a provisional figure between the
 two measured points (bfp8 9.991, bfp4 9.821 on one 7B port; docs/project-log.md, issue 731). A score below the bar removes the row. Without a score,
-a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`.
+a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`, which prints the options to paste.
+The ratio bar reads one number. A port can pass it with a large KL, so the same run's `--fidelity-kl` (KL against the reference), `--fidelity-top1`
+(argmax agreement, 0 to 1) and `--fidelity-dppl-percent` (perplexity change on other text; without it the change is worked out from the score) can be
+given, and `--fidelity-rule lfm3-card` also requires a KL of at most 0.03 and a perplexity change within 1 percent (the rule the Lottolabs LFM3-1.7B card
+states for its own choice; the limits are one author's, so it is never the default). `--fidelity-kl-max` and `--fidelity-top1-min` set a limit of the caller's own. Without
+`--fidelity-rule` the bar is the only rule, as before. `tier-plan` takes the same options.
 
 #### Before a download, for a mixture-of-experts model: `tt-orchard tier-plan`
 
 `tt-orchard tier-plan SOURCE` answers the question the plan command answers, but from the model's `config.json` alone, so it can run before the
 checkpoint is on disk. SOURCE is a Hugging Face repository id (only `config.json` and `model.safetensors.index.json` are fetched, with no token and
 no weight file), a `config.json`, or a directory that holds one. It prints, for 1, 2 and 4 chips (`--chips 1,2,4`) and each weight format mix, a
-verdict: **fits on chips** (replicated, or with the experts split over the chips), **fits with host experts** (the always-resident weights and as many
+verdict: **fits on chips** (replicated, with the experts split over the chips, or tensor-parallel, a layout the plan assumes in which the attention heads, the expert width and the output head are divided over the dies and the head counts must divide by the die count), **fits with host experts** (the always-resident weights and as many
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
