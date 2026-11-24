@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "hazards: a runtime table of four failures the Lottolabs cards report (trace inputs overwritten, a rare LM-head hang, a host read during capture, a cache keyed by name and shape), each marked a card claim; the sampler row says it describes the stock op."
+kind = "docs"

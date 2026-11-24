@@ -1,0 +1,3 @@
+target = "0.9.201"
+summary = "tt-orchard tier-plan offers a tensor-parallel layout (attention heads, expert width and output head divided over the dies) and says which count blocks it (Inkling-2-Mini study)."
+kind = "feature"
