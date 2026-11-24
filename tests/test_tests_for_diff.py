@@ -240,6 +240,30 @@ def test_a_selection_that_reaches_most_tests_names_the_narrower_choices(tmp_path
     assert narrow.alternatives == {} and "reaches most tests" not in tfd.explain(narrow, fast=False, direct=False, eager=True)
 
 
+def test_conftest_edges_are_followed_one_step_only(tmp_path):
+    """The autouse fixtures import `skillsfresh` to replace one of its functions. A change to that module reaches every test. A change to a
+    module `skillsfresh` imports does not: the tests that use that module reach it through their own imports."""
+    make_repo(tmp_path, {
+        "orchard/skillsfresh.py": "from orchard import deep\n",
+        "orchard/deep.py": "X = 1\n",
+        "tests/conftest.py": "import pytest\n\n\n@pytest.fixture(autouse=True)\ndef f():\n    from orchard import skillsfresh\n    yield\n",
+        "tests/test_deep.py": "from orchard import deep\n\n\ndef test_d():\n    pass\n",
+    })
+    assert "tests/test_unrelated.py" in pick(tmp_path, ["orchard/skillsfresh.py"]).files
+    deep = pick(tmp_path, ["orchard/deep.py"])
+    assert "tests/test_deep.py" in deep.files and "tests/test_unrelated.py" not in deep.files
+
+
+def test_a_document_is_not_matched_by_the_folder_it_sits_in(tmp_path):
+    """A module that prints the words `run-logs` does not make every document under docs/run-logs/ one of its dependencies."""
+    make_repo(tmp_path, {
+        "docs/run-logs/2026-01-01-x.md": "x\n",
+        "orchard/mentions.py": 'WHERE = "run-logs"\n',
+        "tests/test_mentions.py": "from orchard import mentions\n\n\ndef test_m():\n    pass\n",
+    })
+    assert only_guards(pick(tmp_path, ["docs/run-logs/2026-01-01-x.md"]))
+
+
 def test_a_file_in_scripts_is_an_importable_node_too(tmp_path):
     make_repo(tmp_path, {
         "scripts/tool.py": "X = 1\n",

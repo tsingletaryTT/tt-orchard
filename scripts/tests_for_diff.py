@@ -319,7 +319,7 @@ class Graph:
     def referrers(self, rel: str) -> set[str]:
         """Nodes whose strings name a file that is not a node itself: a document or a data file."""
         base = rel.rsplit("/", 1)[-1]
-        comps = [c for c in rel.split("/")[:-1] if c not in GENERIC_DIRS]
+        comps = [c for c in rel.split("/")[:-1] if c not in GENERIC_DIRS] if rel.startswith(f"{TESTS_DIR}/fixtures/") else []
         return {r for r, n in self.nodes.items() if (base in n.tokens and base != "__init__.py") or any(c in n.words for c in comps)}
 
     def closure(self, seeds, direct: bool = False, eager: bool = False):
@@ -329,10 +329,13 @@ class Graph:
         rdeps = self.eager_rdeps if eager else self.rdeps
         parent: dict[str, str | None] = {s: None for s in seeds}
         queue = deque(seeds)
+        conftest = f"{TESTS_DIR}/conftest.py"
         while queue:
             cur = queue.popleft()
             for nxt in sorted(rdeps.get(cur, ())):
                 if nxt in parent:
+                    continue
+                if nxt == conftest and cur not in seeds:           # conftest imports a module to replace a function of it: one step only
                     continue
                 parent[nxt] = cur
                 is_test = nxt.startswith("tests/test_")
