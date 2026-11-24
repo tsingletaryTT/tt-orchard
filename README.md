@@ -219,7 +219,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
 - **Pure analysis modules.** `orchard/decode_floor.py` (share of the memory-bandwidth floor), `orchard/hazards.py` (model dimensions that trip known op
   limits), `orchard/first_divergence.py` (the first layer that leaves the noise) and `orchard/noise_floor.py` (bars from measured CPU floors and a known-bad control).
   None of them touches a device. [Floor and hazards](docs/run-logs/2026-10-28-decode-floor-break-even-hazards.md),
-  [runtime hazards that the Lottolabs cards report](docs/runtime-hazards.md),
+  [runtime hazards that the Lottolabs cards and the Inkling-2-Mini bundle report](docs/runtime-hazards.md),
   [divergence and noise floor](docs/run-logs/2026-10-28-first-divergence-and-noise-floor.md).
 
 Limits that apply to all of it: single prompts for most agreement and speed checks, a shared host, and speed numbers that vary with its load.
