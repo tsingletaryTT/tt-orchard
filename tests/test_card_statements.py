@@ -48,6 +48,10 @@ def test_unmeasured_rows_and_rows_with_other_evidence_get_no_sentence():
     assert pc.numbers_source_sentence((Number("a", 1, "x", "measured", ()),)) is None
 
 
+def test_a_todo_row_with_evidence_listed_is_not_a_measurement():
+    assert pc.numbers_source_sentence((Number("a", None, "x", "TODO", ("stages/7/result.json",)),)) is None
+
+
 def test_only_the_first_evidence_file_decides_the_stage():
     # the first file is the one the value was read from; a later file under another stage does not change where the number came from
     s = pc.numbers_source_sentence((Number("a", 1, "x", "measured", ("stages/7/result.json", "stages/2/evidence/a.json")),))
@@ -108,6 +112,18 @@ def test_one_known_version_is_stated_alone():
 def test_no_version_no_sentence():
     card = render_card(facts())
     assert "firmware" not in card.lower().split("## limitations")[1].split("## risks")[0]
+
+
+def test_a_version_of_40_characters_is_accepted_and_of_41_is_not():
+    assert "firmware " + "1" * 40 in render_card(facts(firmware="1" * 40))
+    with pytest.raises(ValueError, match="firmware"):
+        render_card(facts(firmware="1" * 41))
+
+
+@pytest.mark.parametrize("bad", ["v19.17.1", "a1", "x", "rc1"])
+def test_a_version_must_start_with_a_digit(bad):
+    with pytest.raises(ValueError, match="firmware"):
+        render_card(facts(firmware=bad))
 
 
 @pytest.mark.parametrize("bad", ["", " ", "19 17", "19.17.1\n- x", "a" * 41, "v|1", "<b>", "`x`", "../x"])
