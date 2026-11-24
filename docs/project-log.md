@@ -6108,6 +6108,22 @@ runs out in the same helper wait). Three mutations of the new condition each tur
 The Lottolabs cards check that each of 16 concurrent requests equals the same request alone, that a request between other streams stays exact, that a cut stream leaves the next request exact, that speculation on equals off, that a streamed tool call never has
 `{}` arguments, and that vLLM answers 400 to min_p, logit_bias and min_tokens under speculation. `served_probes.py` sent concurrent requests only for a rate. It now has six advisory probes, each with a control (a server that does not repeat itself alone gets no verdict); `can boot` runs three of them when the can declares `max_num_seqs` above 1,
 and lists them without letting them fail the boot. The other three are library functions for a caller that knows the speculation switch or the tool schema. Run log: `docs/run-logs/2026-11-24-concurrency-isolation-probes.md`; `docs/canning.md` describes the rows. 80 new tests in `tests/test_served_probes_isolation.py` against a local streaming fake, 3 in `tests/test_can_served_probes_boot.py`. The first chip run is owed.
+## 2026-11-24: runtime hazards from the Lottolabs cards (study learnings 22 to 24 and 31; branch lotto-runtime-hazards)
+
+The Lottolabs cards report four failures that a config cannot predict: a trace replay that overwrites a tensor allocated after the capture (a page table, vision rows), a device hang about once in 20,000 decode steps (the LM head waits in a
+NoC barrier), `TT_FATAL` for a host read during trace capture, and a converted-tensor cache keyed by name and shape that serves wrong weights after a checkpoint change. `orchard/hazards.py` has a second table, `RUNTIME_HAZARD_TABLE`
+(`python3 -m orchard.hazards --runtime`), and `docs/runtime-hazards.md` lists the rows. Each row names the card and the section, says it is a card claim that this repository has not reproduced, says what a stage should run, and says what orchard checks today:
+trace captures and replays are counted (issue 547) and nothing checks tensors allocated after a capture, no stage runs a 20,000-step decode, and the `.orchard-model` cache marker names the model and not the checkpoint or the image. The
+existing sampler row (`vocab_per_die_above_65536`) now says it describes the stock sampler op: the Inkling-2-Mini and Qwen3.6 cards run vocabularies of 201,024 and 248,320 on one die with a custom top-k scan. The scan of a config is unchanged.
+16 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
+## 2026-11-24: KL and top-1 limits beside the perplexity bar (Lottolabs study, learnings 3 and 5; branch lotto-fidelity-floors)
+
+`FIDELITY_BAR = 9.9` is a perplexity ratio. The Lottolabs LFM2.5 card passes it (+0.29 percent) with a KL of 0.0458 and top-1 0.915, and the LFM3 card states its own rule (KL at most 0.03,
+|perplexity change| at most 1 percent). `orchard/plan.py` now has `FidelityRule`, the named rules `perplexity` (the default, behaviour unchanged) and `lfm3-card`, a gate that names its reason, and the options
+`--fidelity-kl`, `--fidelity-top1`, `--fidelity-dppl-percent`, `--fidelity-rule`, `--fidelity-kl-max`, `--fidelity-top1-min` on `plan` and `tier-plan`. The `tt-orchard plan` wrapper had dropped
+`--fidelity-bfp4` and `--fidelity-tokens`; it passes all of them now. `scripts/fidelity_score.py` prints the options to paste. Stage 2's records have no KL (they hold the log-probability of each sampled token only), so
+the KL limit applies to scores from `scripts/fidelity_score.py`; the CPU fake-quant row beside the device row needs the port's distribution and is not added. Run log:
+`docs/run-logs/2026-11-24-fidelity-floors-vs-published-cards.md`. 76 new tests (`tests/test_fidelity_floors.py`); 58 mutations each turn a test red.
 ## 2026-11-24: looped layers in the decode floor and the plan (Lottolabs study, learning 11; branch lotto-loop-layers)
 
 The Lottolabs study found that the decode floor ignored `loop_config`: Inkling-2-Mini runs layers 6 to 17 three times for each token, so the floor read 1.84 GB per token
