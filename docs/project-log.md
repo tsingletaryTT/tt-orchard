@@ -6111,3 +6111,12 @@ runs out in the same helper wait). Three mutations of the new condition each tur
 `--fidelity-bfp4` and `--fidelity-tokens`; it passes all of them now. `scripts/fidelity_score.py` prints the options to paste. Stage 2's records have no KL (they hold the log-probability of each sampled token only), so
 the KL limit applies to scores from `scripts/fidelity_score.py`; the CPU fake-quant row beside the device row needs the port's distribution and is not added. Run log:
 `docs/run-logs/2026-11-24-fidelity-floors-vs-published-cards.md`. 76 new tests (`tests/test_fidelity_floors.py`); 58 mutations each turn a test red.
+## 2026-11-24: looped layers in the decode floor and the plan (Lottolabs study, learning 11; branch lotto-loop-layers)
+
+The Lottolabs study found that the decode floor ignored `loop_config`: Inkling-2-Mini runs layers 6 to 17 three times for each token, so the floor read 1.84 GB per token
+where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_floor` counts a looped layer once per pass and stores it once; the real config gives 3.551 GB
+(card 3.72 GB, 4.6 percent over our count; the gap is the loop controllers and a relative-position projection that the config does not describe, read from the checkpoint header).
+`inkling2_loop_text` joins the types whose query has an output gate (the header lists `attn.gate_attn.weight` at the query's size). `tier_plan` caveats name the uncounted loop
+controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
+and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
+repository head.
