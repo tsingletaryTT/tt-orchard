@@ -1073,7 +1073,7 @@ states for its own choice; the limits are one author's, so it is never the defau
 `tt-orchard tier-plan SOURCE` answers the question the plan command answers, but from the model's `config.json` alone, so it can run before the
 checkpoint is on disk. SOURCE is a Hugging Face repository id (only `config.json` and `model.safetensors.index.json` are fetched, with no token and
 no weight file), a `config.json`, or a directory that holds one. It prints, for 1, 2 and 4 chips (`--chips 1,2,4`) and each weight format mix, a
-verdict: **fits on chips** (replicated, or with the experts split over the chips), **fits with host experts** (the always-resident weights and as many
+verdict: **fits on chips** (replicated, with the experts split over the chips, or tensor-parallel, a layout the plan assumes in which the attention heads, the expert width and the output head are divided over the dies and the head counts must divide by the die count), **fits with host experts** (the always-resident weights and as many
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
