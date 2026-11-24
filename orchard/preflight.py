@@ -862,18 +862,42 @@ def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bo
                      "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": None, "text_runtime": rtm.name})
 
 
-def _speech_check(model_id: str, hub: HubInfo | None) -> Check | None:
-    """The base row for a speech model (orchard/speech_models.py): a block that says what the model is, which published bundle serves it and
-    how to check a server. The harness has no speech stage, so no run starts, and an operator's --base does not change that. A model that is
-    not a speech model, and a model the Hub could not be asked about, return None and go the earlier way."""
+def _speech_route(model_id: str, hub: HubInfo | None, speech_clips) -> Check | None:
+    """The base row for a speech run that takes the speech route (orchard/speech_route.py), or None. The route needs the operator's clips, a known bundle for the
+    model's task, and the model to be that bundle's upstream model (the bundle's own repository holds no weights to build a reference from)."""
+    if hub is None or not speech_clips:
+        return None
+    from orchard import speech_models
+    task = speech_models.task_of(hub.pipeline_tag, hub.tags, hub.architectures)
+    bundle = speech_models.bundle_for(model_id)
+    if task is None or bundle is None or bundle.task != task or str(model_id).split("@", 1)[0] != bundle.upstream:
+        return None
+    return Check("base", WARN, speech_models.route_text(model_id, task, bundle),
+                 data={"speech_route": task, "speech": {"task": task, "bundle": bundle.bundle}, "base": None, "snapshot": None, "bundle": None,
+                       "needs_fetch": False, "candidates": [], "report": None})
+
+
+def _speech_check(model_id: str, hub: HubInfo | None, speech_clips=None) -> Check | None:
+    """The base row for a speech model (orchard/speech_models.py). With the operator's clips and a known bundle it is the route row (`_speech_route`). Otherwise it
+    is a block that says what the model is, which published bundle serves it and how to check a server, and what the run needs to go on. An operator's --base
+    does not change either. A model that is not a speech model, and a model the Hub could not be asked about, return None and go the earlier way."""
     if hub is None:
         return None
     from orchard import speech_models
     task = speech_models.task_of(hub.pipeline_tag, hub.tags, hub.architectures)
     if task is None:
         return None
+    if (routed := _speech_route(model_id, hub, speech_clips)) is not None:
+        return routed
     bundle = speech_models.bundle_for(model_id)
-    return Check("base", BLOCK, speech_models.row_text(model_id, task, bundle), "speech-model",
+    detail = speech_models.row_text(model_id, task, bundle)
+    if bundle is not None and bundle.task == task:
+        if str(model_id).split("@", 1)[0] == bundle.upstream:
+            detail += (" To run the harness's speech route on it instead (a CPU reference from your clips, then the bundle served and compared), "
+                       "give `--speech-clips DIR`: a directory of clips, each with a NAME.txt that holds what it says.")
+        else:
+            detail += f" The speech route starts from the upstream model: run `tt-orchard bringup {bundle.upstream} --speech-clips DIR`."
+    return Check("base", BLOCK, detail, "speech-model",
                  data={"speech": {"task": task, "bundle": bundle.bundle if bundle else None}, "base": None, "snapshot": None, "bundle": None,
                        "needs_fetch": False, "candidates": [], "report": None})
 
@@ -903,7 +927,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
                base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True,
                weights_records: dict | None = None, base_bundle: str | None = None,
-               pinned_why: str | None = None) -> Check:
+               pinned_why: str | None = None, speech_clips: str | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -924,7 +948,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     from orchard import nearest, weights_source
     if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
         return found
-    if not audio and (found := _speech_check(model_id, hub)) is not None:
+    if not audio and (found := _speech_check(model_id, hub, speech_clips)) is not None:
         return found
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
     inferred = False
@@ -1334,7 +1358,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                   resuming: bool = False, base_override: str | None = None,
                   accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None,
                   stock_recorded: str | None = None, no_fetch: bool = False, base_bundle: str | None = None,
-                  pinned_why: str | None = None) -> list[Check]:
+                  pinned_why: str | None = None, speech_clips: str | None = None) -> list[Check]:
     """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
     terminal is not silent while the research reads weight headers for a minute or two. With `no_fetch` nothing is downloaded: the
     disk row counts no download and the base row says a missing snapshot is not fetched (issue 409). `pinned_why` is check_base's."""
@@ -1370,6 +1394,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     def base() -> Check:
         if getattr(cfg, "mode", "local") != "lab" and (found_text := _text_runtime_check(model_id, base_override)) is not None:
             return found_text                  # a text runtime serves it: no research and no bundle search
+        if getattr(cfg, "mode", "local") != "lab" and not audio and (found_speech := _speech_route(model_id, hub, speech_clips)) is not None:
+            return found_speech                # the speech route: a published bundle is the port, so no research and no bundle search
         if stock_recorded and getattr(cfg, "mode", "local") != "lab":
             # A resumed stock-runtime run (orchard/stock_runtime.py): the route was chosen when the run started and is in its run_start
             # entry. The research, the bundle search and a base download are not needed again, and an offline or failing research must
@@ -1394,7 +1420,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
                            stock=None if getattr(cfg, "mode", "local") == "lab" else s.stock_params,
-                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg),
+                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg), speech_clips=speech_clips,
                            text_runtime_ok=getattr(cfg, "mode", "local") != "lab")      # the supervisor's text stages do not run in lab mode
         if failed:
             from orchard.research.types import clean
@@ -1441,7 +1467,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             lambda: check_credentials(list(s.credentials()), accept_credentials))
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     # A text-runtime run never boots the coder, so a server already on its port and a CPU stand-in that is down are not reasons to refuse it.
-    text_route = bool((base_check.data or {}).get("text_runtime"))
+    text_route = bool((base_check.data or {}).get("text_runtime") or (base_check.data or {}).get("speech_route"))     # neither route boots the coder
     if not text_route:
         guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                               kept=_kept_on_port(cfg)))

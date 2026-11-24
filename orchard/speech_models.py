@@ -105,3 +105,13 @@ def row_text(model_id: str, task: str, bundle: Bundle | None) -> str:
     return (f"{head} A published bundle serves it on {chips} ({bundle.hardware}): {bundle.bundle}. It answers "
             f"{' and '.join(bundle.endpoints)}. Pull it with `tt-model pull {bundle.bundle}` and start it with `tt-model serve {bundle.bundle}` "
             f"under a gozer lease. {lic} {check}")
+
+
+def route_text(model_id: str, task: str, bundle: Bundle) -> str:
+    """The sentence block of the preflight's base row when the run takes the speech route (orchard/speech_route.py): what the model is, what the stages do, and the
+    licence the bundle's card states."""
+    chips = "one chip" if bundle.chips == 1 else f"{bundle.chips} chips"
+    lic = f"The bundle's licence is {bundle.license}" + (" (non-commercial use only)" if bundle.non_commercial else "") + ", and the run records it as the card states it."
+    return (f"{model_id} is a {task} model and the published bundle {bundle.bundle} serves it on {chips} ({bundle.hardware}). The run takes the speech route: stage 0 reads the "
+            "bundle table, stage 1 records a CPU reference from your clips, stage 2 serves the bundle on one board under a lease and compares its answers with the "
+            "reference, and stage 8 builds the operator bundle. It does not boot the local coder, and it never copies or republishes the model's weights. " + lic)
