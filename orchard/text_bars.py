@@ -182,7 +182,7 @@ def ppl_problems(d, label: str) -> list[str]:
     out = []
     for key, want in (("mean_nll", nll), ("perplexity", math.exp(min(nll, 700.0)))):
         got = d.get(key)
-        if not isinstance(got, (int, float)) or isinstance(got, bool) or not math.isclose(got, want, rel_tol=1e-6, abs_tol=1e-9):
+        if not safeio.fits_float(got) or not math.isclose(got, want, rel_tol=1e-6, abs_tol=1e-9):      # fits_float: issue 461, no OverflowError
             out.append(f"the {label} {key} {got!r} is not what its log probabilities give ({want:.6g})")
     return out
 

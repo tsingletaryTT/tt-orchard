@@ -90,7 +90,7 @@ def running_requests(endpoint: str, *, get=_get_text) -> int | None:
     engines), or None when the server does not say (another kind of server, no answer, an odd value)."""
     try:
         text = get(_origin(endpoint) + "/metrics", METRICS_TIMEOUT_S)
-        values = [float(v) for v in GAUGE_RE.findall(text)]
+        values = [float(v) for v in GAUGE_RE.findall(text)]  # finite: ok a matched string converts to inf at worst, never OverflowError
     except (OSError, ValueError, http.client.HTTPException):          # a reply cut off mid-body is not an OSError
         return None
     return int(sum(values)) if values else None
@@ -130,7 +130,7 @@ def judge(samples: list[float], baseline: float | None, *, ratio: float = SLOW_R
     if not samples:
         raise ValueError("judge needs at least one sample")
     now = samples[-1]
-    if baseline is not None and not (math.isfinite(baseline) and baseline > 0):
+    if baseline is not None and not (safeio.fits_float(baseline) and baseline > 0):     # False for NaN, an infinity and an integer no float holds
         raise ValueError(f"the baseline must be a speed greater than 0 tok/s, not {baseline!r}")
     if baseline is None:
         return Verdict("unknown", now, None, None,
@@ -172,8 +172,8 @@ class Baselines:
             data = safeio.read_json(self.path, max_bytes=MAX_BASELINE_BYTES, expect=dict)
         except safeio.SafeReadError:
             return {}                          # missing, hostile (a FIFO, a link, a huge or deeply nested file, NaN) or not an object
-        return {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("tok_s"), (int, float))
-                and not isinstance(v["tok_s"], bool) and v["tok_s"] > 0}
+        # fits_float is False for a bool, a non-number and an integer no float can hold: such an entry is dropped (issue 461)
+        return {k: v for k, v in data.items() if isinstance(v, dict) and safeio.fits_float(v.get("tok_s")) and v["tok_s"] > 0}
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +181,7 @@ class Baselines:
 
     def get(self, endpoint: str, model: str) -> float | None:
         entry = self._read().get(self.key(endpoint, model))
-        return float(entry["tok_s"]) if entry else None
+        return float(entry["tok_s"]) if entry else None  # finite: ok _read keeps only a speed a float can hold
 
     def update(self, endpoint: str, model: str, tok_s: float) -> float:
         """Keep the larger of the stored speed and `tok_s`; return what is stored now."""
@@ -313,7 +313,7 @@ def run(args, *, out, home, tier_config=None, post=post_json, clock=time.monoton
     if error:
         print(f"error: {error}", file=out)
         return EXIT_ERROR
-    if args.baseline is not None and not (math.isfinite(args.baseline) and args.baseline > 0):
+    if args.baseline is not None and not (math.isfinite(args.baseline) and args.baseline > 0):  # finite: ok argparse made it a float
         print(f"error: --baseline must be a speed greater than 0 tok/s, not {args.baseline!r}", file=out)
         return EXIT_ERROR
     store = Baselines(args.baseline_file or Path(home) / ".cache" / "tt-orchard" / SPEED_BASELINE_FILE)
