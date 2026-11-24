@@ -6128,3 +6128,7 @@ where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_f
 controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
 and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
 repository head.
+
+## 2026-11-24: cheat-sheet recipes on a chip, issue 800 steps 1 and 2 (branch recipes-chip-run)
+
+The four recipe skeletons and the four control skeletons went through `kernel_harness.py --phase hw` on a leased board with the managed pair venv. All eight failed in tt-metal's JIT build with `tools/profiler/kernel_profiler.hpp: No such file or directory`; the elementwise controls fail the same way, so the host tt-metal tree (commit `64bc494efdf`, newer than the compiler's build tree `0e9d200db976`) and not the recipes is the cause. No `chip` entry was written. Steps 3 to 5 were not reached. Run log: `docs/run-logs/2026-11-24-recipes-chip-run.md`.
