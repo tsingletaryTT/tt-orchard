@@ -49,7 +49,7 @@ def test_the_trace_rows_name_what_gets_overwritten_and_the_read_that_fails():
 
 def test_the_cache_row_says_what_orchard_checks_today_and_what_the_card_adds():
     r = hz.runtime_hazard("tensor_cache_identity_is_name_and_shape")
-    assert ".orchard-model" in r.known_here and "checkpoint" in r.known_here
+    assert ".orchard-model" in r.known_here and "checkpoint revision" in r.known_here
     assert "manifest" in r.what and "image" in r.what
 
 
@@ -66,7 +66,7 @@ def test_the_record_is_plain_json():
 
 def test_the_sampler_row_describes_the_stock_op_and_names_the_custom_scans_that_do_not_wrap():
     row = next(e for e in hz.HAZARD_TABLE if e.name == "vocab_per_die_above_65536")
-    assert "stock" in row.why and "custom" in row.why and "201,024" in row.why and "248,320" in row.why
+    assert "stock sampler op" in row.why and "custom" in row.why and "201,024" in row.why and "248,320" in row.why
     assert "card claim" in row.why                                       # said once, so the row is not read as our measurement
 
 
@@ -88,6 +88,11 @@ def test_runtime_and_a_config_together_are_refused_with_one_line(capsys, tmp_pat
                                "num_key_value_heads": 2, "head_dim": 32, "vocab_size": 32000}))
     assert hz.main([str(cfg), "--runtime"]) == 2
     assert "Traceback" not in capsys.readouterr().out
+
+
+def test_runtime_with_a_nearest_config_alone_is_refused(capsys):
+    assert hz.main(["--runtime", "--nearest", "nearest.json"]) == 2
+    assert "takes no config" in capsys.readouterr().out
 
 
 def test_the_scan_of_a_config_is_unchanged_by_the_runtime_table(tmp_path, capsys):

@@ -6110,4 +6110,4 @@ NoC barrier), `TT_FATAL` for a host read during trace capture, and a converted-t
 (`python3 -m orchard.hazards --runtime`), and `docs/runtime-hazards.md` lists the rows. Each row names the card and the section, says it is a card claim that this repository has not reproduced, says what a stage should run, and says what orchard checks today:
 trace captures and replays are counted (issue 547) and nothing checks tensors allocated after a capture, no stage runs a 20,000-step decode, and the `.orchard-model` cache marker names the model and not the checkpoint or the image. The
 existing sampler row (`vocab_per_die_above_65536`) now says it describes the stock sampler op: the Inkling-2-Mini and Qwen3.6 cards run vocabularies of 201,024 and 248,320 on one die with a custom top-k scan. The scan of a config is unchanged.
-15 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
+16 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
