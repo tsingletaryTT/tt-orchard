@@ -42,6 +42,8 @@ def agree(recorded, fresh) -> bool:
     if isinstance(recorded, dict) and isinstance(fresh, dict):
         return recorded.keys() == fresh.keys() and all(agree(recorded[k], fresh[k]) for k in recorded)
     if isinstance(recorded, (int, float)) and isinstance(fresh, (int, float)) and not isinstance(recorded, bool) and not isinstance(fresh, bool):
+        if not (safeio.fits_float(recorded) and safeio.fits_float(fresh)):
+            return recorded == fresh                      # an integer no float holds, an infinity or NaN: `math.isclose(10**400, x)` raises (issue 461)
         return math.isclose(recorded, fresh, rel_tol=1e-9, abs_tol=1e-9)
     if isinstance(recorded, list) and isinstance(fresh, list):
         return len(recorded) == len(fresh) and all(agree(a, b) for a, b in zip(recorded, fresh))
@@ -211,7 +213,7 @@ def reference_problems(stage_dir, run_dir) -> list[str]:
     p = ppl.get("perplexity")
     if ppl.get("tokens") != expect_tokens:
         problems.append(f"the perplexity reference covers {ppl.get('tokens')} tokens; the window is {expect_tokens}")
-    if not isinstance(p, (int, float)) or isinstance(p, bool) or not math.isfinite(p) or p <= 0:
+    if not safeio.fits_float(p) or p <= 0:                      # False for a bool, a non-number, NaN, an infinity and an integer no float holds (issue 461)
         problems.append("the perplexity reference is not a positive finite number")
     return problems
 

@@ -18,6 +18,7 @@ import math
 import urllib.parse
 from pathlib import Path
 
+from orchard import safeio
 from orchard import telegraph as tg
 from orchard import telegraph_store as ts
 from orchard.db import DB_NAME, LedgerRefused, LedgerUnavailable
@@ -35,7 +36,9 @@ TONE = {"off": "dim", "ok": "good", "near": "warn", "capped": "bad", "problem": 
 def usd(value) -> str:
     """Dollars. Zero is "$0.00", a positive amount under a hundredth of a cent is "<$0.0001" (four decimals would round it
     to $0.0000 and hide the spend), and the rest has four decimals under a cent and two above."""
-    value = float(value or 0)
+    if isinstance(value, int) and not isinstance(value, bool) and not safeio.fits_float(value):
+        return ">$1e308"                                        # an integer no float can hold (issue 461)
+    value = float(value or 0)  # finite: ok an integer a float cannot hold was answered above; a float, a bool or None converts
     if value == 0:
         return "$0.00"
     if value < 0.0001:
@@ -44,7 +47,18 @@ def usd(value) -> str:
 
 
 def _num(value, default=0):
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else default
+    """`value` when it is a number, else `default`. An integer too large for a float counts as no number: every caller goes on to float
+    arithmetic or `int()`, and `float(10**400)` raises OverflowError (issue 461)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    if isinstance(value, int) and not safeio.fits_float(value):
+        return default
+    return value
+
+
+def _amount(value):
+    """`value` as a float when it is a finite number a float can hold, else None."""
+    return float(value) if safeio.fits_float(value) else None  # finite: ok fits_float answered False for what float() would refuse
 
 
 def default_dir(home) -> Path:
@@ -128,12 +142,12 @@ def _non_negative(key: str, value) -> None:
     damaged ledger."""
     if isinstance(value, str):
         try:
-            value = float(value)
+            value = float(value)  # finite: ok a string converts to inf at worst; the check below refuses it
         except ValueError:
             return                                              # not a number at all: the accounting refuses it
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
-    if not math.isfinite(value) or value < 0:
+    if not safeio.fits_float(value) or value < 0:                 # False for NaN, an infinity and an integer no float can hold
         raise ValueError(f"record field {key} is not a finite amount of zero or more")
 
 
@@ -146,7 +160,7 @@ def _check_derived(*parts) -> None:
         if isinstance(v, bool):
             return
         if isinstance(v, (int, float)):
-            if not math.isfinite(v) or v < 0:
+            if not safeio.fits_float(v) or v < 0:
                 raise ValueError("a derived amount is not finite or is below zero")
         elif isinstance(v, dict):
             for x in v.values():
@@ -162,8 +176,16 @@ def _percent(used, limit) -> int:
     """`used` as a whole percent of `limit`, never raising and never above PERCENT_MAX (a huge ratio would overflow to infinity)."""
     if limit <= 0:
         return 100
+    if isinstance(used, int) and isinstance(limit, int):
+        # Whole numbers are compared as whole numbers: `10**400 / 5` and `10**307 * 100 / 1` raise OverflowError (issue 461).
+        scaled = used * 100
+        return PERCENT_MAX if scaled > PERCENT_MAX * limit else int(scaled // limit)
+    if isinstance(used, int) and not safeio.fits_float(used):
+        return PERCENT_MAX
+    if isinstance(limit, int) and not safeio.fits_float(limit):
+        return 0
     ratio = used * 100 / limit
-    return PERCENT_MAX if not math.isfinite(ratio) or ratio > PERCENT_MAX else int(ratio)
+    return PERCENT_MAX if not math.isfinite(ratio) or ratio > PERCENT_MAX else int(ratio)  # finite: ok both are floats or ints a float holds
 
 
 PERCENT_MAX = 10 ** 9
@@ -175,7 +197,7 @@ def _finite(value, depth: int = 0) -> None:
     if depth > 20:
         raise ValueError("record is nested too deeply")
     if isinstance(value, float):
-        if not math.isfinite(value):
+        if not math.isfinite(value):  # finite: ok the line above checked that value is a float
             raise ValueError("record holds a number that is not finite")
     elif isinstance(value, dict):
         for v in value.values():
@@ -324,7 +346,7 @@ TS_MAX = 4e10                         # year 3200: a larger number is not a time
 def _time(value):
     """A time stamp in seconds, or None when it is not a number in a range a date can show (the page would print Invalid Date)."""
     v = _num(value, None)
-    return v if v is not None and math.isfinite(v) and 0 <= v <= TS_MAX else None
+    return v if v is not None and math.isfinite(v) and 0 <= v <= TS_MAX else None  # finite: ok _num returns no integer a float cannot hold
 
 
 def _reservation_row(r: dict, redact) -> dict:
@@ -332,7 +354,7 @@ def _reservation_row(r: dict, redact) -> dict:
     return {
         "ts": None, "call_id": _clean(r["reserve"], redact, 32), "problem": _clean(r.get("problem"), redact, TEXT_MAX),
         "model": _clean(r.get("model"), redact, TEXT_MAX), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
-        "cost_usd": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        "cost_usd": _amount(cost),
         "outcome": "unsettled", "held": True, "usage_known": None, "helped": None, "cost_basis": "worst case",
         "reason": "No result was recorded: the call is in flight or the process stopped. It counts at its worst case."}
 
@@ -357,8 +379,8 @@ def _call_row(r: dict, reserves: dict, verdict: dict, redact) -> dict:
         "ts": _time(r.get("ts")), "call_id": _clean(r.get("call_id"), redact, 32),
         "problem": _clean(r.get("problem"), redact, TEXT_MAX), "model": _clean(r.get("model"), redact, TEXT_MAX),
         "tokens_in": int(_num(r.get("tokens_in"))), "tokens_out": int(_num(r.get("tokens_out"))),
-        "latency_s": float(_num(r.get("latency_s"))), "held": False,
-        "cost_usd": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        "latency_s": float(_num(r.get("latency_s"))), "held": False,  # finite: ok _num returns no integer a float cannot hold
+        "cost_usd": _amount(cost),
         "outcome": _clean(outcome, redact, 20), "usage_known": False if unknown_usage else None, "reason": reason,
         "cost_basis": basis,
         "helped": verdict.get(r.get("call_id")) if r.get("outcome") == "ok" and not cached else None,
