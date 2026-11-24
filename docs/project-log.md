@@ -6060,3 +6060,13 @@ findings did not hold. Not done and owed: a run of `speech-check` against a real
 duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
+
+## 2026-11-24: Voxtral models on the CPU reference environment (run log, no code change)
+The operator asked whether the reference environment (transformers 5.24.0, torch 2.15.0 CPU) can run the two upstream Voxtral models. Run log:
+`docs/run-logs/2026-11-23-voxtral-reference-venv.md`. In a copy of the reference environment (with `mistral-common` 1.13.1 and `soundfile`, `soxr`, `scipy`,
+`jiwer`; the install moved numpy to 2.3.5 in the copy), the Mini model transcribed three public clips on CPU in bfloat16 with the card's text and token counts, and
+a copy with transformers 4.56.0 and the bundle's pins gave identical tokens on all four requests (including the 631 tokens of a 3.4-minute clip). Greedy decoding gave
+identical tokens in two separate processes. The TTS model's reference loader failed under 5.24.0 on `MistralRotaryEmbedding(config=cfg, device="cpu")`; with that
+one argument removed in a private copy it built in 17 s (25 GiB) and spoke one sentence in 62 frames (4.96 s) with a Whisper word error rate of 0.000, repeatable
+with a fixed noise seed. Not run: UTMOS (its loader runs code from GitHub), Hindi and Arabic voices, a comparison with a chip waveform. Memory: about 9 GiB for the Mini
+model, 25 GiB for the TTS model. No chip, no lease, no `ttnn` import.
