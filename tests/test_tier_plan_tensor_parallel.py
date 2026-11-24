@@ -130,3 +130,9 @@ def test_the_text_output_says_why_the_layout_was_not_offered():
     res = tier_plan.plan(cfg, chips_list=(4,), chip_gib=0.00015, reserve_gib=0.0, kv_gib=0.0)
     text = tier_plan.render(res)
     assert any("tensor-parallel layout over 4 dies needs these counts divisible by 4" in l and "key-value heads (2)" in l for l in text.splitlines())
+
+
+def test_a_row_that_fits_by_the_tensor_parallel_layout_has_no_overhead_limit():
+    # usable 400,000 bytes, overhead 140,000, so a budget of 260,000: only the tensor-parallel layout (250,624) fits
+    r = tier_plan.place(tier_plan.shape(CFG), "bf16", "bf16", 2, 260_000, usable_bytes=400_000, overhead_bytes=140_000)
+    assert r["placement"].startswith("tensor-parallel") and r["overhead_limit_for_chips_bytes"] is None

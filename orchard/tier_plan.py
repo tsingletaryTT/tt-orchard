@@ -226,8 +226,13 @@ def hit_share(fraction: float, points) -> float:
 
 
 def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, *, host_margin_gib: float = HOST_MARGIN_GIB,
-          host_free_gib: float | None = None, skew=OLMOE_SKEW, skew_source: str | None = None) -> dict:
-    """One row: the first placement that fits for this precision and chip count, or the reason none does. `budget` is the weight bytes one chip may use."""
+          host_free_gib: float | None = None, skew=OLMOE_SKEW, skew_source: str | None = None,
+          usable_bytes: float | None = None, overhead_bytes: float | None = None) -> dict:
+    """One row: the first placement that fits for this precision and chip count, or the reason none does. `budget` is the weight bytes one chip may use.
+
+    `usable_bytes` is the share of one chip's DRAM that weights could use before the reserve and the KV share come off, and `overhead_bytes` is that
+    reserve plus the KV share (what the budget lost). With both, a row that does not fit on the chips only because of that overhead says how large the
+    overhead could be for it to fit (`overhead_limit_for_chips_bytes`). The limit changes no verdict; it shows which assumption decides the row."""
     other_b, expert_b = BYTES_PER_ELEMENT[other_fmt], BYTES_PER_ELEMENT[expert_fmt]
     always = s.always_params * other_b
     experts = s.expert_params_total * expert_b
@@ -236,10 +241,17 @@ def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, 
            "always_resident_bytes": always, "expert_bytes_total": experts, "bytes_per_expert_index": index,
            "resident_experts_per_layer": 0, "host_ram_gib": 0.0, "hit_share": None, "hit_share_label": None, "host_expert_picks_per_token": 0.0,
            "per_chip_bytes": None, "placement": None, "verdict": "does not fit", "why": None, "whole_layers": None,
-           "tensor_parallel_note": None, "tensor_parallel_blocked": None}
+           "tensor_parallel_note": None, "tensor_parallel_blocked": None,
+           "assumed_overhead_bytes": overhead_bytes, "overhead_limit_for_chips_bytes": None}
+    if usable_bytes is not None and overhead_bytes is not None:
+        # the least one chip must hold when everything stays on the chips: replicated, or the experts split (never more than replicated)
+        need = always + experts / chips if chips > 1 else always + experts
+        if budget < need <= usable_bytes:
+            row["overhead_limit_for_chips_bytes"] = usable_bytes - need
 
     def on_chips(placement: str, per_chip: float) -> dict:
-        row.update(verdict="fits on chips", placement=placement, per_chip_bytes=per_chip, resident_experts_per_layer=s.experts, hit_share=1.0)
+        row.update(verdict="fits on chips", placement=placement, per_chip_bytes=per_chip, resident_experts_per_layer=s.experts, hit_share=1.0,
+                   overhead_limit_for_chips_bytes=None)            # a row that fits by any layout has nothing to loosen
         return row
 
     if always + experts <= budget:
@@ -441,9 +453,11 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
     rows = []
     for chips in chips_list:
         budget = budget_bytes(chip_gib, chips=chips, reserve_gib=reserve_gib, kv_gib=kv_gib)
+        usable = chip_gib * USABLE_FRACTION * GIB
+        overhead = (reserve_gib + kv_gib / chips) * GIB
         for name, other_fmt, expert_fmt in weights_plan.COMBINATIONS:
             r = place(s, other_fmt, expert_fmt, chips, budget, host_margin_gib=host_margin_gib, host_free_gib=host_free_gib, skew=skew,
-                      skew_source=skew_source)
+                      skew_source=skew_source, usable_bytes=usable, overhead_bytes=overhead)
             r["name"] = name
             r["format_gate"], r["format_gate_reason"] = weights_plan.row_gate(other_fmt, expert_fmt, scores, rule)
             rows.append(r)
@@ -502,6 +516,12 @@ def render(res: dict) -> str:
             lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_note']}")
         elif r.get("tensor_parallel_blocked") and r["verdict"] != "fits on chips":
             lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_blocked']}")
+    for r in res["rows"]:
+        if r.get("overhead_limit_for_chips_bytes") is not None:
+            lines.append(f"{r['name']}, {r['chips']} chip(s): would fit on the chips if the reserve plus this chip's share of the KV cache were at most "
+                         f"{r['overhead_limit_for_chips_bytes'] / GIB:.1f} GiB per chip; the plan assumes {r['assumed_overhead_bytes'] / GIB:.1f} GiB "
+                         f"(--reserve-gib and --kv-gib set them). The KV allowance is a flat figure for every model, so a model with mostly sliding-window "
+                         f"attention may need much less")
     lines += [f"note: {n}" for n in res["notes"]]
     lines.append("the weights fit or they do not; speed and quality are not measured here, and the host path for experts is not written (issue 739, step 3)")
     return "\n".join(lines)
