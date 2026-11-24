@@ -6111,3 +6111,12 @@ NoC barrier), `TT_FATAL` for a host read during trace capture, and a converted-t
 trace captures and replays are counted (issue 547) and nothing checks tensors allocated after a capture, no stage runs a 20,000-step decode, and the `.orchard-model` cache marker names the model and not the checkpoint or the image. The
 existing sampler row (`vocab_per_die_above_65536`) now says it describes the stock sampler op: the Inkling-2-Mini and Qwen3.6 cards run vocabularies of 201,024 and 248,320 on one die with a custom top-k scan. The scan of a config is unchanged.
 16 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
+## 2026-11-24: looped layers in the decode floor and the plan (Lottolabs study, learning 11; branch lotto-loop-layers)
+
+The Lottolabs study found that the decode floor ignored `loop_config`: Inkling-2-Mini runs layers 6 to 17 three times for each token, so the floor read 1.84 GB per token
+where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_floor` counts a looped layer once per pass and stores it once; the real config gives 3.551 GB
+(card 3.72 GB, 4.6 percent over our count; the gap is the loop controllers and a relative-position projection that the config does not describe, read from the checkpoint header).
+`inkling2_loop_text` joins the types whose query has an output gate (the header lists `attn.gate_attn.weight` at the query's size). `tier_plan` caveats name the uncounted loop
+controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
+and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
+repository head.
