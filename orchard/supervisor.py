@@ -602,8 +602,8 @@ def file_stamp(path: Path) -> tuple | None:
     return (st.st_size, st.st_mtime_ns)
 
 
-EVIDENCE_LIST_ENTRIES = 2000     # the evidence listing of a wrap-up reads at most this many entries of evidence/ (issue 457)
-EVIDENCE_LIST_DEPTH = 12         # and at most this many directory levels below it
+EVIDENCE_LIST_ENTRIES = boundedwalk.EVIDENCE_ENTRIES     # the evidence listing of a wrap-up reads at most this many entries of evidence/ (issue 457)
+EVIDENCE_LIST_DEPTH = boundedwalk.EVIDENCE_DEPTH         # and at most this many directory levels below it
 
 
 def evidence_listing(run_dir: Path, stage_dir: Path) -> tuple[list[str], str | None]:
