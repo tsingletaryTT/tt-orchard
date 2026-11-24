@@ -158,8 +158,24 @@ def hub_offline_flags_restored():
         setattr(mod, attr, value)
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "real_bundle: run the real stage 8 bundle builder in a supervisor test that fakes it by default")
+def pytest_collection_modifyitems(config, items):
+    """Apply the tier markers from tests/tier_lists.py (docs/test-tiers.md): `whole_repo` for the guards, `slow` for the files measured above
+    30 seconds, `hardware` for tests that need a chip (skipped unless ORCHARD_RUN_HARDWARE=1). A file in no list gets none and runs by default."""
+    import os
+    import tier_lists
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for item in items:
+        path = getattr(item, "path", None)
+        if path is None:
+            continue
+        rel = os.path.relpath(str(path), root).replace(os.sep, "/")
+        name = getattr(item, "originalname", None) or item.name
+        for marker in tier_lists.markers_for(rel, name):
+            item.add_marker(getattr(pytest.mark, marker))
+        if item.get_closest_marker("hardware"):
+            reason = tier_lists.hardware_skip_reason(os.environ)
+            if reason:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
 @pytest.fixture
