@@ -1,0 +1,3 @@
+target = "0.9.201"
+summary = "Five runtime hazards the Inkling-2-Mini bundle records (tile columns per DRAM bank, a K pad row, skipped L1 checks, programs compiled after a trace capture, fixed visible dies) join the runtime hazard table as bundle claims."
+kind = "feature"
