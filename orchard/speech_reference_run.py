@@ -63,7 +63,7 @@ def _no_constant(name):
 
 
 def _finite_float(text):
-    value = float(text)
+    value = float(text)      # finite: ok the next line refuses NaN and infinity
     if value != value or value in (float("inf"), float("-inf")):
         raise ValueError(f"the number {text} is not finite")
     return value
