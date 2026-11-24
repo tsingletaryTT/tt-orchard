@@ -1,0 +1,3 @@
+target = "0.9.201"
+summary = "decode_floor.scaling_table and --measured-by-dies set measured speeds on several dies beside the floor, labelled as the caller's figures (Inkling-2-Mini study)."
+kind = "feature"
