@@ -6069,4 +6069,4 @@ a file that cannot be read) and `bundle_manifest_sha256` in the run's inputs. `s
 agent-config checks go through, compares them with the files on disk (`nearest.bundle_changes`) and refuses a changed bundle with a message that names the file.
 A resume keeps the recorded values. A run that started before this change has no record and is not compared; recording it now would hide a change made
 since stage 0. 21 new tests (`tests/test_bundle_record_662.py`); 11 mutations of the record, the comparison, the resume rule and the three wirings each turn a test red.
-Not done: the folded #663 (link tests for bundle directories) and #664 (name the base bundle in bringup.toml). Not run on a chip.
+The folded #663 (link tests for the real-path comparison of bundle directories) is in the same PR: 5 tests (`tests/test_bundle_link_663.py`), and 4 mutations (each real-path comparison replaced by a string comparison) each turn a test red. Not done: the folded #664 (name the base bundle in bringup.toml). Not run on a chip.
