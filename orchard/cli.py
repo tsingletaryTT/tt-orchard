@@ -1290,7 +1290,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "plan":
         from orchard import plan as _plan_mod
         return _plan_mod.main([args.snapshot, "--chips", str(args.chips), "--chip-gib", str(args.chip_gib), "--weight-share", str(args.weight_share)]
-                              + (["--json"] if args.json else []), out)
+                              + _plan_mod.fidelity_argv(args) + (["--json"] if args.json else []), out)
     if args.cmd == "tier-plan":
         from orchard import tier_plan as _tier_plan_mod
         return _tier_plan_mod.run(args, out)
