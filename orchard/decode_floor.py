@@ -293,7 +293,7 @@ def scaling_table(model_config, dtype_policy, per_die_bandwidth_gb_s, measured_b
         n = _check_dies(dies)
         if not isinstance(tok_s, (int, float)) or not safeio.fits_float(tok_s) or tok_s <= 0:       # fits_float refuses a bool, nan, inf and an int past float range
             raise FloorInputError(f"the speed measured on {n} dies must be a positive finite number of tokens per second")
-        points.append((n, float(tok_s)))
+        points.append((n, float(tok_s)))      # finite: ok fits_float accepted tok_s on the line above
     points.sort()
     base_dies, base_tok_s = points[0]
     rows = []
