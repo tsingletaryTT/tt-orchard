@@ -34,8 +34,10 @@ The supervisor has already put two things in the stage directory, and the prepar
   there (`activation: str = "silu"`) may not be the value the model uses (the tiny Qwen4's gated norm resolves to `sigmoid`). Read the lines for the
   classes you port before you write them, and use the resolved value.
 - `stages/2/port/port_model.py`: a skeleton. Each of the four functions raises `NotImplementedError` until you replace its body, and
-  `read_tensors(model_dir)` returns every tensor by name from one file or from shards. A port left as the skeleton fails the check at
-  `load` and says so.
+  `read_tensors(model_dir)` returns every tensor by name from one file or from shards. Each tensor is read, and copied out of the memory-mapped
+  file, when you ask for it: on the PyPI ttnn 0.80.0 wheel `ttnn.from_torch` of a tensor that still lies in the mapped file never returns (issue 813),
+  so if you write your own reader, call `.clone()` on what `safe_open(...).get_tensor(name)` gives you before it reaches `ttnn.from_torch`. A port left
+  as the skeleton fails the check at `load` and says so.
 
 Write a first version of `port_model.py` within 12 turns, even if it is incomplete, and refine it after. A stage that reads for twenty
 turns and writes nothing is stopped by the watchdog and costs a coder reboot. Do not page through the stage 1 reference files: the
