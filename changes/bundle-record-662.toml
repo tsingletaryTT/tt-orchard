@@ -1,0 +1,2 @@
+target = "0.9.197"
+summary = "The run records the sha256 of the named bundle's orchard-capabilities.json and manifest when it starts, and stages 2 and 4 block a bundle whose files changed since, naming the file (issue 662)."
