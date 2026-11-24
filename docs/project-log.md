@@ -6060,3 +6060,14 @@ findings did not hold. Not done and owed: a run of `speech-check` against a real
 duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
+
+## 2026-11-23: the agent step's evidence snapshot is bounded (issue 457, branch bound-agent-evidence-snapshot-457)
+
+`AgentStep._snapshot` listed `evidence/` with `sorted(rglob("*"))` after every tool call and kept one entry per file for the step. PR 778 bounded the gate's port
+check, the repair fingerprint and the wrap-up listing; this was the site named after it. The snapshot now reads through `boundedwalk.Walk` with the bounds
+the wrap-up listing uses (`boundedwalk.EVIDENCE_ENTRIES` 2000 and `EVIDENCE_DEPTH` 12, now defined once and used by both). A link inside `evidence/` is no longer
+listed (it used to count when it pointed at another file inside `evidence/`), and a link standing where `evidence/` should be is not read. Past a bound the files
+read so far are kept and one ledger decision, `the evidence scan stopped`, names the bound and the entries read (once per step). The snapshot is sorted by path as before.
+10 tests (a fake `os.scandir` that serves 300,000 entries, a tree deeper than the bound, links, a linked evidence directory, the once-per-step note, the order) and
+10 mutations each turn a test red. Still open under #457: `port_facts.copy_skeleton` (writes by path) and `scoring_check._source_reasons` (an unbounded scan); the
+fingerprint's read-beneath change is also listed in the issue. The issue stays open.

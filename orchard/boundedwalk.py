@@ -19,6 +19,8 @@ from orchard import safeio
 PORT_ENTRIES = 1000     # a port directory scan stops after this many entries of any kind (files, directories, links): a file count alone
                         # would let a directory of a million subdirectories be read to the end before anything refused it
 PORT_DEPTH = 8          # and at this many directory levels below the port directory
+EVIDENCE_ENTRIES = 2000  # a listing of a stage's evidence/ directory (the wrap-up's, and the agent step's snapshot after each tool call) reads at most this many entries
+EVIDENCE_DEPTH = 12      # and at most this many directory levels below it
 CACHE_DIR = "__pycache__"
 
 
