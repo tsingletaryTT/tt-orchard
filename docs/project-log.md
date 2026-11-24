@@ -6061,6 +6061,15 @@ duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest 
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
 
+## 2026-11-23: the named bundle's files are recorded at the start and compared at stages 2 and 4 (issue 662, branch record-bundle-capabilities-digest-662)
+
+Stage 0 judges a model against the named bundle's `orchard-capabilities.json`, and nothing showed whether the bundle changed between stage 0 and stage 2
+(`tt-model pull --force`, a hand edit). `tt-orchard bringup` now records `bundle_capabilities_sha256` (`none` for a bundle with no file, `unreadable` for
+a file that cannot be read) and `bundle_manifest_sha256` in the run's inputs. `swap_draft._named_bundle`, which stage 2's draft, stage 4's draft and both
+agent-config checks go through, compares them with the files on disk (`nearest.bundle_changes`) and refuses a changed bundle with a message that names the file.
+A resume keeps the recorded values. A run that started before this change has no record and is not compared; recording it now would hide a change made
+since stage 0. 21 new tests (`tests/test_bundle_record_662.py`); 11 mutations of the record, the comparison, the resume rule and the three wirings each turn a test red.
+The folded #663 (link tests for the real-path comparison of bundle directories) is in the same PR: 5 tests (`tests/test_bundle_link_663.py`), and 4 mutations (each real-path comparison replaced by a string comparison) each turn a test red. Not done: the folded #664 (name the base bundle in bringup.toml). Not run on a chip.
 ## 2026-11-23: an operator pause that an earlier poll read is kept when the stage budget runs out (issue 616, branch fix-616-operator-pause-kept)
 
 `RunActuator.pause()` set the stop to `pause` whatever it held. When an earlier stop poll had read the operator's `pause` or `abort` (the control file is

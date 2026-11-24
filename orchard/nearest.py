@@ -60,6 +60,61 @@ def capabilities_digest(directory: str) -> str | None:
         return f"unreadable:{directory}"
 
 
+# ---- the record of the named bundle's files (issue 662) ---------------------------------------------------------------------
+#
+# Stage 0 judges the model against the bundle's orchard-capabilities.json. The preflight records that file's digest and the sha256 of the
+# bundle's manifest in the run's `run_start` inputs; stages 2 and 4 compare the files on disk with the record, so a bundle updated in place
+# in between (`tt-model pull --force`, a hand edit) is refused and the message names the file. The values are plain strings because inputs
+# are NAME=value pairs: a hex digest, `none` for a file the bundle does not ship, and `unreadable` for one that cannot be read.
+
+MANIFEST_FILE = "tt_kernel_manifest.json"
+RECORD_CAPABILITIES = "bundle_capabilities_sha256"
+RECORD_MANIFEST = "bundle_manifest_sha256"
+RECORD_KEYS = (RECORD_CAPABILITIES, RECORD_MANIFEST)
+_FILE_OF = {RECORD_CAPABILITIES: CAPABILITIES_FILE, RECORD_MANIFEST: MANIFEST_FILE}
+
+
+def _file_record(directory: str, name: str) -> str:
+    """The sha256 (hex) of `directory/name`, `none` when the file is absent, `unreadable` when it is there and cannot be read (a link, a FIFO,
+    too large). No path is part of the value."""
+    if not directory:
+        return "none"
+    path = Path(directory) / name
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return "none"
+    except (OSError, ValueError):
+        return "unreadable"
+    try:
+        return safeio.sha256_file(path, max_bytes=CAPABILITIES_MAX_BYTES if name == CAPABILITIES_FILE else MAX_INSTALLED_BYTES)
+    except safeio.SafeReadError:
+        return "unreadable"
+
+
+def bundle_record(directory: str) -> dict[str, str]:
+    """The two values the preflight records for the bundle in `directory`: {bundle_capabilities_sha256, bundle_manifest_sha256}."""
+    return {key: _file_record(directory, name) for key, name in _FILE_OF.items()}
+
+
+def bundle_changes(directory: str, recorded) -> list[str]:
+    """What changed in the bundle's files since the record, one sentence per file, each naming it. `recorded` is the run's inputs (or the two
+    keys of them). A key that is not in it is not compared: a run that started before the record existed has none, and recording the files as
+    they are now would hide a change made since stage 0. A recorded value that is not a string counts as a change."""
+    if not isinstance(recorded, dict):
+        return []
+    out = []
+    for key, name in _FILE_OF.items():
+        if key not in recorded:
+            continue
+        want, now = recorded[key], _file_record(directory, name)
+        if want != now:
+            shown = want if isinstance(want, str) else "a value that is not text"
+            out.append(f"{name} changed since stage 0 judged the bundle (recorded {shown[:12]}, now {now[:12]}); "
+                       "stage 0 compared the model with code that is no longer what is installed")
+    return out
+
+
 def bundle_family(chosen: Installed, installed) -> list[Installed]:
     """The v6 bundles that can stand in for `chosen` on another chip count: those that serve the same weights repo and ship the same
     orchard-capabilities.json (or, like `chosen`, none), `chosen` included. Two bundles of one family run the same model code for

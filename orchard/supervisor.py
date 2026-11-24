@@ -5253,7 +5253,7 @@ class Supervisor:
                                     budget_s=spec.budget_s, home=self.home)
         return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                        operator_home=self.paths.operator_home, counts=[t.chips for t in tests],
-                                                                       bundle=self._run_bundle())
+                                                                       bundle=self._run_bundle(), recorded=self._run_bundle_record())
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -5293,6 +5293,12 @@ class Supervisor:
         value = (getattr(self, "inputs", None) or {}).get("bundle")
         return value if isinstance(value, str) and value else None
 
+    def _run_bundle_record(self) -> dict:
+        """The run's record of the bundle's files (nearest.RECORD_KEYS in the run_start inputs, issue 662); empty for a run that started
+        before it was kept. Stages 2 and 4 compare the files on disk with it."""
+        inputs = getattr(self, "inputs", None) or {}
+        return {k: inputs[k] for k in nearest.RECORD_KEYS if k in inputs}
+
     def _read_test(self, stage_dir: Path) -> tuple[dict | None, list[str]]:
         problems = []
         got = {name: safeio.read_json_checked(stage_dir / name, max_bytes=RUN_JSON_MAX) for name in ("hw_test.json", "handoff.json")}
@@ -5306,7 +5312,7 @@ class Supervisor:
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
         if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json", tt_model_root=self.paths.tt_model_root,
-                                                operator_home=self.paths.operator_home, bundle=self._run_bundle())):
+                                                operator_home=self.paths.operator_home, bundle=self._run_bundle(), recorded=self._run_bundle_record())):
             problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
@@ -6177,7 +6183,7 @@ class Supervisor:
             self.ledger.append("decision", n, decision="hardware test plan refused, so the prepare step runs again", file=PLAN, reason=why)
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                               operator_home=self.paths.operator_home,
-                                                                              counts=[t.chips for t in tests], bundle=self._run_bundle())):
+                                                                              counts=[t.chips for t in tests], bundle=self._run_bundle(), recorded=self._run_bundle_record())):
             return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)
