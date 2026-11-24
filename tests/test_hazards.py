@@ -272,6 +272,8 @@ def test_every_table_entry_can_be_hit_by_some_config():
              kv_lora_rank=8, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=8, index_topk=8, hc_mult=4, ngram_size=3), CLEAN,
          {"limits": {"router_top_k_max": 4, "kv_heads_max": 1, "sliding_window_layers_max": 1}, "tile_multiples": {"hidden_size": 8}}),
         (cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16), CLEAN, {}),
+        # a looped block: layers 0 up to 2 run twice for each token
+        (cfg(num_hidden_layers=4, loop_config={"core_start": 0, "core_end": 2, "num_passes": 2}), CLEAN, {}),
     ]
     for model, nearest, kw in probes:
         hit |= {h.name for h in hz.scan_model_hazards(model, nearest, **kw).hazards}

@@ -6109,3 +6109,12 @@ The Lottolabs cards say where each number came from and whether it was measured 
 now says, under Expected performance, which stage each measured row came from (stage 7 rows were measured on this package; stage 2 and 4 rows on the staged configuration before it was built) and that no row is copied; adds `PROOF_SCOPE` (what the rows do not show); prints
 `CardFacts.firmware` and `kmd` in Limitations when set (nothing sets them yet: a run records neither); and adds one summary sentence for MIT, CC BY 4.0 and the three non-commercial CC licences. A reproduce block was not added (see `docs/can-cards.md`).
 44 new tests in `tests/test_card_statements.py`; 33 mutations each turn a test red; the existing card tests pass unchanged.
+## 2026-11-24: looped layers in the decode floor and the plan (Lottolabs study, learning 11; branch lotto-loop-layers)
+
+The Lottolabs study found that the decode floor ignored `loop_config`: Inkling-2-Mini runs layers 6 to 17 three times for each token, so the floor read 1.84 GB per token
+where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_floor` counts a looped layer once per pass and stores it once; the real config gives 3.551 GB
+(card 3.72 GB, 4.6 percent over our count; the gap is the loop controllers and a relative-position projection that the config does not describe, read from the checkpoint header).
+`inkling2_loop_text` joins the types whose query has an output gate (the header lists `attn.gate_attn.weight` at the query's size). `tier_plan` caveats name the uncounted loop
+controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
+and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
+repository head.
