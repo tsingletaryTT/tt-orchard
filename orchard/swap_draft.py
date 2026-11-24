@@ -35,9 +35,10 @@ def _repo(model_id: str) -> str:
     return str(model_id).split("@", 1)[0]
 
 
-def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=None, bundle=None) -> str | None:
+def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=None, bundle=None, recorded=None) -> str | None:
     """Why an agent-written swap config does not serve stage 0's nearest model, or None. The weights are swapped into a bundle or package of
     the nearest model; a config that names another model serves the wrong architecture (issue 67: a Qwen3.8-27B bundle for a Qwen3-Coder model).
+    `recorded` is the run's record of the bundle's files (nearest.bundle_record, issue 662): a bundle whose files changed since is refused.
     Repository ids are compared exactly, without any `@revision`. A missing config, a config with no nearest_model_id (prepare_swap.py refuses that itself) or a run with no stage 0 record is no problem here."""
     got = safeio.read_json_checked(config_path, max_bytes=JSON_MAX)
     if got.refused:
@@ -72,7 +73,7 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
                 f"reads has to be the one that was checked")
     if isinstance(bundle, str) and bundle and tt_model_root is not None:
         # The run's bundle (its `bundle` input): the config must use that bundle or one of its family, the object stage 0 judged.
-        named, family, boxes_ok, why = _named_bundle(tt_model_root, {"bundle": bundle}, want)
+        named, family, boxes_ok, why = _named_bundle(tt_model_root, {"bundle": bundle, **_record_of(recorded)}, want)
         if why:
             return f"{Path(config_path).name}: {why}"
         if cfg.get("package") and not boxes_ok:
@@ -149,14 +150,14 @@ def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str, st
     return None, "", ""
 
 
-def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None, bundle=None) -> list[str]:
+def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None, bundle=None, recorded=None) -> list[str]:
     """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count. `counts`, when given, are the chip
     counts of the hardware-test plan: a configuration that is not in the plan is never run, so a leftover directory is not judged."""
     out = []
     for path in sorted(Path(stage_dir).glob("configs/*/swap_config.json")):
         if counts is not None and path.parent.name not in {str(c) for c in counts}:
             continue
-        msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home, bundle=bundle)
+        msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home, bundle=bundle, recorded=recorded)
         if msg:
             out.append(f"the {path.parent.name}-chip configuration: {msg}")
     return out
@@ -192,6 +193,11 @@ def _facts(run_dir: Path, inputs: dict) -> tuple[str | None, str | None, dict, l
     return model, nearest, snapshots, problems
 
 
+def _record_of(recorded) -> dict:
+    """The two record keys of a run's inputs (nearest.RECORD_KEYS) that `recorded` holds; nothing for anything that is not a mapping."""
+    return {k: recorded[k] for k in nearest.RECORD_KEYS if k in recorded} if isinstance(recorded, dict) else {}
+
+
 def _named_bundle(tt_model_root, inputs: dict, want: str):
     """(the run's bundle, the names of its family, whether a container package may stand in, a problem). The run's `bundle` input is the
     directory of the bundle the operator named or the preflight chose (cli.py). Stages 2 and 4 then choose by chip count among that
@@ -211,6 +217,8 @@ def _named_bundle(tt_model_root, inputs: dict, want: str):
     if named.weights_repo != want:
         return None, None, False, (f"the run's bundle {named.name} serves {named.weights_repo}, and stage 0's nearest model is {want}; "
                                    "the weights would be swapped into another model's code")
+    if changed := nearest.bundle_changes(named.directory, inputs):
+        return None, None, False, f"the run's bundle {named.name}: " + "; ".join(changed)
     family = {b.name for b in nearest.bundle_family(named, every)}
     return named, family, nearest.capabilities_digest(named.directory) is None, None
 

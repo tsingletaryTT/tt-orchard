@@ -1,0 +1,2 @@
+target = "0.9.197"
+summary = "The agent step's evidence snapshot reads evidence/ with the bounded walk (2000 entries, 12 levels, no links) and names the bound once in the ledger; it used to list the whole directory after every tool call (issue 457, the agent-step site)."

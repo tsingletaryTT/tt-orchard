@@ -1534,10 +1534,17 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
         stock_dir = recorded_stock
         # Stage 0 judged the model against the bundle the run started with (its orchard-capabilities.json), so a resume keeps it.
-        recorded_bundle = (_run_start_inputs(run_dir) or {}).get("bundle")
+        recorded_start = _run_start_inputs(run_dir) or {}
+        recorded_bundle = recorded_start.get("bundle")
         bundle_dir = recorded_bundle if isinstance(recorded_bundle, str) and recorded_bundle else None
+        # The files' digests are kept the same way, and a run that recorded none gets none now: recording the bundle as it is today would
+        # hide a change made since stage 0 judged it (issue 662).
+        bundle_record = {k: recorded_start[k] for k in nearest.RECORD_KEYS if isinstance(recorded_start.get(k), str)} if bundle_dir else {}
+    else:
+        # Stages 2 and 4 compare the bundle's files with this record (nearest.bundle_changes, issue 662).
+        bundle_record = nearest.bundle_record(bundle_dir) if bundle_dir else {}
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
-              **({"bundle": bundle_dir} if bundle_dir else {}),
+              **({"bundle": bundle_dir} if bundle_dir else {}), **bundle_record,
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
               **_speech_inputs(args, base_data),

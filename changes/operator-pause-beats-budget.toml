@@ -1,0 +1,2 @@
+target = "0.9.197"
+summary = "A watchdog pause no longer replaces an operator pause or abort that an earlier poll already read, so a helper rescue whose stage budget runs out records the operator's command (issue 616)."

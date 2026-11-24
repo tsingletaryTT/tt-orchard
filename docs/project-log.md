@@ -6017,6 +6017,8 @@ Prompt (operator): bring the open PRs together and make the text match the runs.
 - Chip forms. Every remaining mention of `ttl.math.fill` and `ttl.math.broadcast` in `orchard/skills` is either a wrong-form example with the line "write `ttl.block.fill`" (the sheet's mistake entry, the recipes' wrong variants) or the compiler's refusal message in `ttlang_recipes.verified.json`. None teaches them as the chip form.
 - The opencode comparison now has a written result (PR 807, `docs/run-logs/2026-11-21-opencode-v2-vs-orchard-harness.md`). On `center`, OpenCode passed 0 of 6 and the orchard loop 1 of 6. On `row_sum`, OpenCode passed 3 of 6 and the orchard loop 1 of 6. No comparison has a Fisher exact p below 0.48, so neither harness is shown to be better. The earlier figures quoted above (1 of 6 against 0 of 6 on `center`, and 1 of 4 each on `row_sum`) were partial.
 
+## 2026-11-23: reference venv moved to transformers 5.24.0
+`tt-orchard updates` showed torch, transformers and tokenizers behind in the reference venv. A copy was upgraded and compared with the live venv on four models (Aion with remote code, SmolLM2-135M, Olmo-Hybrid-7B, tiny-qwen4-moe): top-1 agreement 100 percent, largest logit difference 0.0000, greedy tokens identical, and Aion's stage 1 gate gave the same verdict and ids. The live venv was then upgraded (the 5.19.0 venv is kept as a backup) and `orchard/setup_machine.py` now pins `transformers==5.24.0`. Not tested: OLMoE, MiniCPM3, prompts over 2,400 tokens, sampling, the audio reference venvs. Details: `docs/run-logs/2026-11-23-reference-venv-5-24.md`.
 ## 2026-11-23: `tt-orchard tier-plan`, step 1 of issue 739 (branch fit-plan-739)
 
 Operator: "let's see about 739! start implementing." Step 1 of the issue is a plan command that works before any download. `tt-orchard plan` already
@@ -6069,3 +6071,42 @@ A run started with `tt-orchard bringup MODEL --speech-clips DIR` on `mistralai/V
 every answer and stops it, and stage 8 builds the operator bundle. No coder boots, stages 3 to 7 are skipped, and no code path packages or uploads weights (a test reads the route's code for it). Each stage's gate recomputes its numbers
 from the saved clips, audio and transcripts. Every record and the operator bundle carry the bundle's licence as the card states it. It follows the text-runtime route. The scoring route needs a port module from the coder, and a speech run has none. Details, bars and what is owed: `docs/run-logs/2026-11-23-speech-route.md` and `docs/superpowers/specs/2026-11-23-speech-route-design.md`. Not run on a chip; the reference producer has not run on real weights; the bars are provisional.
 
+## 2026-11-23: Issue 461, third batch of float checks (branch finite-461-batch3)
+An integer of more than 308 digits raises OverflowError in `math.isfinite`, `float()` and `math.isclose`. This batch converts the modules the issue still listed as not converted that read JSON from a parser the safe reader does not guard: `telegraph_view` (ledger amounts, derived sums, percent of a cap, time stamps, dollars, row amounts), `speedwatch` (baseline file entries and the `judge` baseline), `text_stages` (the perplexity reference and `agree`), and `text_bars` (`ppl_problems`). A ledger amount, a derived sum or a baseline speed that a float cannot hold is refused with the module's own error. A percent of a huge whole number is computed with whole numbers and capped. Dollars of such a number show `>$1e308`. Calls whose argument is matched text, an argparse float or a value an earlier line already checked carry a `# finite: ok <reason>` marker. The ratchet baseline fell from 254 to 235 calls in 80 files.
+Test first: 32 new tests in `tests/test_finite_batch3.py` and one in `tests/test_text_stages.py` (12 failures before the change). Twelve mutations each turned a test red; the first pass of 12 left two green (the percent paths covered each other), and two tests for a quotient no float holds and for a mixed float and huge integer fixed that. Not done in issue 461: `audio_facts`, `full_port_bundle`, `port_construction`, `scoring_check`, `step_bars` (audio area, left to the speech work), the skill templates that cannot import orchard, and the counted `float(` calls on numpy results.
+## 2026-11-23: the agent step's evidence snapshot is bounded (issue 457, branch bound-agent-evidence-snapshot-457)
+
+`AgentStep._snapshot` listed `evidence/` with `sorted(rglob("*"))` after every tool call and kept one entry per file for the step. PR 778 bounded the gate's port
+check, the repair fingerprint and the wrap-up listing; this was the site named after it. The snapshot now reads through `boundedwalk.Walk` with the bounds
+the wrap-up listing uses (`boundedwalk.EVIDENCE_ENTRIES` 2000 and `EVIDENCE_DEPTH` 12, now defined once and used by both). A link inside `evidence/` is no longer
+listed (it used to count when it pointed at another file inside `evidence/`), and a link standing where `evidence/` should be is not read. Past a bound the files
+read so far are kept and one ledger decision, `the evidence scan stopped`, names the bound and the entries read (once per step). The snapshot is sorted by path as before.
+10 tests (a fake `os.scandir` that serves 300,000 entries, a tree deeper than the bound, links, a linked evidence directory, the once-per-step note, the order) and
+10 mutations each turn a test red. Still open under #457: `port_facts.copy_skeleton` (writes by path) and `scoring_check._source_reasons` (an unbounded scan); the
+fingerprint's read-beneath change is also listed in the issue. The issue stays open.
+## 2026-11-23: the hardware-phase decision records what `decide_park` saw (issue 591, branch park-decision-facts-591)
+
+Run 24b parked the coder with `free_boards=[]` while `gozer status` showed two chips FREE, and the ledger held only the board lists, so the cause was not
+readable afterwards. The three "hardware phase" decisions in `supervisor.py` (the plain phase, the wide phase and stage 4's plan) now carry `board_facts`
+from `handoff.decision_facts`: each board's chips with state and `who`, whether the coder's lease holds the board, the reason a board was not counted free
+(the coder holds it, a named chip is busy, a FREE chip lists a `who`, or the chips have no board serial) and the chips that look FREE on a board that was not counted free.
+`decide_park` and the facts share one rule (`_busy_chip`), so they cannot disagree. The decision itself is unchanged. This does not find the cause of run 24b;
+it makes the next occurrence readable from the ledger alone. 11 tests (`tests/test_park_decision_facts_591.py`) and 11 mutations (the rule, the coder flag, the
+free-chip list, the stringified `who`, and each of the three wirings) each turn a test red. The issue stays open: it needs a second occurrence to confirm a cause.
+## 2026-11-23: the named bundle's files are recorded at the start and compared at stages 2 and 4 (issue 662, branch record-bundle-capabilities-digest-662)
+
+Stage 0 judges a model against the named bundle's `orchard-capabilities.json`, and nothing showed whether the bundle changed between stage 0 and stage 2
+(`tt-model pull --force`, a hand edit). `tt-orchard bringup` now records `bundle_capabilities_sha256` (`none` for a bundle with no file, `unreadable` for
+a file that cannot be read) and `bundle_manifest_sha256` in the run's inputs. `swap_draft._named_bundle`, which stage 2's draft, stage 4's draft and both
+agent-config checks go through, compares them with the files on disk (`nearest.bundle_changes`) and refuses a changed bundle with a message that names the file.
+A resume keeps the recorded values. A run that started before this change has no record and is not compared; recording it now would hide a change made
+since stage 0. 21 new tests (`tests/test_bundle_record_662.py`); 11 mutations of the record, the comparison, the resume rule and the three wirings each turn a test red.
+The folded #663 (link tests for the real-path comparison of bundle directories) is in the same PR: 5 tests (`tests/test_bundle_link_663.py`), and 4 mutations (each real-path comparison replaced by a string comparison) each turn a test red. Not done: the folded #664 (name the base bundle in bringup.toml). Not run on a chip.
+## 2026-11-23: an operator pause that an earlier poll read is kept when the stage budget runs out (issue 616, branch fix-616-operator-pause-kept)
+
+`RunActuator.pause()` set the stop to `pause` whatever it held. When an earlier stop poll had read the operator's `pause` or `abort` (the control file is
+consumed on the read and `stop_reason()` keeps the command as the stop) and the stage's wall-clock budget then ran out during the helper wait, the budget's
+pause replaced it. The next poll found no file, and the rescue recorded `stage-budget` without the operator's decision. `pause()` now leaves an
+`operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
+(the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
+runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
