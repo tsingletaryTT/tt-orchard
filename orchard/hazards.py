@@ -93,7 +93,8 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "a 512-expert model needed a wider mask than 256 bits; above 512 the wider mask is also short", _ISSUE,
                "run the router with a token routed to expert index {last} (the highest) and check that the expert's output arrives"),
     TableEntry("vocab_per_die_above_65536", f"vocabulary columns per die at most {VOCAB_PER_DIE_LIMIT}",
-               "a sampler index wraps at 65,536 columns per die and returns a wrong token", _ISSUE,
+               "the stock sampler op's index wraps at 65,536 columns per die and returns a wrong token. The Lottolabs Inkling-2-Mini (201,024 columns) and "
+               "Qwen3.6-35B-A3B (248,320) cards run on one die with a custom top-k scan that does not wrap (card claim), so the row describes the stock op", _ISSUE,
                "sample with the greedy and the sampled path on logits whose maximum sits in the last column of each die"),
     TableEntry("vocab_not_whole_tiles", "vocabulary a whole number of 32-wide tiles",
                "the vocabulary is not a multiple of 32, so the LM head and the sampler pad it", "tile layout: every tensor on the chip is stored in 32 by 32 tiles",
@@ -168,6 +169,70 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "run the indexer at the model's head count sharded over the dies against the CPU result at a context longer than the top-k"),
 ] + _tile_rows())
 _BY_NAME = {e.name: e for e in HAZARD_TABLE}
+
+
+# ---- runtime hazards: not visible in a config ---------------------------------------------------------------------------
+#
+# Failures that the Lottolabs Blackhole cards report from running a port, with no number in a config that predicts them. The study of 2026-11-24 read them
+# from the cards; this repository has not reproduced any of them, so each row says it is a card claim. `known_here` says what orchard checks today.
+# docs/runtime-hazards.md lists the same rows.
+
+@dataclass(frozen=True)
+class RuntimeHazard:
+    name: str
+    applies_to: str       # the kind of port or run the hazard is about
+    what: str             # what goes wrong, as the card reports it
+    source: str           # the card and the section, and that it is a card claim
+    check: str            # what a stage should run to look for it
+    known_here: str       # what orchard checks today, when the row was written
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "applies_to": self.applies_to, "what": self.what, "source": self.source, "check": self.check,
+                "known_here": self.known_here}
+
+
+RUNTIME_HAZARD_TABLE: tuple[RuntimeHazard, ...] = (
+    RuntimeHazard(
+        "trace_inputs_overwritten_by_later_capture", "a port with traced decode or prefill that stages inputs after a trace was captured",
+        "a tensor allocated after a trace was captured can sit inside the released intermediates of the earlier trace, so each replay overwrites it. "
+        "LFM3: the page table staged for one trace read garbage block ids, which gave wrong tokens and later NaN logits. Qwen3.8-27B: vision rows allocated "
+        "after the prefill trace were overwritten by replays, and a 16,384-token image produced garbage",
+        "Lottolabs LFM3-1.7B card, section 's13 trace page-table bug', and Lottolabs Qwen3.8-27B card, section 'Fixed: vision rows' (a card claim that is not reproduced here)",
+        "capture the first trace, allocate and write the later inputs (page table, vision rows), replay the first trace, and compare every later input with what was "
+        "written; on a mismatch allocate the inputs before the first capture",
+        "no check found when this row was written (2026-11-24): orchard/skills/full-port-templates/port_check.py counts captures and replays (issue 547) and "
+        "does not look at tensors allocated after a capture"),
+    RuntimeHazard(
+        "lm_head_noc_barrier_hang", "a long decode on a traced port",
+        "a device hang about once in 20,000 decode steps: the LM head waits in a NoC atomic barrier. The cause is inferred by the card (multicast readers of the final "
+        "RMSNorm exit with a semaphore increment in flight) and not proven; the fix drains NoC transactions before kernel exit, and 200,000 replays of "
+        "norm plus LM head ran afterwards without a hang",
+        "Lottolabs Qwen3.8-27B card, section 'A rare device hang is addressed' (a card claim that is not reproduced here)",
+        "run a decode soak of at least 20,000 steps under a lease; when a step times out, capture tt-triage before the reset and record the step count",
+        "no check found when this row was written (2026-11-24): no stage runs a decode of that length"),
+    RuntimeHazard(
+        "host_read_during_trace_capture", "a traced port whose lookup table stays on the host",
+        "TT_FATAL: Reads are not supported during trace capture, when a vocabulary or lookup table that the traced step reads is on the host; the card's fix "
+        "keeps the table on the device",
+        "Lottolabs Qwen3.6-35B-A3B card, section 'MTP-off fix' (a card claim that is not reproduced here)",
+        "capture the traced step once with every table the step reads on the device; a host-resident table fails at capture with this message",
+        "no check found when this row was written (2026-11-24)"),
+    RuntimeHazard(
+        "tensor_cache_identity_is_name_and_shape", "a converted-tensor cache reused across checkpoints or runtime builds",
+        "the runtime's converted-tensor cache is keyed by tensor name and shape only, so a cache made from another checkpoint is read without complaint and serves "
+        "wrong weights. The card's launcher writes an identity file (the checkpoint manifest hash plus the serving image id) beside the cache and refuses a cache "
+        "whose identity differs",
+        "Lottolabs Qwen3.6-35B-A3B card, section 'Cache safety', and Lottolabs Qwen3.8-27B card (a card claim that is not reproduced here)",
+        "record the checkpoint's file hashes and the serving image id next to the cache when it is made, and compare them before each start",
+        "`.orchard-model` names the model whose weights a cache holds (orchard/caches.py, the swap templates) and the operator bundle checks it; it does not record "
+        "the checkpoint revision or the serving image, so a cache made from an older checkpoint of the same model passes that check"),
+)
+_RUNTIME_BY_NAME = {r.name: r for r in RUNTIME_HAZARD_TABLE}
+
+
+def runtime_hazard(name: str) -> RuntimeHazard:
+    """The runtime-hazard row called `name`. Raises KeyError for an unknown name."""
+    return _RUNTIME_BY_NAME[name]
 
 
 class HazardInputError(ValueError):
@@ -447,15 +512,25 @@ def _generated_entry(name: str, why: str | None) -> TableEntry:
 
 
 def main(argv=None) -> int:
-    """`python3 -m orchard.hazards MODEL_CONFIG --nearest NEAREST_CONFIG [--dies N]`: print the scan record as JSON. Exit 2 on a bad input."""
+    """`python3 -m orchard.hazards MODEL_CONFIG --nearest NEAREST_CONFIG [--dies N]`: print the scan record as JSON. Exit 2 on a bad input.
+    `python3 -m orchard.hazards --runtime` prints the runtime hazards that a config cannot show (RUNTIME_HAZARD_TABLE)."""
     import argparse
     import os
     import json
-    ap = argparse.ArgumentParser(description="Scan a model config for dimensions that break known kernels.")
-    ap.add_argument("config", help="the model's config.json")
+    ap = argparse.ArgumentParser(description="Scan a model config for dimensions that break known kernels, or list the runtime hazards.")
+    ap.add_argument("config", nargs="?", help="the model's config.json")
+    ap.add_argument("--runtime", action="store_true", help="print the runtime hazards that the Lottolabs cards report (no config)")
     ap.add_argument("--nearest", help="the nearest bundle's model config.json (without it the comparisons with the bundle are skipped)")
     ap.add_argument("--dies", type=int, default=2, help="dies the vocabulary is split over (default 2)")
     a = ap.parse_args(argv)
+    if a.runtime:
+        if a.config or a.nearest:
+            print("hazards: --runtime lists the runtime hazards and takes no config")
+            return 2
+        print(json.dumps({"runtime_hazards": [r.as_dict() for r in RUNTIME_HAZARD_TABLE]}, indent=2))
+        return 0
+    if not a.config:
+        ap.error("the model's config.json is required (or use --runtime)")
     try:
         model = mc.read_model_config(os.path.realpath(a.config))      # a Hugging Face cache snapshot file is a link into blobs/
         nearest = mc.read_model_config(os.path.realpath(a.nearest)) if a.nearest else None

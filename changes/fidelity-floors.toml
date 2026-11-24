@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "plan and tier-plan can require a KL and a top-1 floor beside the perplexity bar (named rule lfm3-card); the plan wrapper passes every fidelity option."
+kind = "feature"
