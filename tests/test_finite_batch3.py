@@ -107,3 +107,15 @@ def test_a_ledger_holding_a_huge_amount_answers_with_a_damaged_ledger_error_and_
 def test_judge_refuses_a_baseline_no_float_can_hold_with_its_own_error(baseline):
     with pytest.raises(ValueError, match="baseline must be a speed greater than 0"):
         sw.judge([10.0, 11.0, 12.0], baseline)
+
+
+def test_a_percent_whose_scaled_ratio_a_float_cannot_hold_is_the_cap():
+    """10**307 fits a float, but `10**307 * 100 / 1` is a quotient no float holds: whole numbers are compared as whole numbers."""
+    assert tv._percent(10 ** 307, 1) == tv.PERCENT_MAX
+    assert tv._percent(10 ** 307, 3) == tv.PERCENT_MAX
+    assert tv._percent(10, 40) == 25                         # ordinary whole numbers still divide
+
+
+def test_a_percent_with_one_float_and_one_huge_integer_does_not_raise():
+    assert tv._percent(10 ** 400, 2.5) == tv.PERCENT_MAX
+    assert tv._percent(2.5, 10 ** 400) == 0
