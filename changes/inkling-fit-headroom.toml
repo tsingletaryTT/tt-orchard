@@ -1,0 +1,3 @@
+target = "0.9.201"
+summary = "tt-orchard tier-plan says how large the reserve plus the KV share could be for a row that misses only because of them to fit on the chips (Inkling-2-Mini study)."
+kind = "feature"
