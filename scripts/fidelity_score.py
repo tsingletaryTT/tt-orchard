@@ -117,6 +117,18 @@ def fidelity_from_logprobs(lp_ref, lp_cand, scale: float = 10.0) -> dict:
     return {"tokens": n, "ppl_reference": ppl_ref, "ppl_candidate": ppl_cand, "fidelity": scale * ppl_ref / ppl_cand}
 
 
+def plan_inputs(res: dict) -> dict:
+    """What `tt-orchard plan` and `tt-orchard tier-plan` take from one scored run: the perplexity change in percent (from the ratio: the candidate's
+    perplexity is 10 / score of the reference's) and the options to paste, including the KL and the top-1 agreement when the run has them."""
+    score = res["fidelity"]
+    flags = f"--fidelity-bfp4 {score:.4f} --fidelity-tokens {res['tokens']}"
+    if "kl_full" in res:
+        flags += f" --fidelity-kl {res['kl_full']:.4f}"
+    if "top1_agree" in res:
+        flags += f" --fidelity-top1 {res['top1_agree']:.4f}"
+    return {"dppl_percent": 100.0 * (10.0 / score - 1.0), "plan_flags": flags}
+
+
 def noise_note(tokens: int) -> str | None:
     if tokens < MIN_TOKENS_FOR_CLAIM:
         return (f"only {tokens} scored tokens (< {MIN_TOKENS_FOR_CLAIM}): differences of a few percent "
@@ -163,6 +175,7 @@ def score_candidate(ref, cand, samples, prompt_lens) -> dict:
     n = res["tokens"]
     res.update(kl_full=kl_sum / n, top1_agree=agree / n, exp_neg_kl_x10=10 * math.exp(-kl_sum / n),
                noise_note=noise_note(n))
+    res.update(plan_inputs(res))
     return res
 
 
@@ -227,6 +240,8 @@ def main(argv=None) -> int:
                   f"top1 {r['top1_agree']:.3f}  tokens {r['tokens']}")
             if r["noise_note"]:
                 print("   note:", r["noise_note"])
+            if r.get("plan_flags") and r.get("format_is_simulated"):
+                print("   for tt-orchard plan or tier-plan:", r["plan_flags"])
     return 0
 
 

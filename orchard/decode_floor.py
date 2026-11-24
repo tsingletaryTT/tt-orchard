@@ -15,6 +15,8 @@ Bytes per token. Counted per layer from the config (shapes in `_attention_params
   * the dense MLP, or for a mixture-of-experts layer the router, the top-k routed experts and the shared expert,
   * the LM head (read in full for every token, even when it is tied to the embedding table; the embedding lookup reads one row and is
     left out).
+A config with `loop_config` runs a block of layers several times for each token (Inkling-2-Mini: layers 6 to 17, 3 passes). Those layers
+are read once per pass, so their bytes count once per pass. The LM head runs once.
 Norm weights, biases, the shared-expert gate, rotary tables, the KV cache and recurrent state are not counted.
 
 Bandwidth. `per_die_bandwidth_gb_s` is a required input with no default. `BOARDS` holds the figure for each board type with the
@@ -40,7 +42,10 @@ GROUPS = ("attention", "dense_mlp", "router", "routed_experts", "shared_experts"
 
 ASSUMPTIONS = ("batch of one, one token per pass (no speculative decoding); weights spread evenly over the dies so their bandwidth adds; "
                "datasheet peak bandwidth; the KV cache, recurrent state, norms, biases, rotary tables and the embedding lookup are "
-               "not counted; the dtype policy is whatever the caller gives and is not read from the bundle.")
+               "not counted; the small gate weights a looped block reads on each pass (loop controllers) are not counted; the dtype policy is "
+               "whatever the caller gives and is not read from the bundle. A model measured on several dies has not reached the sum of their "
+               "bandwidths (Raahem's Inkling-2-Mini card: 53%, 37% and 23% of the floor on 1, 2 and 4 dies); `scaling_table` sets such measurements "
+               "beside the floor and never changes it.")
 
 # Where the peak figures come from. The public Tenstorrent docs site (repository tenstorrent/tenstorrent.github.io), page
 # core/aibs/blackhole/index.md, table "Memory Bandwidth" row: p100a 448 GB/sec, p150a and p150b 512 GB/sec; and
@@ -196,21 +201,24 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
 
     active: dict[str, float] = {g: 0 for g in GROUPS}
     stored = 0
+    # A looped layer (`loop_config`) is stored once and read once per pass, so its active bytes count `passes[i]` times and its stored size once.
+    passes = d.loop_passes or (1,) * d.layers
     for i in range(d.layers):
+        n = passes[i]
         attn = _mixer_params(d, d.layer_types[i])
-        active["attention"] += attn
+        active["attention"] += attn * n
         stored += attn
         if d.moe_layers[i]:
             router = d.hidden * d.routed_experts
             expert = _mlp_params(d, d.moe_intermediate)
             shared = _mlp_params(d, d.shared_intermediate) if d.shared_intermediate else 0
-            active["router"] += router
-            active["routed_experts"] += d.top_k * expert
-            active["shared_experts"] += shared
+            active["router"] += router * n
+            active["routed_experts"] += d.top_k * expert * n
+            active["shared_experts"] += shared * n
             stored += router + d.routed_experts * expert + shared
         else:
             mlp = _mlp_params(d, d.intermediate)
-            active["dense_mlp"] += mlp
+            active["dense_mlp"] += mlp * n
             stored += mlp
     head = d.hidden * d.vocab
     active["lm_head"] = head
@@ -229,7 +237,8 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
                "layer_types": kinds, "moe_layers": list(d.moe_layers), "routed_experts": d.routed_experts,
                "experts_per_token": d.top_k, "moe_intermediate_size": d.moe_intermediate,
                "shared_intermediate_size": d.shared_intermediate, "linear_attention": dict(d.linear), "mamba": dict(d.mamba),
-               "multi_latent_attention": dict(d.mla)}
+               "multi_latent_attention": dict(d.mla), "loop_applications": sum(passes), "loop_passes_by_layer": list(passes),
+               "loop_variable": d.loop_variable}
     return DecodeFloor(bytes_per_token=total, by_group=by_group, active_params=sum(active.values()), stored_params=stored,
                        floor_ms=floor_ms, floor_tok_s=1000.0 / floor_ms, dies=dies, per_die_bandwidth_gb_s=bw, dtype_policy=policy,
                        board=board, model_summary=summary)
@@ -263,6 +272,58 @@ def share_text(measured_tok_s, floor: DecodeFloor) -> str:
         text += ("; the speed is above the floor, so an input is wrong (a smaller weight dtype than the policy says, more dies) or "
                  "the run emits several tokens per weight read (speculative decoding)")
     return text + "."
+
+
+# ---- measured scaling over dies -----------------------------------------------------------------------
+
+SCALING_LABEL = ("supplied by the caller (for example from a published card); not measured by this module and never used to change the floor")
+
+
+def scaling_table(model_config, dtype_policy, per_die_bandwidth_gb_s, measured_by_dies) -> list[dict]:
+    """One row per die count for single-user decode speeds the caller measured (or read from a card): the floor for that die count, the share of
+    it the speed reaches, the speed-up over the smallest die count, the ideal speed-up (the die-count ratio) and their quotient.
+
+    The floor assumes the dies' bandwidth adds. A speed that grows by less than the die count (tensor-parallel decode pays for collectives, per-die
+    launch costs and a fixed host cost) shows as a scaling efficiency below 1. `measured_by_dies` maps a whole die count to a positive finite
+    tokens-per-second figure; the table labels every row as supplied by the caller. Raises FloorInputError for anything else."""
+    if not isinstance(measured_by_dies, dict) or not measured_by_dies:
+        raise FloorInputError("measured speeds must be a non-empty mapping of die count to tokens per second")
+    points = []
+    for dies, tok_s in measured_by_dies.items():
+        n = _check_dies(dies)
+        if not isinstance(tok_s, (int, float)) or not safeio.fits_float(tok_s) or tok_s <= 0:       # fits_float refuses a bool, nan, inf and an int past float range
+            raise FloorInputError(f"the speed measured on {n} dies must be a positive finite number of tokens per second")
+        points.append((n, float(tok_s)))      # finite: ok fits_float accepted tok_s on the line above
+    points.sort()
+    base_dies, base_tok_s = points[0]
+    rows = []
+    for dies, tok_s in points:
+        floor = decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s)
+        speedup, ideal = tok_s / base_tok_s, dies / base_dies
+        rows.append({"dies": dies, "floor_tok_s": floor.floor_tok_s, "measured_tok_s": tok_s, "share_of_floor": share_of_floor(tok_s, floor),
+                     "speedup_vs_smallest": speedup, "ideal_speedup": ideal, "scaling_efficiency": speedup / ideal, "label": SCALING_LABEL})
+    return rows
+
+
+def scaling_text(rows) -> str:
+    """The rows of `scaling_table` as plain text lines."""
+    lines = [f"{'dies':>4} {'floor tok/s':>12} {'measured tok/s':>15} {'share of floor':>15} {'speed-up':>9} {'ideal':>6} {'efficiency':>11}"]
+    for r in rows:
+        lines.append(f"{r['dies']:>4} {r['floor_tok_s']:>12.1f} {r['measured_tok_s']:>15.1f} {r['share_of_floor']:>15.0%} "
+                     f"{r['speedup_vs_smallest']:>9.2f} {r['ideal_speedup']:>6.2f} {r['scaling_efficiency']:>11.2f}")
+    lines.append(f"the measured speeds are {SCALING_LABEL}")
+    return "\n".join(lines)
+
+
+def _parse_measured_by_dies(text: str) -> dict:
+    out = {}
+    for part in (text or "").split(","):
+        try:
+            dies, tok_s = part.split("=")
+            out[int(dies)] = float(tok_s)        # finite: ok a string argument; scaling_table refuses inf and nan
+        except ValueError as exc:
+            raise FloorInputError(f"--measured-by-dies is DIES=TOK_S pairs such as 1=53.2,2=74.8; got {part!r}") from exc
+    return out
 
 
 # Likely causes of a low share, most likely first (the order in published fused-decode work and in issue 181).
@@ -308,6 +369,9 @@ def main(argv=None) -> int:
     ap.add_argument("--per-die-gb-s", type=float, help="per-die bandwidth in GB/s (required without --board)")
     ap.add_argument("--policy", default="default=bf16", help="comma list of group=dtype, for example default=bfp8,routed_experts=bfp4")
     ap.add_argument("--measured", type=float, help="a measured tok/s to state as a share of the floor")
+    ap.add_argument("--measured-by-dies", metavar="DIES=TOK_S,...",
+                    help="single-user speeds measured on several die counts (for example from a card), set beside the floor of each; "
+                         "the floor itself does not change")
     a = ap.parse_args(argv)
     try:
         policy = dict(p.split("=", 1) for p in a.policy.split(",") if p)
@@ -323,6 +387,9 @@ def main(argv=None) -> int:
         print(json.dumps(f.as_dict(), indent=2))
         if a.measured is not None:
             print(share_text(a.measured, f))
+        if a.measured_by_dies is not None:
+            bw = a.per_die_gb_s if a.per_die_gb_s is not None else BOARDS[a.board].per_die_gb_s
+            print(scaling_text(scaling_table(cfg, policy, bw, _parse_measured_by_dies(a.measured_by_dies))))
     except ValueError as exc:        # FloorInputError, ModelConfigError, or a malformed --policy
         print(f"decode_floor: {exc}")
         return 2
