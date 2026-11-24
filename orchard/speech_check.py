@@ -394,12 +394,17 @@ def _speech_request(host, port, payload: dict, timeout, limit=AUDIO_LIMIT):
     return _request(host, port, "POST", "/v1/audio/speech", body=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, timeout=timeout, limit=limit)
 
 
-def check_text_to_speech(base_url, text, *, voices=(), stream=False, asr_url=None, max_wer=None, sample_rate=DEFAULT_SAMPLE_RATE, timeout=600.0) -> list[Result]:
-    """Run the text-to-speech checks against the server at `base_url`. `asr_url`, when given, is a speech-to-text server that transcribes each answer."""
+def check_text_to_speech(base_url, text, *, voices=(), stream=False, asr_url=None, max_wer=None, sample_rate=DEFAULT_SAMPLE_RATE, timeout=600.0,
+                         on_audio=None) -> list[Result]:
+    """Run the text-to-speech checks against the server at `base_url`. `asr_url`, when given, is a speech-to-text server that transcribes each answer.
+    `on_audio(name, wav_bytes)`, when given, is called for each answer that passed the WAV checks, with the result's name (`speech` or `speech VOICE`);
+    the speech route (orchard/speech_route.py) saves the audio there and scores it later on the host."""
     host, port = parse_base_url(base_url)
     asr = parse_base_url(asr_url) if asr_url is not None else None
     max_wer = _check_max_wer(max_wer, DEFAULT_MAX_WER_SPEECH)
     timeout = _check_timeout(timeout)
+    if on_audio is not None and not callable(on_audio):
+        raise SpeechCheckError("on_audio must be a function of (name, wav bytes)")
     if not isinstance(text, str) or not words(text) or len(text) > TEXT_LIMIT:
         raise SpeechCheckError(f"--text must be text with at least one word and at most {TEXT_LIMIT} characters")
     if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or not 1000 <= sample_rate <= 192000:
@@ -421,6 +426,8 @@ def check_text_to_speech(base_url, text, *, voices=(), stream=False, asr_url=Non
             continue
         ok, detail, got = _judge_wav(data, headers.get("content-type", ""), text, sample_rate)
         results.append(Result(name, "pass" if ok else "fail", detail, got))
+        if ok and on_audio is not None:
+            on_audio(name, data)
         if asr is not None and ok:
             results.append(_transcribe_speech(asr, data, text, name, max_wer, timeout))
     results.append(_expect_4xx("bad voice", "POST /v1/audio/speech with a voice the server cannot have",
