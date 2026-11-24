@@ -19,7 +19,9 @@ from orchard import safeio
 MAX_CONFIG_BYTES = 1 << 20          # a config.json is a few kilobytes; a megabyte is far beyond any real one
 # Model types whose full-attention query projection is always twice as wide (an output gate) with no config key saying so.
 # Found by summing the Qwen3-Coder-Next shard headers: q_proj holds 2 x heads x head_dim rows and its config has no attn_output_gate.
-GATED_BY_TYPE = ("qwen3_next",)
+GATED_BY_TYPE = ("qwen3_next", "inkling2_loop_text")
+# inkling2_loop_text (Inkling-2-Mini): the safetensors header of thinkingmachines/Inkling-2-Mini lists `attn.gate_attn.weight` as [3072, 2304] in
+# every layer, the same size as `wq_du.weight`, and its config has no key for it. Counting the query twice as wide gives the same parameter total.
 # Granite MoE families: every layer has a `shared_mlp` of `shared_intermediate_size`; `intermediate_size` is the routed expert width
 # (or unused, when the expert count is 0).
 SHARED_MLP_TYPES = ("granitemoehybrid", "granitemoeshared")
@@ -29,6 +31,8 @@ TWO_PROJECTION_MLP_TYPES = ("gpt_neox", "gpt2", "gptj", "gpt_bigcode", "opt", "b
 # The most layers a config may claim. The largest real models have a few hundred; the bound keeps a hostile number from allocating
 # the per-layer tuples below.
 MAX_LAYERS = 10_000
+# The most passes a `loop_config` may claim over its block. The real model runs its block 3 times.
+MAX_LOOP_PASSES = 64
 
 
 class ModelConfigError(ValueError):
@@ -85,6 +89,8 @@ class ModelDims:
     mla: dict = field(default_factory=dict)      # multi-latent attention shapes, empty when the model has none
     mlp_projections: int = 3                # matrices per MLP or expert: 3 for a gated MLP, 2 for the families in TWO_PROJECTION_MLP_TYPES
     keys: frozenset = frozenset()           # every key of the flat config whose value is not null, for detecting mixers that have no layer-type name
+    loop_passes: tuple = ()                 # how many times each layer runs for one token (all 1 without a `loop_config`); () only on a hand-built ModelDims
+    loop_variable: bool = False             # the config says the pass count varies per token (`loop_config.is_varloop`): loop_passes holds the maximum
 
 
 def _num(cfg: dict, key: str, *, default=None, lo: int = 1, hi: int | None = None) -> int:
@@ -163,11 +169,44 @@ def dims(config) -> ModelDims:
         mamba = {"heads": _num(cfg, "mamba_n_heads"), "head_dim": _num(cfg, "mamba_d_head"), "state": _num(cfg, "mamba_d_state"),
                  "groups": _num(cfg, "mamba_n_groups", default=1), "conv_kernel": _num(cfg, "mamba_d_conv", default=4)}
 
+    loop_passes, loop_variable = _loop_passes(cfg, layers)
+
     return ModelDims(
         hidden=hidden, intermediate=intermediate, layers=layers, heads=heads, kv_heads=kv_heads, head_dim=head_dim, vocab=vocab,
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
-        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mamba=mamba, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None))
+        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mamba=mamba, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None),
+        loop_passes=loop_passes, loop_variable=loop_variable)
+
+
+def _loop_key(loop: dict, key: str, *, lo: int, hi: int) -> int:
+    if loop.get(key) is None:
+        raise ModelConfigError(f"model config loop_config has no {key}")
+    try:
+        return safeio.whole_number(loop[key], lo=lo, hi=hi, what=f"loop_config {key}")
+    except safeio.BadValue as exc:
+        raise ModelConfigError(f"model config {exc.reason}") from exc
+
+
+def _loop_passes(cfg: dict, layers: int) -> tuple[tuple, bool]:
+    """(how many times each layer runs for one token, whether that count varies). A config with `loop_config` runs layers
+    `core_start` up to but not including `core_end` `num_passes` times each (Inkling-2-Mini: 6, 18, 3: 12 layers three times, 48
+    applications for 24 layers). The weights are stored once. A config without the key, or with it set to null, runs every layer once.
+    `is_varloop` true means the pass count varies per token; the count here is then the largest."""
+    loop = cfg.get("loop_config")
+    if loop is None:
+        return (1,) * layers, False
+    if not isinstance(loop, dict):
+        raise ModelConfigError("model config loop_config must be an object")
+    start = _loop_key(loop, "core_start", lo=0, hi=layers - 1)
+    end = _loop_key(loop, "core_end", lo=1, hi=layers)
+    passes = _loop_key(loop, "num_passes", lo=1, hi=MAX_LOOP_PASSES)
+    if start >= end:
+        raise ModelConfigError("model config loop_config core_start must be below core_end")
+    varloop = loop.get("is_varloop")
+    if varloop is not None and not isinstance(varloop, bool):
+        raise ModelConfigError("model config loop_config is_varloop must be true or false")
+    return tuple(passes if start <= i < end else 1 for i in range(layers)), bool(varloop)
 
 
 KV_HEAD_KEYS = ("num_key_value_heads", "num_kv_heads", "n_head_kv", "multi_query_group_num")   # a family's spelling of the KV-head count

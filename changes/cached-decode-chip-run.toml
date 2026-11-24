@@ -1,0 +1,2 @@
+target = "0.9.201"
+summary = "Run log for the first chip run of the generated port's cached decode (issue 805) on the Aion port: same tokens as the whole-sequence port, 0.77 to 6.4 tok/s on a 238-token prompt, with the issue 813 clone needed in the loader."

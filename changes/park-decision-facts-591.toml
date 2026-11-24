@@ -1,0 +1,2 @@
+target = "0.9.197"
+summary = "The hardware-phase decision now records each board's chips, state and lease holder and why a board was not counted free, so a park with chips showing FREE can be explained from the ledger (issue 591, diagnostics only)."

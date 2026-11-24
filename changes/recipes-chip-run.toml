@@ -1,0 +1,2 @@
+target = "0.9.200"
+summary = "Run log for the first chip run of the cheat sheet's recipes (issue 800): all eight kernels, the controls included, stop in tt-metal's JIT build on a missing profiler header, so no recipe can be judged on a chip until the pair's tt-metal matches."

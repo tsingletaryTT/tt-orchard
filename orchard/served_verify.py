@@ -272,10 +272,10 @@ def parse_counter(text) -> float | None:
     values = []
     for raw in _COUNTER_LINE.findall(text):
         try:
-            v = float(raw)
+            v = float(raw)  # finite: ok raw is a matched text; float() of text gives inf at worst, never OverflowError
         except ValueError:
             continue
-        if math.isfinite(v) and v >= 0:
+        if math.isfinite(v) and v >= 0:  # finite: ok v is a float made from text
             values.append(v)
     return sum(values) if values else None
 
@@ -473,7 +473,7 @@ def _check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs
     # line printed after it. One that belongs to another report is not read as this one's (review of PR 443, round 3).
     tokens = [(m.start(), n) for m in _KV_TOKENS.finditer(log_text) if (n := _int(m.group(1))) is not None]
     blocks = [(m.start(), int(m.group(1))) for m in _KV_BLOCKS.finditer(log_text)]
-    all_conc = [(m.start(), n, float(m.group(2))) for m in _KV_CONCURRENCY.finditer(log_text) if (n := _int(m.group(1))) is not None]
+    all_conc = [(m.start(), n, float(m.group(2))) for m in _KV_CONCURRENCY.finditer(log_text) if (n := _int(m.group(1))) is not None]  # finite: ok group 2 is matched text; float() of text gives inf at worst
     all_overrides = [(m.start(), int(m.group(1))) for m in _KV_OVERRIDE.finditer(log_text)]
     at, capacity = None, None
     if tokens:

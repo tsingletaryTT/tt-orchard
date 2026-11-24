@@ -1,0 +1,2 @@
+target = "0.9.199"
+summary = "Run log for the first chip run of tt-orchard speech-check against the two published Voxtral bundles: passes, timings, the default bounds against real numbers, and the pull problem on a host without skopeo."

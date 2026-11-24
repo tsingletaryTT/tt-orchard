@@ -334,13 +334,13 @@ def test_a_missing_reference_venv_is_built_with_uv_cpu_torch_and_the_tested_tran
     cmds = [a.args[0] for a in s.actions]
     assert s.status == sm.TODO and cmds[0] == ["uv", "venv", venv, "--python", "3.12"]
     assert "--index-url" in cmds[1] and sm.TORCH_CPU_INDEX in cmds[1] and cmds[1][-1] == "torch"
-    assert "transformers==5.19.0" in cmds[2]
+    assert "transformers==5.24.0" in cmds[2]
 
 
 def test_without_uv_the_venv_is_built_with_python_and_pip(tmp_path):
     m = Machine(tmp_path, venv_ok=False, tools=("python3", "gozer", "tt-model", "docker", "hf", "ollama"))
     cmds = [a.args[0] for a in steps_by_name(m)["reference venv"].actions]
-    assert cmds[0][1:3] == ["-m", "venv"] and cmds[1][1:3] == ["-m", "pip"] and "transformers==5.19.0" in cmds[2]
+    assert cmds[0][1:3] == ["-m", "venv"] and cmds[1][1:3] == ["-m", "pip"] and "transformers==5.24.0" in cmds[2]
 
 
 def test_a_venv_that_exists_but_cannot_import_is_repaired_without_being_recreated(tmp_path):

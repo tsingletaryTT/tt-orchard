@@ -23,6 +23,10 @@ The placements, tried in this order for each precision and chip count:
 
   replicated                      every chip holds every weight (what the generated ports do today);
   experts split over the chips    attention, routers, shared experts and the tables on every chip, the routed experts divided between the chips;
+  tensor-parallel                 attention heads, key-value heads, the expert intermediate width and the output head divided over the chips,
+                                  routers and the embedding table on every chip: about 1/N of the weights per chip. A layout the plan assumes,
+                                  after the published Inkling-2-Mini bundle; it needs the head counts and the expert width (in whole 32-wide
+                                  tiles per chip) divisible by N, and a row that cannot use it says which count does not divide;
   hot experts on chips, rest host the same always-resident weights on every chip, as many whole experts (one expert index in every layer) as
                                   fit beside them, and every expert pinned in host memory with a margin (the Strata rule the issue quotes).
                                   The host path is not written (step 3 of the issue); the row says what it would need.
@@ -57,6 +61,7 @@ from orchard import safeio
 GIB = float(1 << 30)              # finite: ok a constant
 BYTES_PER_ELEMENT = weights_plan.BYTES_PER_ELEMENT
 USABLE_FRACTION = weights_plan.USABLE_FRACTION
+TILE = 32                         # a tile is 32 values wide; a die's share of an expert's width is a whole number of them
 HOST_MARGIN_GIB = 10.0            # choice, from the issue text (Strata's rule: RAM at least the experts plus about 10 GB)
 
 # The busiest-expert shares of OLMoE-1B-7B (64 experts, top 8) over 16,384 tokens of project text: the share of picks that go to the busiest 10, 25
@@ -89,6 +94,8 @@ class Shape:
     moe_layers: int
     expert_params: int             # one routed expert in one layer
     layers: int
+    # counts a tensor-parallel split must divide: (label, value, unit); the die count times the unit must divide the value
+    tp_counts: tuple = ()
 
     @property
     def always_params(self) -> int:
@@ -134,9 +141,21 @@ def shape(config) -> Shape:
                     ("routed experts", d.routed_experts * moe * expert)):
         if n > MAX_GROUP_PARAMS:
             raise TierPlanError(f"the config describes more than {MAX_GROUP_PARAMS:.0e} parameters in the {name}; no real model is that large")
+    counts = [("attention heads", d.heads, 1), ("key-value heads", d.kv_heads, 1)]
+    if d.linear:
+        counts += [("linear-attention key heads", d.linear["key_heads"], 1), ("linear-attention value heads", d.linear["value_heads"], 1)]
+    if d.mamba:
+        counts.append(("mamba heads", d.mamba["heads"], 1))
+    if d.moe_intermediate:
+        counts.append(("expert intermediate width", d.moe_intermediate, TILE))      # every die holds whole tiles of the expert width
     return Shape(attention_params=attention, dense_mlp_params=dense, router_params=router, shared_params=shared, embedding_params=table,
                  head_params=0 if d.tied_embeddings else table, experts=d.routed_experts, top_k=d.top_k, moe_layers=moe,
-                 expert_params=expert, layers=d.layers)
+                 expert_params=expert, layers=d.layers, tp_counts=tuple(counts))
+
+
+def tp_blockers(s: Shape, chips: int) -> list[str]:
+    """The counts that a tensor-parallel split over `chips` dies cannot divide, each as "label (value)". Empty when the split is possible."""
+    return [f"{label} ({value})" for label, value, unit in s.tp_counts if value % (chips * unit)]
 
 
 def caveats(config) -> list[str]:
@@ -159,6 +178,9 @@ def caveats(config) -> list[str]:
         out.append("a hashed n-gram embedding (ngram_ and ple_ keys): its table is not counted and can be large")
     if has("mtp_num_hidden_layers", "num_nextn_predict_layers"):
         out.append("a multi-token-prediction layer (mtp keys): its weights are not counted")
+    if isinstance(cfg.get("loop_config"), dict):
+        out.append("looped layers (loop_config): the gate weights a looped block reads on each pass (loop controllers) are not counted. The fit counts "
+                   "each looped layer's weights once; decode reads them once per pass (orchard/decode_floor.py)")
     if top.get("vision_config") or cfg.get("vision_config"):
         out.append("a vision tower (vision_config): only the language model is counted")
     return out
@@ -204,8 +226,13 @@ def hit_share(fraction: float, points) -> float:
 
 
 def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, *, host_margin_gib: float = HOST_MARGIN_GIB,
-          host_free_gib: float | None = None, skew=OLMOE_SKEW, skew_source: str | None = None) -> dict:
-    """One row: the first placement that fits for this precision and chip count, or the reason none does. `budget` is the weight bytes one chip may use."""
+          host_free_gib: float | None = None, skew=OLMOE_SKEW, skew_source: str | None = None,
+          usable_bytes: float | None = None, overhead_bytes: float | None = None) -> dict:
+    """One row: the first placement that fits for this precision and chip count, or the reason none does. `budget` is the weight bytes one chip may use.
+
+    `usable_bytes` is the share of one chip's DRAM that weights could use before the reserve and the KV share come off, and `overhead_bytes` is that
+    reserve plus the KV share (what the budget lost). With both, a row that does not fit on the chips only because of that overhead says how large the
+    overhead could be for it to fit (`overhead_limit_for_chips_bytes`). The limit changes no verdict; it shows which assumption decides the row."""
     other_b, expert_b = BYTES_PER_ELEMENT[other_fmt], BYTES_PER_ELEMENT[expert_fmt]
     always = s.always_params * other_b
     experts = s.expert_params_total * expert_b
@@ -213,16 +240,39 @@ def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, 
     row = {"other_format": other_fmt, "expert_format": expert_fmt, "chips": chips, "budget_bytes_per_chip": budget,
            "always_resident_bytes": always, "expert_bytes_total": experts, "bytes_per_expert_index": index,
            "resident_experts_per_layer": 0, "host_ram_gib": 0.0, "hit_share": None, "hit_share_label": None, "host_expert_picks_per_token": 0.0,
-           "per_chip_bytes": None, "placement": None, "verdict": "does not fit", "why": None, "whole_layers": None}
+           "per_chip_bytes": None, "placement": None, "verdict": "does not fit", "why": None, "whole_layers": None,
+           "tensor_parallel_note": None, "tensor_parallel_blocked": None,
+           "assumed_overhead_bytes": overhead_bytes, "overhead_limit_for_chips_bytes": None}
+    if usable_bytes is not None and overhead_bytes is not None:
+        # the least one chip must hold when everything stays on the chips: replicated, or the experts split (never more than replicated)
+        need = always + experts / chips if chips > 1 else always + experts
+        if budget < need <= usable_bytes:
+            row["overhead_limit_for_chips_bytes"] = usable_bytes - need
 
     def on_chips(placement: str, per_chip: float) -> dict:
-        row.update(verdict="fits on chips", placement=placement, per_chip_bytes=per_chip, resident_experts_per_layer=s.experts, hit_share=1.0)
+        row.update(verdict="fits on chips", placement=placement, per_chip_bytes=per_chip, resident_experts_per_layer=s.experts, hit_share=1.0,
+                   overhead_limit_for_chips_bytes=None)            # a row that fits by any layout has nothing to loosen
         return row
 
     if always + experts <= budget:
         return on_chips("replicated", always + experts)
     if always + experts / chips <= budget:
         return on_chips("experts split over the chips", always + experts / chips)
+    if chips > 1:
+        blocked = tp_blockers(s, chips)
+        if blocked:
+            row["tensor_parallel_blocked"] = (f"a tensor-parallel layout over {chips} dies needs these counts divisible by {chips} (the expert width in "
+                                              f"whole {TILE}-wide tiles per die): " + ", ".join(blocked))
+        else:
+            # attention, dense and shared MLPs, the output head and the experts are divided over the dies; routers and the embedding table are not
+            divided = (s.attention_params + s.dense_mlp_params + s.shared_params + s.head_params) * other_b
+            per_die = (divided + experts) / chips + (s.router_params + s.embedding_params) * other_b
+            if per_die <= budget:
+                row["tensor_parallel_note"] = (f"tensor-parallel is a layout the plan assumes, after the published Inkling-2-Mini bundle (raahemnabeel/inkling-2-mini): attention "
+                                               f"heads, key-value heads, the expert intermediate width and the output head are divided over the {chips} dies, so "
+                                               f"each holds about 1/{chips} of the weights; routers and the embedding table stay on every die. It needs the "
+                                               f"head counts and the expert width divisible by {chips} (they are); nothing here has been run")
+                return on_chips(f"tensor-parallel: about 1/{chips} of the weights per die", per_die)
     if always > budget:
         row["why"] = (f"the always-resident weights (attention, routers, shared experts, embedding and head) need {always / GIB:.2f} GiB on every chip "
                       f"and a chip offers {budget / GIB:.2f} GiB for weights")
@@ -376,9 +426,10 @@ def checkpoint_note(s: Shape, index_total: int | None) -> str | None:
 # ---- the plan ----------------------------------------------------------------------------------------------------------
 
 def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=HOST_MARGIN_GIB, host_free_gib=None, skew=OLMOE_SKEW,
-         skew_source=None, scores=None, flags=frozenset(), index_total=None, where=None) -> dict:
+         skew_source=None, scores=None, rule=None, flags=frozenset(), index_total=None, where=None) -> dict:
     """The rows for every precision combination and chip count, with each input and where it came from. `flags` names the inputs the caller set."""
     s = shape(config)
+    rule = rule or weights_plan.DEFAULT_RULE
 
     def entry(name, value, constant_note):
         return {"value": value, "source": "caller's flag" if name in flags else "assumed constant", "note": constant_note}
@@ -402,18 +453,20 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
     rows = []
     for chips in chips_list:
         budget = budget_bytes(chip_gib, chips=chips, reserve_gib=reserve_gib, kv_gib=kv_gib)
+        usable = chip_gib * USABLE_FRACTION * GIB
+        overhead = (reserve_gib + kv_gib / chips) * GIB
         for name, other_fmt, expert_fmt in weights_plan.COMBINATIONS:
             r = place(s, other_fmt, expert_fmt, chips, budget, host_margin_gib=host_margin_gib, host_free_gib=host_free_gib, skew=skew,
-                      skew_source=skew_source)
+                      skew_source=skew_source, usable_bytes=usable, overhead_bytes=overhead)
             r["name"] = name
-            r["format_gate"] = weights_plan._worst(weights_plan.format_gate(other_fmt, scores), weights_plan.format_gate(expert_fmt, scores))
+            r["format_gate"], r["format_gate_reason"] = weights_plan.row_gate(other_fmt, expert_fmt, scores, rule)
             rows.append(r)
     notes = [n for n in (checkpoint_note(s, index_total),) if n]
     cav = caveats(config)
     return {"source": where, "caveats": cav, "always_resident_is_lower_bound": bool(cav), "model": {"layers": s.layers, "moe_layers": s.moe_layers, "routed_experts_per_layer": s.experts,
                                        "experts_per_token": s.top_k, "always_resident_params": s.always_params,
                                        "routed_expert_params_total": s.expert_params_total, "params_per_expert_index": s.expert_index_params},
-            "inputs": inputs, "rows": rows, "notes": notes}
+            "inputs": inputs, "fidelity_rule": rule.as_dict(), "rows": rows, "notes": notes}
 
 
 def render(res: dict) -> str:
@@ -426,6 +479,11 @@ def render(res: dict) -> str:
     lines.append(f"chip DRAM {i['chip_gib']['value']} GiB, {i['usable_fraction']['value']:.1%} usable, {i['reserve_gib']['value']} GiB reserve per chip, "
                  f"{i['kv_gib']['value']} GiB KV cache over the chips, host margin {i['host_margin_gib']['value']} GiB [assumed constant unless a flag was given; "
                  f"the sources are in --json]")
+    rule = res.get("fidelity_rule") or {}
+    if rule.get("name") not in (None, weights_plan.DEFAULT_RULE.name):
+        lines.append(f"fidelity rule: {rule['name']} (ratio bar {weights_plan.FIDELITY_BAR}" + "".join(
+            f"; {label} {rule[key]}" for key, label in (("kl_max", "KL at most"), ("top1_min", "top-1 at least"), ("abs_dppl_percent_max", "|perplexity change| percent at most"))
+            if rule.get(key) is not None) + ")")
     lines += ["", f"{'combination':21} {'chips':>5}  {'verdict':23} {'GiB/chip':>8} {'experts on chips':>17} {'host GiB':>9} {'hit share':>10} {'host picks/token':>17}  fidelity rule"]
     for r in res["rows"]:
         fits_host = r["verdict"] == "fits with host experts"
@@ -453,6 +511,17 @@ def render(res: dict) -> str:
     for r in res["rows"]:
         if r["why"]:
             lines.append(f"{r['name']}, {r['chips']} chip(s): {r['why']}")
+    for r in res["rows"]:
+        if r.get("tensor_parallel_note"):
+            lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_note']}")
+        elif r.get("tensor_parallel_blocked") and r["verdict"] != "fits on chips":
+            lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_blocked']}")
+    for r in res["rows"]:
+        if r.get("overhead_limit_for_chips_bytes") is not None:
+            lines.append(f"{r['name']}, {r['chips']} chip(s): would fit on the chips if the reserve plus this chip's share of the KV cache were at most "
+                         f"{r['overhead_limit_for_chips_bytes'] / GIB:.1f} GiB per chip; the plan assumes {r['assumed_overhead_bytes'] / GIB:.1f} GiB "
+                         f"(--reserve-gib and --kv-gib set them). The KV allowance is a flat figure for every model, so a model with mostly sliding-window "
+                         f"attention may need much less")
     lines += [f"note: {n}" for n in res["notes"]]
     lines.append("the weights fit or they do not; speed and quality are not measured here, and the host path for experts is not written (issue 739, step 3)")
     return "\n".join(lines)
@@ -484,8 +553,7 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
                    help="expert-use skew measured on this model: the busiest FRACTION of the experts take SHARE of the picks, for example 0.10:0.41,0.25:0.61 "
                         "(default: the OLMoE-1B-7B figures, an estimate that is not measured for the model being planned)")
     p.add_argument("--skew-source", help="where the --skew figures came from, printed beside the hit share")
-    p.add_argument("--fidelity-bfp4", type=float, help=f"a fidelity score measured for this model's port with bfp4 weights (the bar is {weights_plan.FIDELITY_BAR})")
-    p.add_argument("--fidelity-tokens", type=int, default=0, help=f"scored tokens behind --fidelity-bfp4 (at least {weights_plan.MIN_SCORED_TOKENS} to count)")
+    weights_plan.add_fidelity_arguments(p)
     p.add_argument("--json", action="store_true", help="print JSON")
     return p
 
@@ -510,11 +578,10 @@ def run(args, out=None, client=None) -> int:
         _positive("--host-margin-gib", args.host_margin_gib, zero_ok=True)
         _positive("--host-free-gib", args.host_free_gib)
         skew = parse_skew(args.skew) if args.skew is not None else OLMOE_SKEW
-        scores = None
-        if args.fidelity_bfp4 is not None:
-            if not safeio.is_finite_number(args.fidelity_bfp4) or not 0 <= args.fidelity_bfp4 <= 10.5 or args.fidelity_tokens < 0:
-                raise TierPlanError("--fidelity-bfp4 must be a score from 0 to 10 and --fidelity-tokens a count")
-            scores = {"bfp4": (args.fidelity_bfp4, args.fidelity_tokens)}
+        try:
+            scores, rule = weights_plan.fidelity_inputs(args)
+        except weights_plan.FidelityInputError as exc:
+            raise TierPlanError(f"fidelity input: {exc}") from exc
         flags = {n for n, v in (("chip_gib", args.chip_gib), ("reserve_gib", args.reserve_gib), ("kv_gib", args.kv_gib),
                                 ("host_margin_gib", args.host_margin_gib)) if v is not None}
         cfg, total, where = load(args.source, client=client, revision=args.revision)
@@ -523,7 +590,7 @@ def run(args, out=None, client=None) -> int:
                    kv_gib=defaults.KV_BUDGET_GIB if args.kv_gib is None else args.kv_gib,
                    host_margin_gib=HOST_MARGIN_GIB if args.host_margin_gib is None else args.host_margin_gib, host_free_gib=args.host_free_gib,
                    skew=skew, skew_source=(args.skew_source or "the figures the caller gave with --skew") if args.skew is not None else None,
-                   scores=scores, flags=flags, index_total=total, where=where)
+                   scores=scores, rule=rule, flags=flags, index_total=total, where=where)
     except TierPlanError as exc:
         print(str(exc), file=sys.stderr)
         return 2

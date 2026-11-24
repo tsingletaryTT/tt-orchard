@@ -71,7 +71,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchard import runaway, safeio
+from orchard import boundedwalk, runaway, safeio
 from orchard.canary import CanaryError, post_json
 from orchard.port_facts import is_write_deadline_hint
 from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
@@ -888,6 +888,8 @@ class AgentStep:
         # finished sometimes repeats its last write instead of ending (the first lab run).
         self.finished = finished
         self._seen: dict[str, tuple[int, int]] = {}
+        self._snapshot_limit: str | None = None       # why the last evidence scan stopped early, or None (issue 457)
+        self._snapshot_read, self._snapshot_noted = 0, False
         # The model turn number on every Event this step feeds the watchdog. It counts up through
         # `run` and `continue_with`, so a continuation's turns never reuse an earlier number.
         self._turn = 0
@@ -906,18 +908,40 @@ class AgentStep:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _snapshot(self) -> dict[str, tuple[int, int]]:
+        """The regular files under `evidence/` as {path: (size, mtime_ns)}, sorted by path. The directory is written by this agent, so it is read
+        with a bounded walk (issue 457): one entry at a time, at most `boundedwalk.EVIDENCE_ENTRIES` entries and `EVIDENCE_DEPTH` levels, no link
+        followed or listed (a link inside `evidence/` is not evidence the agent produced there). Past a bound the files read so far are kept and
+        `_snapshot_limit` holds the reason; a link standing where `evidence/` should be is not read."""
+        self._snapshot_limit = None
         out = {}
-        if self.evidence_dir.is_dir():
-            root = os.path.realpath(self.evidence_dir)
-            for f in sorted(self.evidence_dir.rglob("*")):
-                # A link that leaves evidence/ (to test-result.json, say) is not evidence the agent produced there.
-                if f.is_file() and os.path.realpath(f).startswith(root + os.sep):
-                    st = f.stat()
-                    out[str(f)] = (st.st_size, st.st_mtime_ns)
-        return out
+        if not self.evidence_dir.is_dir():
+            return out                            # a link standing where evidence/ should be is refused by the walk below
+        walk = boundedwalk.Walk(self.evidence_dir, boundedwalk.EVIDENCE_ENTRIES, boundedwalk.EVIDENCE_DEPTH)
+        try:
+            with contextlib.closing(iter(walk)) as entries:
+                for parts, kind, _identity in entries:
+                    if kind != "file":
+                        continue
+                    path = self.evidence_dir.joinpath(*parts)
+                    try:
+                        st = os.lstat(path)
+                    except OSError:
+                        continue                      # gone since it was listed
+                    out[str(path)] = (st.st_size, st.st_mtime_ns)
+        except boundedwalk.Limit as exc:
+            self._snapshot_limit = f"evidence/ {exc} (read {walk.seen} entries)"
+            self._snapshot_read = walk.seen
+        except safeio.SafeReadError:
+            return {}
+        return dict(sorted(out.items()))
 
     def _record_new_evidence(self) -> None:
         now = self._snapshot()
+        if self._snapshot_limit and not self._snapshot_noted:
+            # Once per step: the scan stops at the same bound on every later call, and a line for each would fill the ledger.
+            self._snapshot_noted = True
+            self.ledger.append("decision", self.stage, decision="the evidence scan stopped", phase=self.phase, bound=self._snapshot_limit,
+                               read=self._snapshot_read, note="the files after that point are not recorded as evidence")
         for path, stamp in now.items():
             if self._seen.get(path) != stamp:
                 try:
