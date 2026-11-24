@@ -454,6 +454,7 @@ def gate_reference(stage_dir, run_dir) -> GateResult:
     reasons += _template_reasons(Path(stage_dir), "reference_gate.py")
     if (Path(stage_dir) / "qwen4_dense.py").is_file():          # the dense Qwen4 shim shapes the model the evidence describes
         reasons += _template_reasons(Path(stage_dir), "qwen4_dense.py")
+    reasons += _agreement_reference_reasons(Path(stage_dir), run_dir)
     return _done(reasons, seen)
 
 
@@ -465,7 +466,9 @@ SHIPPED_TEMPLATES = {"delta_triage.py": _SKILLS_ROOT / "delta-triage-templates" 
                      "stock_check.py": _SKILLS_ROOT / "stock-runtime-templates" / "stock_check.py",
                      "reference_gate.py": _SKILLS_ROOT / "reference-gate-templates" / "reference_gate.py",
                      # loaded by reference_gate.py from its own directory for a dense qwen4_exp config; optional in a stage
-                     "qwen4_dense.py": _SKILLS_ROOT / "reference-gate-templates" / "qwen4_dense.py"}
+                     "qwen4_dense.py": _SKILLS_ROOT / "reference-gate-templates" / "qwen4_dense.py",
+                     # the agreement set's prompts, copied next to reference_gate.py when the run asked for the agreement reference (issue 15)
+                     "agreement_prompts.json": _SKILLS_ROOT / "weights-swap-templates" / "agreement_prompts.json"}
 
 
 def _sha256(path: Path) -> str:
@@ -1145,6 +1148,63 @@ def agreement_reference_record(run_dir) -> dict | None:
         return evidence_record(run_dir, path)
     except safeio.SafeReadError:
         return None
+
+
+def _run_asked_for_agreement_reference(run_dir) -> bool:
+    """True when the run's run_start entry records `--agreement-reference` (issue 15). A ledger that cannot be read gives False: the other gates
+    already refuse a run whose ledger is damaged, and this check cannot say what the run asked."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    try:
+        entries = read_entries(Path(run_dir) / "ledger.jsonl")
+    except (LedgerCorrupt, OSError):
+        return False
+    for e in entries:
+        if e.get("event") == "run_start":
+            data = e.get("data")
+            return isinstance(data, dict) and data.get("agreement_reference") is True
+    return False
+
+
+def _agreement_reference_reasons(stage_dir: Path, run_dir) -> list[str]:
+    """The reasons stage 1's agreement reference cannot be used, for a run that asked for it (`--agreement-reference`, recorded in run_start).
+    A run that did not ask is not checked. Without this check a run that asked and whose CPU decode failed would go on to stage 2 with the
+    32-token check only and say nothing: the supervisor turns the set on only when the file exists. The file has to be one safeio can read, made
+    from the shipped prompt set (the stage 2 gate compares the same sha256), hold every prompt of the set once, and give each prompt at least
+    agreement_core.MIN_TOKENS generated ids. The stage's copy of the prompt file has to be the shipped one."""
+    if not _run_asked_for_agreement_reference(run_dir):
+        return []
+    name = AGREEMENT_REFERENCE_PATH[-1]
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    out = []
+    if (Path(stage_dir) / "agreement_prompts.json").is_file():
+        out += _template_reasons(Path(stage_dir), "agreement_prompts.json")
+    if not os.path.lexists(path):
+        return out + [f"the run asked for the agreement reference (--agreement-reference) but stage 1 wrote no {name}. When the template stopped on a "
+                      "prompt it wrote evidence/reference/agreement-reference-error.json with the reason"]
+    try:
+        raw = safeio.read_bytes(path, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+        ref = safeio.parse_json_bytes(raw, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return out + [f"stage 1's {name} cannot be read: {exc.reason}"]
+    shipped_ids = _shipped_agreement_ids()
+    try:
+        shipped = safeio.sha256_file(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return out + [f"the shipped agreement prompt set cannot be read: {exc.reason}"]
+    if shipped_ids is None:
+        return out + ["the shipped agreement prompt set has no usable prompt ids"]
+    if not isinstance(ref, dict):
+        return out + [f"stage 1's {name} is not an object"]
+    if ref.get("prompt_set_sha256") != shipped:
+        out.append(f"stage 1's {name} was made from another prompt set than the one the repository ships (its sha256 differs)")
+    entries = ref.get("entries")
+    out += [f"stage 1's agreement reference: {r}" for r in agreement_core.id_problems(entries, shipped_ids)]
+    for e in entries if isinstance(entries, list) else []:
+        ids = e.get("generated_ids") if isinstance(e, dict) else None
+        if not isinstance(ids, list) or len(ids) < agreement_core.MIN_TOKENS:
+            out.append(f"stage 1's agreement reference has {len(ids) if isinstance(ids, list) else 0} generated ids for prompt "
+                       f"{e.get('id') if isinstance(e, dict) else None!r}; {agreement_core.MIN_TOKENS} are needed")
+    return out
 
 
 MASK_TIMEOUT_S = 120.0                 # the helper loads one tokenizer and decodes a few hundred ids

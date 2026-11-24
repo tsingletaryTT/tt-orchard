@@ -229,6 +229,11 @@ def _parser() -> argparse.ArgumentParser:
                    help="stage 1 also samples N tokens at temperature 1 from the main prompt, with the log-probability of each, for the stage 2 fidelity "
                         "score (issue 789). 0 asks for none. Default 0, from 16 to 8192. Stage 2 scores the smaller of this and --port-check-positions. "
                         "The run records the value when it is not 0; a resume keeps it and refuses another")
+    b.add_argument("--agreement-reference", action="store_const", const=True, default=None,
+                   help="stage 1 also decodes the CPU reference of the agreement set (six fixed prompts, 32 greedy tokens each, issue 15) and writes "
+                        "stages/1/evidence/reference/agreement-reference.json, which the stage 2 and 4 check scores the chip against. It adds CPU time "
+                        "(a few minutes for a 7B model, more for a larger one) and chip time per configuration. A run that asked for it fails stage 1 "
+                        "when the file is missing. The run records the choice; a resume keeps it and refuses a different one")
     b.add_argument("--no-tool-dedupe", action="store_true",
                    help="send the agent every repeat read in full (by default a repeat read of an unchanged file in the same step is answered with a "
                         "short note naming the turn that holds the text; docs/tool-result-dedupe.md). The run records the choice when it is off; a "
@@ -1556,7 +1561,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
                                               weights_only_rehearsal=args.weights_only_rehearsal, thin_port=args.thin_port,
-                                              port_repair_rounds=args.port_repair_rounds, port_check_positions=args.port_check_positions, fidelity_tokens=args.fidelity_tokens, telegraph_config=cfg_path,
+                                              port_repair_rounds=args.port_repair_rounds, port_check_positions=args.port_check_positions, fidelity_tokens=args.fidelity_tokens, agreement_reference=args.agreement_reference, telegraph_config=cfg_path,
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.classify:

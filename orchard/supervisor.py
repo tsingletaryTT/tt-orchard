@@ -938,7 +938,7 @@ class Supervisor:
                  keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, agreement_reference: bool = False, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
@@ -967,6 +967,10 @@ class Supervisor:
         # `--fidelity-tokens` (issue 789): how many tokens stage 1 samples at temperature 1 for the stage 2 fidelity score; 0 asks for none. It travels as a
         # run fact (the stage 1 agent writes reference_config.json), so it is recorded in run_start only when it is not 0. `build` hands over the recorded value on a resume.
         self.fidelity_tokens = _check_fidelity_tokens(fidelity_tokens)
+        # `--agreement-reference` (issue 15): stage 1 also decodes the agreement set's CPU reference. Like the fidelity length it travels as a run fact for
+        # the stage agent, and the stage 1 gate requires the file when the run asked. Recorded in run_start only when on; `build` hands over the recorded
+        # choice on a resume.
+        self.agreement_reference = bool(agreement_reference)
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
@@ -1357,6 +1361,7 @@ class Supervisor:
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"port_check_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {}),
                                **({"fidelity_tokens": self.fidelity_tokens} if self.fidelity_tokens else {}),
+                               **({"agreement_reference": True} if self.agreement_reference else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
@@ -6824,6 +6829,11 @@ def parse(argv=None):
                         f"fidelity score (issue 789). 0 asks for none. Default 0, from {full_port.MIN_FIDELITY_TOKENS} to {full_port.POSITIONS_LIMIT}. "
                         f"Stage 2 scores the smaller of this and --port-check-positions. The ledger records the value when it is not 0 and a resume "
                         f"keeps it; a resume that names another value is refused")
+    r.add_argument("--agreement-reference", dest="agreement_reference", action="store_const", const=True, default=None,
+                   help="stage 1 also decodes the CPU reference of the agreement set (six fixed prompts, 32 greedy tokens each, issue 15) and writes "
+                        "stages/1/evidence/reference/agreement-reference.json, which the stage 2 and 4 check scores the chip against. A run that asked for "
+                        "it fails stage 1 when the file is missing. The ledger records the choice and a resume keeps it; a resume that names it for a run "
+                        "that started without it is refused")
     r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
                    help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
@@ -7082,6 +7092,13 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what stage 1 recorded)")
         fidelity_tokens = recorded_fidelity
     fidelity_tokens = 0 if fidelity_tokens is None else full_port.check_fidelity_tokens(fidelity_tokens)
+    agreement_reference = bool(getattr(args, "agreement_reference", None))
+    if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: off)
+        recorded_agreement = (progress.run_start or {}).get("agreement_reference") is True
+        if agreement_reference and not recorded_agreement:
+            raise ValueError("this run started without the agreement reference; --agreement-reference differs. Leave the option out to resume with the "
+                             "recorded choice, or move this run's directory aside and start a new run (the reference is part of what stage 1 recorded)")
+        agreement_reference = recorded_agreement
     tool_dedupe = not getattr(args, "no_tool_dedupe", False)
     if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
         recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
@@ -7154,7 +7171,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, agreement_reference=agreement_reference, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,
