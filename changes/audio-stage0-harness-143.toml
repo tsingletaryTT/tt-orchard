@@ -1,0 +1,2 @@
+target = "0.9.202"
+summary = "Stage 0 of an audio run is supervisor code, so the local coder no longer boots for it: the command records the run inputs audio_model and audio_base, and the supervisor runs the shipped delta_triage.py itself (issue 143)."

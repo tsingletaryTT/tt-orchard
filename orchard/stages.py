@@ -2232,6 +2232,11 @@ def gate_audio_chip(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
+# Stage 0 of an audio run as supervisor code (issue 143, orchard/audio_stage0.py). The command records the input `audio_model=1` when the preflight found the
+# model to be audio; the supervisor then runs the shipped `delta_triage.py` itself, with the same gate as the agent stage, and the local coder is not booted for
+# it. A run without the input keeps the agent stage 0.
+AUDIO_STAGE_0 = dataclasses.replace(
+    STAGES[0], name="intake and delta triage for an audio model (supervisor code)", skill="", refs=(), marker=None, harness=True, needs_coder=False)
 AUDIO_STAGE_1 = StageSpec(1, "CPU reference for the audio model", "", (), 0, audio_runtime.REFERENCE_FILE, gate_audio_reference,
                           audio_runtime.REFERENCE_FILE, harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
 AUDIO_STAGE_2 = StageSpec(2, "clip on one chip and agreement with the CPU reference", "", ("tt-device-usage",), 1, audio_runtime.RESULT_FILE,
@@ -2536,7 +2541,7 @@ def run_model_kind(entries: list[dict]) -> str:
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
              cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
-             full_port: bool = False, kind: str = "generative", speech_route: bool = False) -> StageSpec:
+             full_port: bool = False, kind: str = "generative", speech_route: bool = False, audio_model: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
@@ -2547,6 +2552,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return SPEECH_TABLE[number]
     if number == 0 and stock:
         return STOCK_STAGE_0
+    if number == 0 and audio_model:
+        return AUDIO_STAGE_0              # issue 143: the run's own record says the model is audio, so stage 0 needs no coder
     if audio_runtime and number in AUDIO_TABLE:
         return AUDIO_TABLE[number]
     if number in (1, 2) and scoring_routed(kind, path, cls, full_port):
