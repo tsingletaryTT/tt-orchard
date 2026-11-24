@@ -579,7 +579,8 @@ def test_an_evidence_file_the_agent_step_cannot_hash_is_named_in_the_ledger_and_
         ok = run / "evidence" / "ok.txt"
         ok.write_text("ok")
         entries = []
-        stub = SimpleNamespace(_snapshot=lambda: {str(big): (200, 1), str(ok): (2, 1)}, _seen={}, run_dir=run, stage=2, phase="work",
+        stub = SimpleNamespace(_snapshot=lambda: {str(big): (200, 1), str(ok): (2, 1)}, _snapshot_limit=None, _snapshot_noted=False, _snapshot_read=0,
+                               _seen={}, run_dir=run, stage=2, phase="work",
                                ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))), _event=lambda *a, **k: None)
         AgentStep._record_new_evidence(stub)
         report(kinds=[k.get("decision") or k.get("what") for a, k in entries])
