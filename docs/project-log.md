@@ -6060,3 +6060,12 @@ findings did not hold. Not done and owed: a run of `speech-check` against a real
 duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest on the cards' numbers). Not done: a speech route in the stages, which is a
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
+
+## 2026-11-23: an operator pause that an earlier poll read is kept when the stage budget runs out (issue 616, branch fix-616-operator-pause-kept)
+
+`RunActuator.pause()` set the stop to `pause` whatever it held. When an earlier stop poll had read the operator's `pause` or `abort` (the control file is
+consumed on the read and `stop_reason()` keeps the command as the stop) and the stage's wall-clock budget then ran out during the helper wait, the budget's
+pause replaced it. The next poll found no file, and the rescue recorded `stage-budget` without the operator's decision. `pause()` now leaves an
+`operator-pause` or `abort` stop in place. The budget flag still rises, and a watchdog pause still replaces a watchdog pause or escalation. Five new tests
+(the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
+runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
