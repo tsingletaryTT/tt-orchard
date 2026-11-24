@@ -81,6 +81,38 @@ class NoConfig(Exception):
     """No bringup.toml was found, or the one named does not exist."""
 
 
+def _speech_inputs(args, base_data) -> dict:
+    """The run inputs of the speech route (orchard/speech_route.py): the task the base row chose and the operator's clips, prompts and language. Nothing when the
+    base row did not take the route."""
+    task = base_data.get("speech_route")
+    if not isinstance(task, str):
+        return {}
+    out = {"speech_route": task, "speech_clips": str(Path(args.speech_clips).resolve())}
+    if args.speech_prompts:
+        out["speech_prompts"] = str(Path(args.speech_prompts).resolve())
+    if args.speech_language:
+        out["speech_language"] = args.speech_language
+    return out
+
+
+def _audio_stage0_inputs(base_data, base_snapshot, *, recorded=None, resuming=False) -> dict:
+    """The run inputs that make stage 0 of an audio run supervisor code (issue 143, orchard/audio_stage0.py): `audio_model=1` and `audio_base=<the base
+    repository id>`. They are recorded when the preflight's base row says the model is audio, names its base, and the base's snapshot is known. A resumed run keeps
+    what it started with (`recorded`, from its run_start entry), so a preflight that now reads the model differently cannot change the stage 0 the run began
+    with; a run from before this change recorded nothing and keeps the agent stage 0."""
+    from orchard import audio_stage0
+    if resuming:
+        kept = recorded if isinstance(recorded, dict) else {}
+        if kept.get(audio_stage0.MODEL_INPUT) == "1" and isinstance(kept.get(audio_stage0.BASE_INPUT), str) and kept[audio_stage0.BASE_INPUT]:
+            return {audio_stage0.MODEL_INPUT: "1", audio_stage0.BASE_INPUT: kept[audio_stage0.BASE_INPUT]}
+        return {}
+    data = base_data if isinstance(base_data, dict) else {}
+    base = data.get("base")
+    if data.get("audio") is True and isinstance(base, str) and base.strip() and base_snapshot:
+        return {audio_stage0.MODEL_INPUT: "1", audio_stage0.BASE_INPUT: base}
+    return {}
+
+
 def _port_repair_rounds_arg(text: str) -> int:
     """argparse type of `--port-repair-rounds`: a whole number from 0 to port_repair.MAX_ROUNDS (the supervisor checks the same range)."""
     from orchard import port_repair
@@ -183,6 +215,15 @@ def _parser() -> argparse.ArgumentParser:
                         "feature-extraction and sentence-similarity are embedding models), then the architecture names. A reranker or embedding "
                         "model takes the scoring route (stage 1 records Hugging Face scores or vectors, stage 2 runs the scoring check on the "
                         "coder's port); stages 3 to 6 are not built for it, so the run ends blocked after stage 2 (code scoring-route)")
+    b.add_argument("--speech-clips", metavar="DIR", default=None,
+                   help="for a speech model that a published bundle serves (Voxtral Mini, Voxtral TTS): a directory of audio clips (.wav, .flac, .mp3, .ogg, at "
+                        "most 8), each with a NAME.txt next to it that holds what it says. With it the run takes the speech route: stage 1 records a CPU "
+                        "reference from the clips, stage 2 serves the bundle on one board and compares its answers with the reference. Without it a speech "
+                        "model stops at the preflight. The run never copies or republishes the model's weights")
+    b.add_argument("--speech-prompts", metavar="FILE", default=None,
+                   help="with --speech-clips, for a text-to-speech model: a text file with one prompt per line (at most 16). Default: three short sentences")
+    b.add_argument("--speech-language", metavar="CODE", default=None,
+                   help="with --speech-clips, for a speech-to-text model: the language code the CPU reference is asked for (default en)")
     b.add_argument("--full-port-rehearsal", action="store_true",
                    help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
                         "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
@@ -1406,6 +1447,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if why:
             return _refuse(why)
 
+    for opt, path, want_dir in (("--speech-clips", args.speech_clips, True), ("--speech-prompts", args.speech_prompts, False)):
+        if path is not None and not (os.path.isdir(path) if want_dir else os.path.isfile(path)):
+            return _refuse(f"{opt} {path!r} is not {'a directory' if want_dir else 'a file'}")
     run_started = resuming and _run_start_inputs(run_dir) is not None       # a ledger with no run_start has nothing to keep
     recorded_stock = _recorded_stock_params(run_dir) if run_started else None
 
@@ -1414,7 +1458,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                       signals=sig, resuming=resuming, base_override=override,
                                       accept_inferred_base=args.accept_inferred_base, progress=progress,
                                       stock_recorded=recorded_stock, no_fetch=args.no_fetch, base_bundle=named_bundle,
-                                      pinned_why=args.nearest_why)
+                                      pinned_why=args.nearest_why, speech_clips=args.speech_clips)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -1521,6 +1565,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
               **({"bundle": bundle_dir} if bundle_dir else {}), **bundle_record,
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
+              **_speech_inputs(args, base_data),
+              **_audio_stage0_inputs(base_data, base_snapshot, recorded=_run_start_inputs(run_dir) if run_started else None, resuming=bool(run_started and resuming)),
               **({"base_candidates": str(candidates_path)} if candidates_path else {}),
               **_pin_inputs(base_data.get("pin"))}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
