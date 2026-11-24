@@ -5,6 +5,7 @@
 
     python3 -m pytest $(python3 scripts/tests_for_diff.py)             # the tests a change to this branch can affect
     python3 -m pytest $(python3 scripts/tests_for_diff.py --fast)      # the same, without the tests marked slow
+    python3 -m pytest $(python3 scripts/tests_for_diff.py --eager)     # follow only the imports that run when a module loads
     python3 -m pytest $(python3 scripts/tests_for_diff.py --direct)    # only the tests that import a changed module themselves
 
 Standard output is one line of arguments, ready for the shell. Standard error says what changed, how each test was chosen and why a
@@ -78,7 +79,8 @@ class Selection:
 @dataclass
 class Node:
     rel: str
-    refs: set = field(default_factory=set)        # dotted names this file imports or names in a string of code
+    refs: set = field(default_factory=set)        # dotted names this file imports when it loads, or names in a string of code
+    lazy_refs: set = field(default_factory=set)   # dotted names imported inside a function, which run only when it is called
     tokens: set = field(default_factory=set)      # file names found in its strings
     words: set = field(default_factory=set)       # path segments and words found in its strings
     dynamic: bool = False                         # imports a module chosen at run time
@@ -109,7 +111,14 @@ def _module_names(rel: str) -> set[str]:
 
 
 def _constants(tree) -> list[str]:
-    return [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    """The string constants of a tree, leaving out docstrings: a docstring describes a file, and a string that is used names one."""
+    docstrings = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body:
+            first = n.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    return [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings]
 
 
 def _scan_strings(node: Node, strings) -> None:
@@ -155,22 +164,28 @@ def read_node(root: Path, rel: str) -> Node:
             node.refs.add(base)
             node.refs.update(f"{base}.{n.strip().split(' as ')[0]}" for n in names.split(",") if n.strip() and n.strip() != "*")
         return node
-    for n in ast.walk(tree):
+    def visit(n, lazy: bool) -> None:
+        target = node.lazy_refs if lazy else node.refs
         if isinstance(n, ast.Import):
-            node.refs.update(a.name for a in n.names)
+            target.update(a.name for a in n.names)
         elif isinstance(n, ast.ImportFrom):
             base = _from_base(rel, n.module, n.level)
-            node.refs.add(base)
-            node.refs.update(f"{base}.{a.name}" if base else a.name for a in n.names if a.name != "*")
+            target.add(base)
+            target.update(f"{base}.{a.name}" if base else a.name for a in n.names if a.name != "*")
         elif isinstance(n, ast.Call):
             f = n.func
             name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
             if name in ("import_module", "__import__"):
                 first = n.args[0] if n.args else None
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    node.refs.add(first.value)
+                    target.add(first.value)
                 else:
                     node.dynamic = True
+        inner = lazy or isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        for child in ast.iter_child_nodes(n):
+            visit(child, inner)
+
+    visit(tree, False)
     _scan_strings(node, _constants(tree))
     return node
 
@@ -200,11 +215,18 @@ class Graph:
             base = rel.rsplit("/", 1)[-1]
             if base != "__init__.py":
                 self.by_basename.setdefault(base, set()).add(rel)
-        self.deps: dict[str, set[str]] = {rel: self._deps_of(n) - {rel} for rel, n in self.nodes.items()}
-        self.rdeps: dict[str, set[str]] = {}
-        for rel, ds in self.deps.items():
+        self.deps: dict[str, set[str]] = {rel: self._deps_of(n, lazy=True) - {rel} for rel, n in self.nodes.items()}
+        self.eager_deps: dict[str, set[str]] = {rel: self._deps_of(n, lazy=False) - {rel} for rel, n in self.nodes.items()}
+        self.rdeps = self._reverse(self.deps)
+        self.eager_rdeps = self._reverse(self.eager_deps)
+
+    @staticmethod
+    def _reverse(deps):
+        out: dict[str, set[str]] = {}
+        for rel, ds in deps.items():
             for d in ds:
-                self.rdeps.setdefault(d, set()).add(rel)
+                out.setdefault(d, set()).add(rel)
+        return out
 
     def _resolve(self, dotted: str) -> set[str]:
         out: set[str] = set()
@@ -213,15 +235,16 @@ class Graph:
             out |= self.names.get(".".join(parts[:i]), set())
         return out
 
-    def _deps_of(self, node: Node) -> set[str]:
+    def _deps_of(self, node: Node, lazy: bool = True) -> set[str]:
         out: set[str] = set()
-        for ref in node.refs:
+        for ref in (node.refs | node.lazy_refs) if lazy else node.refs:
             out |= self._resolve(ref)
         for tok in node.tokens:
             out |= self.by_basename.get(tok, set())
-        for word in node.words:                                     # a program with no extension (bin/tt-orchard) is named by its words
-            if word in self.by_basename and "." not in word:
-                out |= self.by_basename[word]
+        if node.rel.startswith(f"{TESTS_DIR}/"):                    # a test that names a program with no extension (bin/tt-orchard) runs it
+            for word in node.words:
+                if word in self.by_basename and "." not in word:
+                    out |= self.by_basename[word]
         return out
 
     def referrers(self, rel: str) -> set[str]:
@@ -230,14 +253,16 @@ class Graph:
         comps = [c for c in rel.split("/")[:-1] if c not in GENERIC_DIRS]
         return {r for r, n in self.nodes.items() if (base in n.tokens and base != "__init__.py") or any(c in n.words for c in comps)}
 
-    def closure(self, seeds, direct: bool = False):
+    def closure(self, seeds, direct: bool = False, eager: bool = False):
         """The files that depend on any seed, with the chain that led to each. `direct` stops at the first test file and does not pass
-        through orchard, scripts or bin; test helpers are passed through because a test imports them as part of itself."""
+        through orchard, scripts or bin; test helpers are passed through because a test imports them as part of itself. `eager` follows
+        only the imports that run when a module loads and leaves out the ones inside functions."""
+        rdeps = self.eager_rdeps if eager else self.rdeps
         parent: dict[str, str | None] = {s: None for s in seeds}
         queue = deque(seeds)
         while queue:
             cur = queue.popleft()
-            for nxt in sorted(self.rdeps.get(cur, ())):
+            for nxt in sorted(rdeps.get(cur, ())):
                 if nxt in parent:
                     continue
                 parent[nxt] = cur
@@ -297,7 +322,7 @@ def _full_reason(path: str) -> str | None:
     return None
 
 
-def select(root, changes, direct: bool = False) -> Selection:
+def select(root, changes, direct: bool = False, eager: bool = False) -> Selection:
     """The tests that `changes` need. `changes` is a list of (status, path) or (status, old_path, new_path) with status A, M, D or R."""
     root = Path(root)
     sel = Selection()
@@ -348,7 +373,7 @@ def select(root, changes, direct: bool = False) -> Selection:
     if sel.reasons:
         sel.full = True
         return sel
-    reached = graph.closure(seeds, direct=direct) if seeds else {}
+    reached = graph.closure(seeds, direct=direct, eager=eager) if seeds else {}
     chosen = {r for r in reached if r in test_files}
     chain_of = {}
     for r in chosen:
@@ -430,7 +455,7 @@ def git_changes(root: Path, base: str):
 
 # ---- command line -----------------------------------------------------------------------------------
 
-def explain(sel: Selection, fast: bool, direct: bool) -> str:
+def explain(sel: Selection, fast: bool, direct: bool, eager: bool = False) -> str:
     lines = [f"changed: {', '.join(sel.changed) if sel.changed else '(nothing)'}"]
     if not sel.changed:
         lines.append("nothing changed: only the guards are selected")
@@ -438,7 +463,8 @@ def explain(sel: Selection, fast: bool, direct: bool) -> str:
         lines += [f"full suite: {r}" for r in sel.reasons]
         return "\n".join(lines)
     lines.append(f"selected {len(sel.files)} of {sel.total_tests} test files and {len(sel.nodes)} guard tests"
-                 + (" (direct importers only)" if direct else "") + (" without the slow tests" if fast else ""))
+                 + (" (direct importers only)" if direct else "") + (" (imports that run at load only)" if eager else "")
+                 + (" without the slow tests" if fast else ""))
     lines += [f"  {rel}  ({'; '.join(sel.why.get(rel, ['selected']))})" for rel in sel.files]
     lines += [f"  {n}  (guard: always selected)" for n in sel.nodes]
     lines += [f"note: {n}" for n in sel.notes]
@@ -449,7 +475,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Print the pytest arguments for the tests a diff needs.")
     ap.add_argument("--base", default="origin/main", help="the ref the diff starts from (default origin/main)")
     ap.add_argument("--root", default=str(ROOT), help="the repository (default: this one)")
-    ap.add_argument("--direct", action="store_true", help="only the tests that import a changed module themselves (faster, less safe)")
+    ap.add_argument("--direct", action="store_true", help="only the tests that import a changed module themselves (fastest, least safe)")
+    ap.add_argument("--eager", action="store_true", help="follow only the imports that run when a module loads, not the ones inside functions (faster, less safe)")
     ap.add_argument("--fast", action="store_true", help="add -m 'not slow'")
     ns = ap.parse_args(argv)
     root = Path(ns.root).resolve()
@@ -457,8 +484,8 @@ def main(argv=None) -> int:
     if problem:
         sel = Selection(full=True, reasons=[problem])
     else:
-        sel = select(root, changes, direct=ns.direct)
-    print(explain(sel, ns.fast, ns.direct), file=sys.stderr)
+        sel = select(root, changes, direct=ns.direct, eager=ns.eager)
+    print(explain(sel, ns.fast, ns.direct, ns.eager), file=sys.stderr)
     print(shlex.join(sel.args(fast=ns.fast)))
     return 0
 

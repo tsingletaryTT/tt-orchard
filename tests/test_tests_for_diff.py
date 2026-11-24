@@ -156,6 +156,32 @@ def test_direct_mode_keeps_only_the_tests_that_import_the_changed_module_themsel
     assert set(near.files) >= GUARDS                      # guards stay in direct mode
 
 
+def test_eager_mode_leaves_out_the_imports_inside_functions_and_the_default_keeps_them(tmp_path):
+    """`orchard/cli.py` imports a command's module inside the function that runs the command. A test that calls the command reaches the module
+    through that call, so the default follows the lazy import and `--eager` does not."""
+    make_repo(tmp_path, {
+        "orchard/a.py": "X = 1\n",
+        "orchard/cli.py": "def main():\n    from orchard import a\n    return a.X\n",
+        "orchard/top.py": "from orchard import a\n",
+        "tests/test_cli.py": "from orchard import cli\n\n\ndef test_c():\n    pass\n",
+        "tests/test_top.py": "from orchard import top\n\n\ndef test_t():\n    pass\n",
+    })
+    default = pick(tmp_path, ["orchard/a.py"])
+    eager = pick(tmp_path, ["orchard/a.py"], eager=True)
+    assert {"tests/test_cli.py", "tests/test_top.py"} <= set(default.files)
+    assert "tests/test_top.py" in eager.files and "tests/test_cli.py" not in eager.files
+
+
+def test_the_eager_and_direct_flags_are_accepted_by_the_command_and_named_in_the_explanation(tmp_path):
+    make_repo(tmp_path, {"orchard/a.py": "X = 1\n"})
+    git(tmp_path, "init", "-q", "-b", "main")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    (tmp_path / "orchard" / "a.py").write_text("X = 2\n")
+    r = run_script(tmp_path, "--base", "HEAD", "--eager")
+    assert r.returncode == 0 and "imports that run at load only" in r.stderr
+
+
 def test_a_file_in_scripts_is_an_importable_node_too(tmp_path):
     make_repo(tmp_path, {
         "scripts/tool.py": "X = 1\n",
@@ -175,6 +201,27 @@ def test_a_file_in_scripts_is_an_importable_node_too(tmp_path):
 def test_a_test_that_names_a_script_by_path_is_selected_when_the_script_changes(tmp_path, body):
     make_repo(tmp_path, {"scripts/tool.py": "X = 1\n", "tests/test_named.py": body + "\n\ndef test_n():\n    pass\n"})
     assert "tests/test_named.py" in pick(tmp_path, ["scripts/tool.py"]).files
+
+
+def test_a_docstring_that_mentions_a_script_does_not_select_a_test(tmp_path):
+    """A docstring describes a file. A test that only describes `scripts/tool.py` in prose does not depend on it."""
+    make_repo(tmp_path, {"scripts/tool.py": "X = 1\n",
+                         "tests/test_d.py": '"""Checks the output of scripts/tool.py and `orchard.a`."""\n\n\ndef test_d():\n    """Runs tool.py."""\n',
+                         "orchard/a.py": ""})
+    assert only_guards(pick(tmp_path, ["scripts/tool.py"]))
+    assert only_guards(pick(tmp_path, ["orchard/a.py"]))
+
+
+def test_a_program_name_in_a_message_of_a_module_is_not_an_edge(tmp_path):
+    """orchard/__init__.py and the CLI print `tt-orchard` in messages. Only a test that names the program runs it."""
+    make_repo(tmp_path, {
+        "bin/tt-orchard": "#!/usr/bin/env python3\nfrom orchard import cli\n",
+        "orchard/cli.py": "from orchard import a\n",
+        "orchard/a.py": "X = 1\n",
+        "orchard/msg.py": 'HINT = "run tt-orchard --help"\n',
+        "tests/test_msg.py": "from orchard import msg\n\n\ndef test_m():\n    pass\n",
+    })
+    assert "tests/test_msg.py" not in pick(tmp_path, ["orchard/a.py"]).files
 
 
 def test_a_comment_that_mentions_a_script_does_not_select_a_test(tmp_path):
