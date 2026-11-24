@@ -34,6 +34,7 @@ class Server:
         self.seen_bodies: list = []
         self.models_gets = 0
         self.unhealthy = False
+        self.stale_after = None
         self.active: set = set()
         self.crowded: set = set()
         outer = self
@@ -110,6 +111,8 @@ class Server:
                             outer.broken = True
                         if outer.faults.get("unhealthy_after_cancel"):
                             outer.unhealthy = True
+                        if outer.faults.get("stale_soon_after_cancel"):
+                            outer.stale_after = time.monotonic() + outer.faults["stale_soon_after_cancel"]
 
             def _tools(self, body):
                 f = outer.faults
@@ -138,7 +141,8 @@ class Server:
                     pieces = [text]
                 else:
                     pieces = [text[:9], text[9:20], text[20:]]
-                events = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}}]}]
+                tool_name = "get_time" if f.get("tool_name_differs") else "get_weather"
+                events = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": tool_name, "arguments": ""}}]}}]}]
                 events += [{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": p}}]}}]} for p in pieces]
                 events.append({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
                 for e in events:
@@ -161,6 +165,8 @@ class Server:
             return text + " (mixed)"
         if f.get("spec_differs") and "plain" not in body:
             return text + " spec"
+        if self.stale_after is not None and time.monotonic() > self.stale_after:
+            return text + " stale"
         if f.get("sticky") and self.calls > f["sticky"]:
             return text + " stale"
         return text
@@ -211,6 +217,8 @@ def test_a_missing_reply_is_a_fail_for_the_concurrent_ones_and_no_verdict_for_th
     r = sp.judge_concurrent_equals_alone(alone, repeat, conc)
     assert r["state"] in ("fail", "not_checked")
     assert r["state"] == ("fail" if None in conc else "not_checked")
+    if None in alone or None in repeat:
+        assert "asked alone did not get a reply" in r["detail"]        # named for what it is, not as a repeat failure
 
 
 def test_the_judge_clips_a_long_reply_in_its_detail():
@@ -226,7 +234,10 @@ def test_the_aba_judge_needs_the_reference_to_repeat_and_both_later_replies_to_m
     assert f["state"] == "fail" and "afterwards" in f["detail"]
     assert sp.judge_aba("r", "q", "r", "r")["state"] == "not_checked"
     assert sp.judge_aba(None, "r", "r", "r")["state"] == "not_checked"
-    assert sp.judge_aba("r", "r", None, "r")["state"] == "fail"
+    f = sp.judge_aba("r", "r", None, "r")
+    assert f["state"] == "fail" and "no reply while other streams" in f["detail"]
+    f = sp.judge_aba("r", "r", "r", None)
+    assert f["state"] == "fail" and "no reply when it was asked alone again" in f["detail"]
 
 
 def test_the_cancel_judge_needs_a_healthy_server_and_an_unchanged_reply():
@@ -235,6 +246,8 @@ def test_the_cancel_judge_needs_a_healthy_server_and_an_unchanged_reply():
     assert sp.judge_after_cancel("r", "r", ["x", "r"], True)["state"] == "fail"
     assert sp.judge_after_cancel("r", "r", ["r", None], True)["state"] == "fail"
     assert sp.judge_after_cancel("r", "r", "r", True)["state"] == "pass"
+    none = sp.judge_after_cancel("r", "r", ["r", None], True)
+    assert none["state"] == "fail" and "no reply after the stream was cut" in none["detail"]
     assert sp.judge_after_cancel("r", "r", "x", True)["state"] == "fail"
     assert sp.judge_after_cancel("r", "r", "r", False)["state"] == "fail"
     assert sp.judge_after_cancel("r", "r", None, True)["state"] == "fail"
@@ -485,7 +498,7 @@ def test_arguments_that_are_not_json_are_a_fail(make):
 
 def test_a_missing_required_argument_is_a_fail_that_names_it(make):
     r = sp.probe_streamed_tool_call(make(tool_missing_key=True).base, "m", timeout=30)
-    assert r["state"] == "fail" and "city" in r["detail"], r
+    assert r["state"] == "fail" and "missing the required city" in r["detail"], r
 
 
 def test_the_tool_request_forces_the_tool_and_carries_a_schema_only(make):
@@ -545,3 +558,15 @@ def test_the_first_name_of_a_call_is_kept_and_an_index_at_the_limit_is_skipped()
                                                     {"index": True, "function": {"name": "z", "arguments": "{}"}},
                                                     {"index": -1, "function": {"name": "w", "arguments": "{}"}}]}}]}]
     assert sp.tool_calls_of_stream(frags) == [{"name": "first", "arguments": "{}"}, {"name": "y", "arguments": "{}"}]
+
+
+def test_the_settled_request_catches_a_server_that_goes_wrong_a_moment_after_the_abort(make):
+    """A server whose replies are right at once and wrong 0.3 s after the cancel: only the request sent after the settle time sees it."""
+    s = make(stale_soon_after_cancel=0.3)
+    r = sp.probe_cancel_mid_decode(s.base, "m", settle=0.8, timeout=30)
+    assert r["state"] == "fail" and "changed after the stream was cut" in r["detail"], r
+
+
+def test_a_streamed_tool_call_with_another_name_is_a_fail(make):
+    r = sp.probe_streamed_tool_call(make(tool_name_differs=True).base, "m", timeout=30)
+    assert r["state"] == "fail" and "differs" in r["detail"], r
