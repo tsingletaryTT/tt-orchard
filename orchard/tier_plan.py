@@ -23,6 +23,10 @@ The placements, tried in this order for each precision and chip count:
 
   replicated                      every chip holds every weight (what the generated ports do today);
   experts split over the chips    attention, routers, shared experts and the tables on every chip, the routed experts divided between the chips;
+  tensor-parallel                 attention heads, key-value heads, the expert intermediate width and the output head divided over the chips,
+                                  routers and the embedding table on every chip: about 1/N of the weights per chip. A layout the plan assumes,
+                                  after the published Inkling-2-Mini bundle; it needs the head counts and the expert width (in whole 32-wide
+                                  tiles per chip) divisible by N, and a row that cannot use it says which count does not divide;
   hot experts on chips, rest host the same always-resident weights on every chip, as many whole experts (one expert index in every layer) as
                                   fit beside them, and every expert pinned in host memory with a margin (the Strata rule the issue quotes).
                                   The host path is not written (step 3 of the issue); the row says what it would need.
@@ -57,6 +61,7 @@ from orchard import safeio
 GIB = float(1 << 30)              # finite: ok a constant
 BYTES_PER_ELEMENT = weights_plan.BYTES_PER_ELEMENT
 USABLE_FRACTION = weights_plan.USABLE_FRACTION
+TILE = 32                         # a tile is 32 values wide; a die's share of an expert's width is a whole number of them
 HOST_MARGIN_GIB = 10.0            # choice, from the issue text (Strata's rule: RAM at least the experts plus about 10 GB)
 
 # The busiest-expert shares of OLMoE-1B-7B (64 experts, top 8) over 16,384 tokens of project text: the share of picks that go to the busiest 10, 25
@@ -89,6 +94,8 @@ class Shape:
     moe_layers: int
     expert_params: int             # one routed expert in one layer
     layers: int
+    # counts a tensor-parallel split must divide: (label, value, unit); the die count times the unit must divide the value
+    tp_counts: tuple = ()
 
     @property
     def always_params(self) -> int:
@@ -134,9 +141,21 @@ def shape(config) -> Shape:
                     ("routed experts", d.routed_experts * moe * expert)):
         if n > MAX_GROUP_PARAMS:
             raise TierPlanError(f"the config describes more than {MAX_GROUP_PARAMS:.0e} parameters in the {name}; no real model is that large")
+    counts = [("attention heads", d.heads, 1), ("key-value heads", d.kv_heads, 1)]
+    if d.linear:
+        counts += [("linear-attention key heads", d.linear["key_heads"], 1), ("linear-attention value heads", d.linear["value_heads"], 1)]
+    if d.mamba:
+        counts.append(("mamba heads", d.mamba["heads"], 1))
+    if d.moe_intermediate:
+        counts.append(("expert intermediate width", d.moe_intermediate, TILE))      # every die holds whole tiles of the expert width
     return Shape(attention_params=attention, dense_mlp_params=dense, router_params=router, shared_params=shared, embedding_params=table,
                  head_params=0 if d.tied_embeddings else table, experts=d.routed_experts, top_k=d.top_k, moe_layers=moe,
-                 expert_params=expert, layers=d.layers)
+                 expert_params=expert, layers=d.layers, tp_counts=tuple(counts))
+
+
+def tp_blockers(s: Shape, chips: int) -> list[str]:
+    """The counts that a tensor-parallel split over `chips` dies cannot divide, each as "label (value)". Empty when the split is possible."""
+    return [f"{label} ({value})" for label, value, unit in s.tp_counts if value % (chips * unit)]
 
 
 def caveats(config) -> list[str]:
@@ -216,7 +235,8 @@ def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, 
     row = {"other_format": other_fmt, "expert_format": expert_fmt, "chips": chips, "budget_bytes_per_chip": budget,
            "always_resident_bytes": always, "expert_bytes_total": experts, "bytes_per_expert_index": index,
            "resident_experts_per_layer": 0, "host_ram_gib": 0.0, "hit_share": None, "hit_share_label": None, "host_expert_picks_per_token": 0.0,
-           "per_chip_bytes": None, "placement": None, "verdict": "does not fit", "why": None, "whole_layers": None}
+           "per_chip_bytes": None, "placement": None, "verdict": "does not fit", "why": None, "whole_layers": None,
+           "tensor_parallel_note": None, "tensor_parallel_blocked": None}
 
     def on_chips(placement: str, per_chip: float) -> dict:
         row.update(verdict="fits on chips", placement=placement, per_chip_bytes=per_chip, resident_experts_per_layer=s.experts, hit_share=1.0)
@@ -226,6 +246,21 @@ def place(s: Shape, other_fmt: str, expert_fmt: str, chips: int, budget: float, 
         return on_chips("replicated", always + experts)
     if always + experts / chips <= budget:
         return on_chips("experts split over the chips", always + experts / chips)
+    if chips > 1:
+        blocked = tp_blockers(s, chips)
+        if blocked:
+            row["tensor_parallel_blocked"] = (f"a tensor-parallel layout over {chips} dies needs these counts divisible by {chips} (the expert width in "
+                                              f"whole {TILE}-wide tiles per die): " + ", ".join(blocked))
+        else:
+            # attention, dense and shared MLPs, the output head and the experts are divided over the dies; routers and the embedding table are not
+            divided = (s.attention_params + s.dense_mlp_params + s.shared_params + s.head_params) * other_b
+            per_die = (divided + experts) / chips + (s.router_params + s.embedding_params) * other_b
+            if per_die <= budget:
+                row["tensor_parallel_note"] = (f"tensor-parallel is a layout the plan assumes, after the published Inkling-2-Mini bundle (raahemnabeel/inkling-2-mini): attention "
+                                               f"heads, key-value heads, the expert intermediate width and the output head are divided over the {chips} dies, so "
+                                               f"each holds about 1/{chips} of the weights; routers and the embedding table stay on every die. It needs the "
+                                               f"head counts and the expert width divisible by {chips} (they are); nothing here has been run")
+                return on_chips(f"tensor-parallel: about 1/{chips} of the weights per die", per_die)
     if always > budget:
         row["why"] = (f"the always-resident weights (attention, routers, shared experts, embedding and head) need {always / GIB:.2f} GiB on every chip "
                       f"and a chip offers {budget / GIB:.2f} GiB for weights")
@@ -462,6 +497,11 @@ def render(res: dict) -> str:
     for r in res["rows"]:
         if r["why"]:
             lines.append(f"{r['name']}, {r['chips']} chip(s): {r['why']}")
+    for r in res["rows"]:
+        if r.get("tensor_parallel_note"):
+            lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_note']}")
+        elif r.get("tensor_parallel_blocked") and r["verdict"] != "fits on chips":
+            lines.append(f"{r['name']}, {r['chips']} chip(s): {r['tensor_parallel_blocked']}")
     lines += [f"note: {n}" for n in res["notes"]]
     lines.append("the weights fit or they do not; speed and quality are not measured here, and the host path for experts is not written (issue 739, step 3)")
     return "\n".join(lines)
