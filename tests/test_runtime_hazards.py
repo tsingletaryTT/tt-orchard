@@ -13,11 +13,16 @@ import pytest
 from orchard import hazards as hz
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED = {"trace_inputs_overwritten_by_later_capture", "lm_head_noc_barrier_hang", "host_read_during_trace_capture",
-            "tensor_cache_identity_is_name_and_shape"}
+LOTTOLABS = {"trace_inputs_overwritten_by_later_capture", "lm_head_noc_barrier_hang", "host_read_during_trace_capture",
+             "tensor_cache_identity_is_name_and_shape"}
+# the Inkling-2-Mini bundle study of 2026-11-24 (learning 12)
+INKLING_BUNDLE = {"dram_bank_tile_columns_limit_reader_count", "tp4_down_projection_needs_zero_k_pad_row",
+                  "fast_runtime_mode_skips_circular_buffer_and_l1_overlap_checks", "program_compiled_after_trace_capture_overwritten",
+                  "serve_profile_fixed_visible_devices_conflicts_with_lease"}
+EXPECTED = LOTTOLABS | INKLING_BUNDLE
 
 
-def test_the_table_holds_the_four_hazards_the_cards_report():
+def test_the_table_holds_the_four_lottolabs_hazards_and_the_five_the_inkling_bundle_records():
     assert {r.name for r in hz.RUNTIME_HAZARD_TABLE} == EXPECTED
 
 
@@ -32,8 +37,9 @@ def test_every_row_is_complete_unique_and_snake_case():
 
 def test_every_row_says_it_is_a_card_claim_and_names_the_card_and_the_section():
     for r in hz.RUNTIME_HAZARD_TABLE:
-        assert "card claim" in r.source and "not reproduced here" in r.source, r.name
-        assert "Lottolabs" in r.source and "section" in r.source, r.name
+        assert "card claim" in r.source or "bundle claim" in r.source, r.name
+        assert "not reproduced here" in r.source, r.name
+        assert ("Lottolabs" in r.source and "section" in r.source) or "raahemnabeel/inkling-2-mini" in r.source, r.name
 
 
 def test_the_hang_row_gives_the_rate_the_card_gives_and_says_the_cause_is_inferred():
@@ -112,3 +118,40 @@ def test_the_doc_names_every_row_and_says_where_they_come_from():
 
 def test_the_readme_points_to_the_doc():
     assert "docs/runtime-hazards.md" in (ROOT / "README.md").read_text()
+
+
+def test_every_bundle_row_names_the_bundle_and_says_it_is_a_claim_of_the_bundle():
+    for name in INKLING_BUNDLE:
+        r = hz.runtime_hazard(name)
+        assert "raahemnabeel/inkling-2-mini" in r.source and "bundle claim" in r.source, name
+        assert "not reproduced here" in r.source, name
+
+
+def test_the_tile_row_gives_the_hidden_size_the_nine_columns_and_the_arithmetic_behind_them():
+    r = hz.runtime_hazard("dram_bank_tile_columns_limit_reader_count")
+    assert "2304" in r.what and "9 tile columns" in r.what and "divide 9" in r.what
+    assert "72 tiles" in r.what                                  # 2304 / 32
+
+
+def test_the_pad_row_row_names_the_projection_and_the_die_count():
+    r = hz.runtime_hazard("tp4_down_projection_needs_zero_k_pad_row")
+    assert "down projection" in r.what and "zero" in r.what and "4" in r.applies_to
+
+
+def test_the_l1_row_says_an_overlap_hangs_or_corrupts_and_what_the_mode_skips():
+    r = hz.runtime_hazard("fast_runtime_mode_skips_circular_buffer_and_l1_overlap_checks")
+    assert "circular buffer" in r.what and "hangs or corrupts" in r.what
+
+
+def test_the_program_row_is_about_programs_and_the_tensor_row_stays_about_tensors():
+    prog = hz.runtime_hazard("program_compiled_after_trace_capture_overwritten")
+    assert "program" in prog.what and "compiled after" in prog.what
+    assert "tensor allocated after a trace" in hz.runtime_hazard("trace_inputs_overwritten_by_later_capture").what
+
+
+def test_the_lease_row_cites_the_manifest_profiles_and_says_what_orchard_reads_today():
+    r = hz.runtime_hazard("serve_profile_fixed_visible_devices_conflicts_with_lease")
+    assert "TT_VISIBLE_DEVICES" in r.what and "0,1" in r.what and "gozer" in r.what
+    assert "serve_profiles" in r.source                           # visible in the bundle's own manifest
+    assert "package_cmd.py" in r.known_here
+

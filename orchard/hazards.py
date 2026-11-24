@@ -173,7 +173,7 @@ _BY_NAME = {e.name: e for e in HAZARD_TABLE}
 
 # ---- runtime hazards: not visible in a config ---------------------------------------------------------------------------
 #
-# Failures that the Lottolabs Blackhole cards report from running a port, with no number in a config that predicts them. The study of 2026-11-24 read them
+# Failures that the Lottolabs Blackhole cards and the Inkling-2-Mini bundle report from running a port, with no number in a config that predicts them. The study of 2026-11-24 read them
 # from the cards; this repository has not reproduced any of them, so each row says it is a card claim. `known_here` says what orchard checks today.
 # docs/runtime-hazards.md lists the same rows.
 
@@ -226,6 +226,43 @@ RUNTIME_HAZARD_TABLE: tuple[RuntimeHazard, ...] = (
         "record the checkpoint's file hashes and the serving image id next to the cache when it is made, and compare them before each start",
         "`.orchard-model` names the model whose weights a cache holds (orchard/caches.py, the swap templates) and the operator bundle checks it; it does not record "
         "the checkpoint revision or the serving image, so a cache made from an older checkpoint of the same model passes that check"),
+    # ---- the published Inkling-2-Mini bundle (study of 2026-11-24, learning 12). The first four come from comments in the bundle's model code as the study
+    # reported them; this repository has not read or run that code. The fifth is visible in the bundle's own manifest.
+    RuntimeHazard(
+        "dram_bank_tile_columns_limit_reader_count", "a port that streams weights with a fixed number of readers per DRAM bank, at a hidden size of 2304",
+        "a hidden size of 2304 is 72 tiles wide, which gives 9 tile columns per DRAM bank over 8 banks (the bundle's figure; the bank count of 8 is our "
+        "assumption from the 8 memory channels of a p150), so the number of weight readers must divide 9. A count that does not divide it leaves readers with unequal work",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "list the reader counts the port uses for each weight shape and check that every one divides the tile columns per bank; run one projection at each count and compare with the CPU result",
+        "no check found when this row was written (2026-11-24): the config scan checks tile alignment per die (ffn_per_die_not_whole_tiles) and does not count tiles per DRAM bank"),
+    RuntimeHazard(
+        "tp4_down_projection_needs_zero_k_pad_row", "a port that divides the down projection over 4 dies",
+        "a tensor-parallel down projection over 4 dies needs a zero row appended to its K dimension, as the bundle's code comment says; without it the projection reads past "
+        "its shard. The comment as reported does not say which shapes need it",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "run the down projection sharded over 4 dies at the model's widths with and without the pad row and compare both with the CPU result",
+        "no check found when this row was written (2026-11-24): nothing in orchard/ knows about a pad row"),
+    RuntimeHazard(
+        "fast_runtime_mode_skips_circular_buffer_and_l1_overlap_checks", "a port run in a runtime mode that turns off the circular buffer and L1 checks (the bundle's I2M_L1_CHECK switch)",
+        "the bundle's fast runtime mode does not check circular buffers or L1 for clashes, and an overlap hangs or corrupts. The checks are meant to be turned on while a "
+        "new kernel or a new shape is brought up and off for serving",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "run every new kernel and shape once with the checks on; treat a hang in a run with the checks off as a possible overlap and rerun it with them on before blaming the device",
+        "no check found when this row was written (2026-11-24): nothing in orchard/ distinguishes a run with the L1 checks on from one with them off"),
+    RuntimeHazard(
+        "program_compiled_after_trace_capture_overwritten", "a traced port that compiles a new program (a new shape or length) after a trace was captured",
+        "a program first compiled after a trace capture can be overwritten by replays of the trace, according to the bundle's code comment in its speculative-decoding "
+        "module. This is the mechanism of trace_inputs_overwritten_by_later_capture, applied to program binaries",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "compile every shape the server can see before the first capture (a warm-up over the lengths and batch sizes), then replay and compare a late-shape request with an eager run",
+        "no check found when this row was written (2026-11-24): the stage 2 port check counts captures and replays (issue 547) and does not look at what is compiled after a capture"),
+    RuntimeHazard(
+        "serve_profile_fixed_visible_devices_conflicts_with_lease", "a bundle whose serve profile sets TT_VISIBLE_DEVICES to fixed dies, run under a gozer lease",
+        "two serve profiles of the bundle set TT_VISIBLE_DEVICES to 0,1 in their env (serve_profiles[2] and [3] of its tt_kernel_manifest.json). Under a gozer lease on other chips, "
+        "if the profile's value wins over the lease's, the container opens dies that the lease does not hold. Whether the profile's value wins was not checked",
+        "raahemnabeel/inkling-2-mini, the serve_profiles of its tt_kernel_manifest.json, read on 2026-11-24 (the manifest values are plain facts; that they override a lease is a bundle claim that is not reproduced here)",
+        "serve the profile under a lease on chips other than 0 and 1 and read the die indices the container reports; compare them with the lease",
+        "the boot check (orchard/package_cmd.py) passes the lease's TT_VISIBLE_DEVICES to the child it starts; nothing in orchard/ reads a bundle profile's own TT_VISIBLE_DEVICES"),
 )
 _RUNTIME_BY_NAME = {r.name: r for r in RUNTIME_HAZARD_TABLE}
 
