@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from orchard import served_verify as sv, speedwatch
+from orchard import safeio, served_verify as sv, speedwatch
 
 MAX_CODE_CHARS = 20000            # choice: the reply to a request for one short function is a few hundred characters; more is not parsed
 MAX_BURST = 8                     # choice: at most this many requests in one batching burst, whatever the can declares
@@ -696,6 +696,15 @@ def probe_aba_isolation(base: str, model: str, extra: dict | None = None, *, oth
     return r
 
 
+def _json_object(text: str, max_bytes: int):
+    """`text` as a JSON object, or None when it is not one. Text a server or a model wrote goes through `safeio.parse_json_bytes`: no NaN or Infinity, no
+    repeated key, no lone surrogate, no number that overflows a float, nesting and size bounded (docs/safe-reading.md)."""
+    try:
+        return safeio.parse_json_bytes(text, max_bytes=max_bytes, expect=dict)
+    except safeio.SafeReadError:
+        return None
+
+
 def stream_events(url: str, body: dict, timeout: float, *, max_events: int | None = None) -> tuple[int, list, bool]:
     """POST `body` and read the server-sent events: (status, the JSON object of each `data:` line, whether `[DONE]` arrived). Stops reading at
     `max_events` events and closes the connection, which cancels the request on the server. Reads at most MAX_STREAM_BYTES bytes. A refusal
@@ -722,11 +731,8 @@ def stream_events(url: str, body: dict, timeout: float, *, max_events: int | Non
             if payload == "[DONE]":
                 done = True
                 break
-            try:
-                doc = json.loads(payload)
-            except ValueError:
-                continue
-            if isinstance(doc, dict):
+            doc = _json_object(payload, MAX_STREAM_LINE)
+            if doc is not None:
                 events.append(doc)
     finally:
         resp.close()
@@ -869,11 +875,7 @@ def _plain_tool_calls(doc) -> list[dict]:
 
 
 def _arguments_object(text):
-    try:
-        doc = json.loads(text)
-    except ValueError:
-        return None
-    return doc if isinstance(doc, dict) else None
+    return _json_object(text, MAX_TOOL_ARGS_CHARS) if isinstance(text, str) else None
 
 
 def judge_streamed_tool_call(streamed, plain, *, required=("city",)) -> dict:

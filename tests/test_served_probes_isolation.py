@@ -570,3 +570,45 @@ def test_the_settled_request_catches_a_server_that_goes_wrong_a_moment_after_the
 def test_a_streamed_tool_call_with_another_name_is_a_fail(make):
     r = sp.probe_streamed_tool_call(make(tool_name_differs=True).base, "m", timeout=30)
     assert r["state"] == "fail" and "differs" in r["detail"], r
+
+
+HOSTILE_LINES = [b'data: {"a": NaN}', b'data: {"a": Infinity}', b'data: {"a": -Infinity}', b'data: {"a": 1e999}', b'data: {"a": 1, "a": 2}',
+                 b'data: ' + b'[' * 200 + b']' * 200, b'data: {"a": "\\ud800"}', b'data: {"a": ' + b"9" * 400 + b"}",
+                 b'data: {"a": 1} trailing', b'data: \xff\xfe']
+
+
+@pytest.mark.parametrize("line", HOSTILE_LINES)
+def test_a_hostile_stream_line_is_skipped_and_the_good_line_after_it_still_counts(line):
+    import io
+    import urllib.request
+
+    class R(io.BytesIO):
+        status = 200
+
+    raw = line + b'\n\ndata: {"ok": 1}\n\ndata: [DONE]\n\n'
+    orig = urllib.request.urlopen
+    urllib.request.urlopen = lambda req, timeout=None: R(raw)
+    try:
+        status, events, done = sp.stream_events("http://127.0.0.1:1/x", {}, 5)
+    finally:
+        urllib.request.urlopen = orig
+    assert events == [{"ok": 1}] and done is True
+
+
+@pytest.mark.parametrize("args", ['{"city": NaN}', '{"city": Infinity}', '{"city": "Paris", "city": "Rome"}', '{"city": 1e999}', '[1, 2]', '"x"', "7"])
+def test_tool_arguments_that_are_not_a_strict_json_object_are_a_fail(args):
+    plain = [{"name": "get_weather", "arguments": '{"city": "Paris"}'}]
+    r = sp.judge_streamed_tool_call([{"name": "get_weather", "arguments": args}], plain)
+    assert r["state"] == "fail" and "not a JSON object" in r["detail"], r
+
+
+def test_the_module_parses_no_json_itself_so_the_hostile_reader_registry_needs_no_entry():
+    from pathlib import Path
+    text = (Path(sp.__file__)).read_text()
+    assert "json.loads(" not in text and "json.load(" not in text
+
+
+def test_the_json_object_reader_enforces_its_size_bound_and_the_object_type():
+    assert sp._json_object('{"a": 1}', 8) == {"a": 1}
+    assert sp._json_object('{"a": 12}', 8) is None            # nine bytes against a bound of eight
+    assert sp._json_object("[1]", 100) is None and sp._json_object("", 100) is None and sp._json_object("{", 100) is None
