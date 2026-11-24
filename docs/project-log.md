@@ -6128,3 +6128,7 @@ where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_f
 controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
 and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
 repository head.
+
+## 2026-11-24: Voxtral on a chip, `tt-orchard speech-check` against real servers (branch voxtral-chip-run)
+
+`tt-orchard speech-check` ran against the published Voxtral Mini 3B (speech to text) and Voxtral 4B TTS (text to speech) bundles on two boards, each under its own gozer lease. The Mini transcribed the card's two clips and a 3.4-minute clip with word error 0.00 (the long clip against the CPU run of the same model) in 0.76, 0.82 and 20.4 seconds. The TTS bundle answered in 1.65 to 1.75 seconds, streamed its first audio after 0.5 to 0.6 seconds, and the Mini transcribed 10 of 11 saved clips with no word error (one Italian clip 0.111). The default bounds passed every correct answer and are looser than the observed values. `tt-model pull` on a host without skopeo leaves the image named `latest`; the run log gives the retag steps. The TTS licence is CC BY-NC 4.0 and the log says so. Run log: `docs/run-logs/2026-11-24-voxtral-chip-run.md`.
