@@ -64,6 +64,14 @@ fact needs explaining. You do not write a script.
    `evidence/reference/fidelity-ids.json`, which the stage 2 check scores the port against. It adds time (a few tokens a second on a
    7B model, more on a smaller one) and does not change the four checks or the verdict. If the facts do not list it, leave the key out.
 
+   If the run facts list `agreement reference`, add `"agreement_set": true` (the word true, not a string) to the same file and copy
+   `agreement_prompts.json` from `orchard/skills/weights-swap-templates/` in the orchard checkout next to the script. Do not edit it: the
+   gate compares it with the shipped file. The script then decodes 32 greedy tokens for each of the six prompts of the set and writes
+   `evidence/reference/agreement-reference.json`, which the stage 2 and 4 check scores the chip against. It adds minutes (the 2,000-token prompt
+   is the slow one). It does not change the four checks, but the gate refuses this stage when the run asked for the reference and the file is
+   missing or incomplete; if the script stopped on a prompt it wrote `agreement-reference-error.json` with the reason, which you copy into your
+   notes. If the facts do not list it, leave the key out and do not copy the prompt file.
+
 3. Copy the template into your stage directory:
 
        cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/reference_gate.py stages/1/
