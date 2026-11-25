@@ -6063,6 +6063,23 @@ duration bounds, the word error limits 0.10 and 0.15 and the silence floor rest 
 separate decision. The reference environment (transformers 5.24.0) was not tried on either upstream model.
 One existing test changed on purpose (`test_a_text_to_speech_model_is_not_audio_for_this_rule` now expects `speech-model` where it expected `nearest-model-missing`).
 
+## 2026-11-23, speech route (branch speech-route)
+
+Operator: "1 YES!" to a real speech route, and on the licence "we aren't going to distribute the model itself right? just enable those to use it and they'll be under the terms. we carry the model's terms as best we can. it's not our work, just a little packaging".
+A run started with `tt-orchard bringup MODEL --speech-clips DIR` on `mistralai/Voxtral-Mini-3B-2507` or `mistralai/Voxtral-4B-TTS-2603` now takes the speech route (`orchard/speech_route.py`, `SPEECH_TABLE` in
+`orchard/stages.py`): stage 0 reads the bundle table, stage 1 records a CPU reference in the reference interpreter, stage 2 serves the published bundle under a one-board lease, checks it with the `speech-check` functions, saves
+every answer and stops it, and stage 8 builds the operator bundle. No coder boots, stages 3 to 7 are skipped, and no code path packages or uploads weights (a test reads the route's code for it). Each stage's gate recomputes its numbers
+from the saved clips, audio and transcripts. Every record and the operator bundle carry the bundle's licence as the card states it. It follows the text-runtime route. The scoring route needs a port module from the coder, and a speech run has none. Details, bars and what is owed: `docs/run-logs/2026-11-23-speech-route.md` and `docs/superpowers/specs/2026-11-23-speech-route-design.md`. Not run on a chip; the reference producer has not run on real weights; the bars are provisional.
+
+## 2026-11-24: Voxtral models on the CPU reference environment (run log, no code change)
+The operator asked whether the reference environment (transformers 5.24.0, torch 2.15.0 CPU) can run the two upstream Voxtral models. Run log:
+`docs/run-logs/2026-11-23-voxtral-reference-venv.md`. In a copy of the reference environment (with `mistral-common` 1.13.1 and `soundfile`, `soxr`, `scipy`,
+`jiwer`; the install moved numpy to 2.3.5 in the copy), the Mini model transcribed three public clips on CPU in bfloat16 with the card's text and token counts, and
+a copy with transformers 4.56.0 and the bundle's pins gave identical tokens on all four requests (including the 631 tokens of a 3.4-minute clip). Greedy decoding gave
+identical tokens in two separate processes. The TTS model's reference loader failed under 5.24.0 on `MistralRotaryEmbedding(config=cfg, device="cpu")`; with that
+one argument removed in a private copy it built in 17 s (25 GiB) and spoke one sentence in 62 frames (4.96 s) with a Whisper word error rate of 0.000, repeatable
+with a fixed noise seed. Not run: UTMOS (its loader runs code from GitHub), Hindi and Arabic voices, a comparison with a chip waveform. Memory: about 9 GiB for the Mini
+model, 25 GiB for the TTS model. No chip, no lease, no `ttnn` import.
 ## 2026-11-23: Issue 461, third batch of float checks (branch finite-461-batch3)
 An integer of more than 308 digits raises OverflowError in `math.isfinite`, `float()` and `math.isclose`. This batch converts the modules the issue still listed as not converted that read JSON from a parser the safe reader does not guard: `telegraph_view` (ledger amounts, derived sums, percent of a cap, time stamps, dollars, row amounts), `speedwatch` (baseline file entries and the `judge` baseline), `text_stages` (the perplexity reference and `agree`), and `text_bars` (`ppl_problems`). A ledger amount, a derived sum or a baseline speed that a float cannot hold is refused with the module's own error. A percent of a huge whole number is computed with whole numbers and capped. Dollars of such a number show `>$1e308`. Calls whose argument is matched text, an argparse float or a value an earlier line already checked carry a `# finite: ok <reason>` marker. The ratchet baseline fell from 254 to 235 calls in 80 files.
 Test first: 32 new tests in `tests/test_finite_batch3.py` and one in `tests/test_text_stages.py` (12 failures before the change). Twelve mutations each turned a test red; the first pass of 12 left two green (the percent paths covered each other), and two tests for a quotient no float holds and for a mixed float and huge integer fixed that. Not done in issue 461: `audio_facts`, `full_port_bundle`, `port_construction`, `scoring_check`, `step_bars` (audio area, left to the speech work), the skill templates that cannot import orchard, and the counted `float(` calls on numpy results.
@@ -6117,3 +6134,62 @@ requests: the tests each pull request changed were always selected. The default 
 `--eager` and `--direct` exist for feedback loops. The full suite on the integration state remains the merge gate. Not built: a per-test coverage
 map, which would narrow the selection further.
 
+
+## 2026-11-24: runtime hazards from the Lottolabs cards (study learnings 22 to 24 and 31; branch lotto-runtime-hazards)
+
+The Lottolabs cards report four failures that a config cannot predict: a trace replay that overwrites a tensor allocated after the capture (a page table, vision rows), a device hang about once in 20,000 decode steps (the LM head waits in a
+NoC barrier), `TT_FATAL` for a host read during trace capture, and a converted-tensor cache keyed by name and shape that serves wrong weights after a checkpoint change. `orchard/hazards.py` has a second table, `RUNTIME_HAZARD_TABLE`
+(`python3 -m orchard.hazards --runtime`), and `docs/runtime-hazards.md` lists the rows. Each row names the card and the section, says it is a card claim that this repository has not reproduced, says what a stage should run, and says what orchard checks today:
+trace captures and replays are counted (issue 547) and nothing checks tensors allocated after a capture, no stage runs a 20,000-step decode, and the `.orchard-model` cache marker names the model and not the checkpoint or the image. The
+existing sampler row (`vocab_per_die_above_65536`) now says it describes the stock sampler op: the Inkling-2-Mini and Qwen3.6 cards run vocabularies of 201,024 and 248,320 on one die with a custom top-k scan. The scan of a config is unchanged.
+16 new tests in `tests/test_runtime_hazards.py`; 29 mutations each turn a test red.
+## 2026-11-24: KL and top-1 limits beside the perplexity bar (Lottolabs study, learnings 3 and 5; branch lotto-fidelity-floors)
+
+`FIDELITY_BAR = 9.9` is a perplexity ratio. The Lottolabs LFM2.5 card passes it (+0.29 percent) with a KL of 0.0458 and top-1 0.915, and the LFM3 card states its own rule (KL at most 0.03,
+|perplexity change| at most 1 percent). `orchard/plan.py` now has `FidelityRule`, the named rules `perplexity` (the default, behaviour unchanged) and `lfm3-card`, a gate that names its reason, and the options
+`--fidelity-kl`, `--fidelity-top1`, `--fidelity-dppl-percent`, `--fidelity-rule`, `--fidelity-kl-max`, `--fidelity-top1-min` on `plan` and `tier-plan`. The `tt-orchard plan` wrapper had dropped
+`--fidelity-bfp4` and `--fidelity-tokens`; it passes all of them now. `scripts/fidelity_score.py` prints the options to paste. Stage 2's records have no KL (they hold the log-probability of each sampled token only), so
+the KL limit applies to scores from `scripts/fidelity_score.py`; the CPU fake-quant row beside the device row needs the port's distribution and is not added. Run log:
+`docs/run-logs/2026-11-24-fidelity-floors-vs-published-cards.md`. 76 new tests (`tests/test_fidelity_floors.py`); 58 mutations each turn a test red.
+## 2026-11-24: looped layers in the decode floor and the plan (Lottolabs study, learning 11; branch lotto-loop-layers)
+
+The Lottolabs study found that the decode floor ignored `loop_config`: Inkling-2-Mini runs layers 6 to 17 three times for each token, so the floor read 1.84 GB per token
+where the card streams 3.72 GB. `ModelDims` now carries `loop_passes`; `decode_floor` counts a looped layer once per pass and stores it once; the real config gives 3.551 GB
+(card 3.72 GB, 4.6 percent over our count; the gap is the loop controllers and a relative-position projection that the config does not describe, read from the checkpoint header).
+`inkling2_loop_text` joins the types whose query has an output gate (the header lists `attn.gate_attn.weight` at the query's size). `tier_plan` caveats name the uncounted loop
+controllers, and the hazard scan has a `looped_layers` mixer. Run log: `docs/run-logs/2026-11-24-looped-layers-vs-inkling-card.md`. 36 new tests (`tests/test_looped_layers.py`)
+and a probe in the table-coverage test; 21 mutations each turn a test red. The card names a revision of the upstream repository that the Hub does not know; the config was read at the
+repository head.
+
+## 2026-11-24: cheat-sheet recipes on a chip, issue 800 steps 1 and 2 (branch recipes-chip-run)
+
+The four recipe skeletons and the four control skeletons went through `kernel_harness.py --phase hw` on a leased board with the managed pair venv. All eight failed in tt-metal's JIT build with `tools/profiler/kernel_profiler.hpp: No such file or directory`; the elementwise controls fail the same way, so the host tt-metal tree (commit `64bc494efdf`, newer than the compiler's build tree `0e9d200db976`) and not the recipes is the cause. No `chip` entry was written. Steps 3 to 5 were not reached. Run log: `docs/run-logs/2026-11-24-recipes-chip-run.md`.
+## 2026-11-24: Voxtral on a chip, `tt-orchard speech-check` against real servers (branch voxtral-chip-run)
+
+`tt-orchard speech-check` ran against the published Voxtral Mini 3B (speech to text) and Voxtral 4B TTS (text to speech) bundles on two boards, each under its own gozer lease. The Mini transcribed the card's two clips and a 3.4-minute clip with word error 0.00 (the long clip against the CPU run of the same model) in 0.76, 0.82 and 20.4 seconds. The TTS bundle answered in 1.65 to 1.75 seconds, streamed its first audio after 0.5 to 0.6 seconds, and the Mini transcribed 10 of 11 saved clips with no word error (one Italian clip 0.111). The default bounds passed every correct answer and are looser than the observed values. `tt-model pull` on a host without skopeo leaves the image named `latest`; the run log gives the retag steps. The TTS licence is CC BY-NC 4.0 and the log says so. Run log: `docs/run-logs/2026-11-24-voxtral-chip-run.md`.
+
+## 2026-11-24: runtime hazards from the Inkling-2-Mini bundle (branch inkling-bundle-hazards)
+
+Five rows join `RUNTIME_HAZARD_TABLE` and `docs/runtime-hazards.md`, each marked a bundle claim that is not reproduced here: a hidden size of 2304 gives 9 tile columns per DRAM bank so a reader count must divide 9; a tensor-parallel-4 down projection needs a zero K pad row; the fast runtime mode skips circular-buffer and L1 overlap checks (an overlap hangs or corrupts); a program first compiled after a trace capture can be overwritten by replays (the program-binary case of the existing input-tensor row); two serve profiles set `TT_VISIBLE_DEVICES` to `0,1`, which a gozer lease on other chips could conflict with (the values are in the bundle's manifest; whether they override a lease was not checked). The first four come from the bundle's code comments as the study reported them; the code was not read here. Each row says what orchard checks today (nothing, except that the boot check passes the lease's `TT_VISIBLE_DEVICES` to its child). Hazards already recorded were not repeated. 6 new tests and 3 changed assertions in `tests/test_runtime_hazards.py`; 19 mutations each turn a test red.
+## 2026-11-24: decode floor against measured scaling over dies (branch inkling-floor-scaling)
+
+The floor assumes the dies' bandwidth adds. Raahem's Inkling-2-Mini card gives one-user plain decode on 1, 2 and 4 dies (53.2, 74.8 and 92.3 tok/s): 53, 37 and 23 percent of the floor of the same bytes (5.08 GB per token at bfp8, 512 GB/s per die), a scaling efficiency of 0.70 and 0.43. Lottolabs' one-die mixed-format build is 60 percent of a 3.55 GB-per-token floor of 144.2 tok/s on a different protocol. `decode_floor.scaling_table` and `--measured-by-dies` print such figures beside the floor, labelled as the caller's and never used to change the floor; `ASSUMPTIONS` names the gap. All percentages were recomputed with the module's own command. Run log: `docs/run-logs/2026-11-24-decode-floor-scaling-inkling.md`. 22 new tests (`tests/test_decode_floor_scaling.py`); 10 mutations each turn a test red.
+## 2026-11-24: tier-plan tensor-parallel layout (branch inkling-tensor-parallel)
+
+`tt-orchard tier-plan` offers a third on-chip placement, tensor-parallel, after "replicated" and "experts split": the attention heads, key-value heads, the experts' width and the output head are divided over the dies and the routers and embedding table stay on every die. It is a layout the plan assumes, taken from the published Inkling-2-Mini bundle's description, and the row says so. It needs the head counts (and the linear-attention and Mamba head counts, when present) to divide by the die count and the expert width to give every die whole 32-wide tiles; a row that cannot use it names the count that blocks it. Inkling-2-Mini "all bf16" on 2 chips changes from "fits with host experts" to "fits on chips" (24.67 GiB per die against a 24.89 GiB budget); the other rows do not change. Run log: `docs/run-logs/2026-11-24-tier-plan-tensor-parallel-inkling.md`. 14 new tests (`tests/test_tier_plan_tensor_parallel.py`); 12 mutations each turn a test red.
+## 2026-11-24: tier-plan fit headroom (branch inkling-fit-headroom)
+
+The study of Raahem's Inkling-2-Mini bundle found that `tt-orchard tier-plan` puts one chip with all-bfp8 weights in "fits with host experts" while the bundle serves the model on one die. By the plan's own figures the weights (25.75 GiB) fit in the usable share (29.89 GiB) if the reserve plus the KV share stay under 4.14 GiB; the plan assumes 7.0 GiB, and the card's figures imply about 3 GiB. A row that misses only because of that overhead now carries `overhead_limit_for_chips_bytes` and a line that names the flags (`--reserve-gib`, `--kv-gib`). No constant and no verdict changed. The card's 27 GiB of experts is 2.8 GiB above the plan's count and is unexplained. Run log: `docs/run-logs/2026-11-24-tier-plan-vs-inkling-bundle.md`. 8 new tests (`tests/test_tier_plan_headroom.py`); 6 mutations each turn a test red.
+
+## 2026-11-24: cached decode of the Aion generated port on a chip (issue 805)
+
+The cached decode of PR 806 ran on a two-chip mesh for the first time, on a port regenerated from main for Aion-1.0-Instruct-2.3B, against the published bundle's whole-sequence port. The 24 greedy tokens were identical on a 10-token and a 238-token prompt. On the 238-token prompt decode went from 0.77 to 6.40 tok/s; on the 10-token prompt it measured 4.75 and 3.15 tok/s, probably because the cached port's first step compiled inside the timed window. One run per cell. The first cached run hung in the loader for 32 minutes (issue 813): the generator's loader still writes `get_tensor(name)` without `.clone()`. Run log: `docs/run-logs/2026-11-24-aion-cached-decode-chip-run.md`.
+
+## 2026-11-24: stage 0 of an audio run without the coder (issue 143, branch audio-stage0-harness-143)
+
+An audio run no longer boots the local coder for stage 0. The command records the run inputs `audio_model=1` and `audio_base=<base id>` when the preflight's base row says the model is audio and the base snapshot is known; `stages.AUDIO_STAGE_0` (`harness=True`, `needs_coder=False`, the agent stage's gate) then runs the shipped `delta_triage.py` as supervisor code (`orchard/audio_stage0.py`, `Supervisor._audio_triage_body`). The template stays the judge: a delta.json without `facts.modality` of audio fails the stage. A resume keeps the run's recorded choice, so runs from before the change keep the agent stage 0. Run by hand on the cached Stable Audio 3 small-music pair, the template took 0.2 s and the gate passed. `tests/test_audio_stage0_harness.py` has 44 tests and 23 mutations, all red after one test was added for a recorded `audio_model` that is not the string "1". The strict xfail of `tests/test_audio_stage0_coder.py` is removed. The stock-runtime stage 0 still boots the coder (left open in the run log, `docs/run-logs/2026-11-24-audio-stage0-harness.md`).
+
+
+## 2026-11-25: Voxtral under simultaneous requests and a singing probe (branch voxtral-load-run)
+
+Voxtral Mini and Voxtral TTS each ran on their own board with 1 to 32 simultaneous requests (TTS) and 1, 2 and 4 (Mini), five repeats each. TTS answered 32 requests (about 110 s of audio) in a median 3.2 s against 1.8 s for one, with 7 of 50 runs about 7 s slower for a cause not found. The Mini serves one request at a time and queues the others without failures; four 203 s clips took 19.6, 38.7, 57.8 and 77.0 s. The TTS container log has no per-stage lines. Twenty voices given four lyric lines spoke them; a pitch check found no held notes. Docs only; run log `docs/run-logs/2026-11-25-voxtral-load-run.md`.

@@ -219,6 +219,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
 - **Pure analysis modules.** `orchard/decode_floor.py` (share of the memory-bandwidth floor), `orchard/hazards.py` (model dimensions that trip known op
   limits), `orchard/first_divergence.py` (the first layer that leaves the noise) and `orchard/noise_floor.py` (bars from measured CPU floors and a known-bad control).
   None of them touches a device. [Floor and hazards](docs/run-logs/2026-10-28-decode-floor-break-even-hazards.md),
+  [runtime hazards that the Lottolabs cards and the Inkling-2-Mini bundle report](docs/runtime-hazards.md),
   [divergence and noise floor](docs/run-logs/2026-10-28-first-divergence-and-noise-floor.md).
 
 Limits that apply to all of it: single prompts for most agreement and speed checks, a shared host, and speed numbers that vary with its load.
@@ -1060,14 +1061,19 @@ largest format mix whose weights fit in a share of the DRAM. `--chips N` sets th
 DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and `--json` prints the result as JSON. bfp8 is the default format below bf16. A row that uses bfp4 is recommended only with a score measured on the model's own port: pass it with
 `--fidelity-bfp4` (the score, 0 to 10) and `--fidelity-tokens` (the scored tokens, at least 4000). The bar is 9.9, a provisional figure between the
 two measured points (bfp8 9.991, bfp4 9.821 on one 7B port; docs/project-log.md, issue 731). A score below the bar removes the row. Without a score,
-a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`.
+a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`, which prints the options to paste.
+The ratio bar reads one number. A port can pass it with a large KL, so the same run's `--fidelity-kl` (KL against the reference), `--fidelity-top1`
+(argmax agreement, 0 to 1) and `--fidelity-dppl-percent` (perplexity change on other text; without it the change is worked out from the score) can be
+given, and `--fidelity-rule lfm3-card` also requires a KL of at most 0.03 and a perplexity change within 1 percent (the rule the Lottolabs LFM3-1.7B card
+states for its own choice; the limits are one author's, so it is never the default). `--fidelity-kl-max` and `--fidelity-top1-min` set a limit of the caller's own. Without
+`--fidelity-rule` the bar is the only rule, as before. `tier-plan` takes the same options.
 
 #### Before a download, for a mixture-of-experts model: `tt-orchard tier-plan`
 
 `tt-orchard tier-plan SOURCE` answers the question the plan command answers, but from the model's `config.json` alone, so it can run before the
 checkpoint is on disk. SOURCE is a Hugging Face repository id (only `config.json` and `model.safetensors.index.json` are fetched, with no token and
 no weight file), a `config.json`, or a directory that holds one. It prints, for 1, 2 and 4 chips (`--chips 1,2,4`) and each weight format mix, a
-verdict: **fits on chips** (replicated, or with the experts split over the chips), **fits with host experts** (the always-resident weights and as many
+verdict: **fits on chips** (replicated, with the experts split over the chips, or tensor-parallel, a layout the plan assumes in which the attention heads, the expert width and the output head are divided over the dies and the head counts must divide by the die count), **fits with host experts** (the always-resident weights and as many
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
@@ -1083,7 +1089,7 @@ The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-
 
 #### Speech models: `tt-orchard speech-check`
 
-A speech model takes speech in and gives text, or takes text and gives speech. The harness has no stage for either, so a preflight for one ends with a
+A speech model takes speech in and gives text, or takes text and gives speech. Without `--speech-clips` (next section) a preflight for one ends with a
 block (`speech-model`) that names the model's task, the published bundle that serves it (known for the two Voxtral bundles on 2026-11-23) and the
 command below. `tt-orchard speech-check URL --task speech-to-text --clip FILE --expect TEXT` transcribes each clip on a running server and passes it
 when the word error rate against the expected text is at most `--max-wer` (default 0.10); `--language` sends a language code with each clip (none is sent by default). `--task text-to-speech` requests speech and checks that
@@ -1094,6 +1100,18 @@ The server must be on this machine, the port is required (nothing is assumed), a
 device and takes no lease; start the bundle with `tt-model serve` under a gozer lease first. `--json` prints every check with its measured values and
 the rule it applied. The note on the two bundles is `docs/run-logs/2026-11-23-voxtral-speech-models.md`; the command has not yet been run against a
 real bundle on a chip.
+
+#### The speech route: `tt-orchard bringup MODEL --speech-clips DIR`
+
+For a speech model that a published bundle serves (`mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-4B-TTS-2603`), `--speech-clips DIR` turns the block into a
+run. `DIR` holds at most 8 audio clips (`.wav`, `.flac`, `.mp3`, `.ogg`), each with a `NAME.txt` that holds what it says (optional for speech to text, required for
+text to speech). `--speech-prompts` FILE gives a text-to-speech run its prompts, one per line (default: three short sentences), and `--speech-language` CODE
+sets the language the speech-to-text reference is asked for (default `en`). The run does not boot the coder. Stage 0 reads the bundle table, stage 1 records a CPU
+reference in the reference interpreter (the upstream model's transcripts of your clips, or for text to speech a check that a Whisper scorer hears your clips),
+stage 2 serves the bundle with `tt-model serve` on one board under a lease, runs the `speech-check` checks, saves every answer and stops the bundle, and stage 8
+builds the operator bundle. Stages 3 to 7 are skipped. The gate recomputes every number from the saved clips, audio and transcripts. The run never copies or
+republishes the model's weights, and its results and RISKS.md carry the bundle's licence as the card states it. The design is
+`docs/superpowers/specs/2026-11-23-speech-route-design.md`; no chip has run it yet.
 
 ### 4.1 Before you start
 
@@ -1462,7 +1480,7 @@ audio branch of the stage 0 template. Stage 0 records three facts in its ledger 
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
 a thin bundle. The class is `weights-only`, `full-port` or `unknown`: each difference in `model_config.json` is sorted by an allow-list table into serving settings (the longest audio asked for, the default sampler), structural keys or unknown keys, and only serving differences leave the path `weights-only` (with a hazard that names the keys and both values, because no stage yet checks that the serving configuration carries the model's own settings). `audio_strict` in `triage_config.json` keeps the stricter rule, and `audio.decision` in `delta.json` records the evidence for each difference and any override from a later inference step. An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
-A run for an audio model starts the coder before stage 0 as every run does, although the run stops after stage 0 (issue 143). `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
+A run for an audio model runs stage 0 as supervisor code and starts no coder for it (issue 143): when the preflight finds the model to be audio, the command records the run inputs `audio_model=1` and `audio_base=<the base model id>`, and the supervisor copies the shipped `delta_triage.py` into the stage, writes its configuration and runs it. The template still decides whether the model is audio, and a text model fails the stage. A run started before this change keeps the agent stage 0. `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
 [docs/run-logs/2026-10-28-stable-audio-3-facts.md](docs/run-logs/2026-10-28-stable-audio-3-facts.md).
 

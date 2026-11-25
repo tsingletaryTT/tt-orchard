@@ -1184,6 +1184,11 @@ def _speech_check_model_ids(payload: bytes):
     return speech_check.model_ids_of(payload)
 
 
+def _speech_reference_run_config(base):
+    from orchard import speech_reference_run
+    return speech_reference_run.read_config(str(Path(base) / "input.json"))
+
+
 def _drop_check_index_shards(payload: bytes):
     from orchard import drop_check
     return drop_check.index_shards(payload)
@@ -1435,6 +1440,7 @@ READERS: list[Reader] = [
     Reader("drop_check.index_shards", _drop_check_index_shards, feed="bytes"),
     Reader("speech_check.transcript_of (hostile server answer)", _speech_check_transcript, feed="bytes"),
     Reader("speech_check.model_ids_of (hostile server answer)", _speech_check_model_ids, feed="bytes"),
+    Reader("speech_reference_run.read_config (hostile config written for the reference producer)", _speech_reference_run_config, documented=(ValueError,)),
     Reader("drop_check.run (hostile release info.json)", _drop_check_run_release, rel="release/info.json",
            setup=_drop_release_setup_without("info.json"), check=_drop_run_not_covered),
     Reader("drop_check.run (hostile release config.json)", _drop_check_run_release, rel="release/config.json",

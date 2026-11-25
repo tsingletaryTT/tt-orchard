@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "decode floor counts looped layers once per pass (Inkling-2-Mini: 1.84 to 3.55 GB per token, card 3.72); the plan and the hazard scan name loops."
+kind = "fix"

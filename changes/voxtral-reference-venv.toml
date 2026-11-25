@@ -1,0 +1,2 @@
+target = "0.9.197"
+summary = "Run log: the Voxtral Mini speech-to-text model and the Voxtral TTS model run on CPU in the transformers 5.24.0 reference environment (the Mini model matches transformers 4.56.0 token for token; the TTS reference loader needs a one-line change); no chip used."

@@ -60,6 +60,7 @@ MIXER_RULES = {
     "sparse_attention": "the config has an attention indexer key (index_topk, index_n_heads, index_head_dim, indexer_budget, indexer_n_heads or indexer_head_dim)",
     "hyper_connections": "the config has a hyper-connection key (hc_mult, hc_eps, hc_count, hc_lowrank or a key starting with hyper_connection)",
     "ngram_embedding": "the config has an n-gram embedding key (ngram_size or ngram_vocab_size_base)",
+    "looped_layers": "the config has a loop_config that runs a block of layers more than once for each token",
 }
 
 
@@ -92,7 +93,8 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "a 512-expert model needed a wider mask than 256 bits; above 512 the wider mask is also short", _ISSUE,
                "run the router with a token routed to expert index {last} (the highest) and check that the expert's output arrives"),
     TableEntry("vocab_per_die_above_65536", f"vocabulary columns per die at most {VOCAB_PER_DIE_LIMIT}",
-               "a sampler index wraps at 65,536 columns per die and returns a wrong token", _ISSUE,
+               "the stock sampler op's index wraps at 65,536 columns per die and returns a wrong token. The Lottolabs Inkling-2-Mini (201,024 columns) and "
+               "Qwen3.6-35B-A3B (248,320) cards run on one die with a custom top-k scan that does not wrap (card claim), so the row describes the stock op", _ISSUE,
                "sample with the greedy and the sampled path on logits whose maximum sits in the last column of each die"),
     TableEntry("vocab_not_whole_tiles", "vocabulary a whole number of 32-wide tiles",
                "the vocabulary is not a multiple of 32, so the LM head and the sampler pad it", "tile layout: every tensor on the chip is stored in 32 by 32 tiles",
@@ -138,6 +140,10 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "from the config; check the checkpoint headers for its size and whether it fits device memory)", _NEAREST,
                "run the n-gram lookup for one token (hash the last ngram_size token ids for every head, read the rows) and the layer's "
                "gate and convolution against the CPU result, then three tokens in a row so the history carries over"),
+    TableEntry("mixer_looped_layers_not_in_nearest", "mixer implemented by the nearest bundle",
+               "the nearest bundle runs every layer once for each token. A looped model (loop_config) runs a block of layers several times, each pass with its own "
+               "gate weights, so a port that runs each layer once is wrong and a decode that reads each layer once is too fast", _NEAREST,
+               "run the looped block for one token with every pass against the CPU result, then check that the loop gates change the hidden state between passes"),
     TableEntry("dense_model_nearest_is_moe", "a model of the same shape as the nearest bundle (routed experts or none)",
                "the model has no routed experts and the nearest bundle does, so the bundle's router, expert and shared-expert paths are not the model's MLP", _NEAREST,
                "run one decoder layer's dense MLP (gate, up, down and the activation) at the model's width against the CPU result before the full model"),
@@ -163,6 +169,107 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "run the indexer at the model's head count sharded over the dies against the CPU result at a context longer than the top-k"),
 ] + _tile_rows())
 _BY_NAME = {e.name: e for e in HAZARD_TABLE}
+
+
+# ---- runtime hazards: not visible in a config ---------------------------------------------------------------------------
+#
+# Failures that the Lottolabs Blackhole cards and the Inkling-2-Mini bundle report from running a port, with no number in a config that predicts them. The study of 2026-11-24 read them
+# from the cards; this repository has not reproduced any of them, so each row says it is a card claim. `known_here` says what orchard checks today.
+# docs/runtime-hazards.md lists the same rows.
+
+@dataclass(frozen=True)
+class RuntimeHazard:
+    name: str
+    applies_to: str       # the kind of port or run the hazard is about
+    what: str             # what goes wrong, as the card reports it
+    source: str           # the card and the section, and that it is a card claim
+    check: str            # what a stage should run to look for it
+    known_here: str       # what orchard checks today, when the row was written
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "applies_to": self.applies_to, "what": self.what, "source": self.source, "check": self.check,
+                "known_here": self.known_here}
+
+
+RUNTIME_HAZARD_TABLE: tuple[RuntimeHazard, ...] = (
+    RuntimeHazard(
+        "trace_inputs_overwritten_by_later_capture", "a port with traced decode or prefill that stages inputs after a trace was captured",
+        "a tensor allocated after a trace was captured can sit inside the released intermediates of the earlier trace, so each replay overwrites it. "
+        "LFM3: the page table staged for one trace read garbage block ids, which gave wrong tokens and later NaN logits. Qwen3.8-27B: vision rows allocated "
+        "after the prefill trace were overwritten by replays, and a 16,384-token image produced garbage",
+        "Lottolabs LFM3-1.7B card, section 's13 trace page-table bug', and Lottolabs Qwen3.8-27B card, section 'Fixed: vision rows' (a card claim that is not reproduced here)",
+        "capture the first trace, allocate and write the later inputs (page table, vision rows), replay the first trace, and compare every later input with what was "
+        "written; on a mismatch allocate the inputs before the first capture",
+        "no check found when this row was written (2026-11-24): orchard/skills/full-port-templates/port_check.py counts captures and replays (issue 547) and "
+        "does not look at tensors allocated after a capture"),
+    RuntimeHazard(
+        "lm_head_noc_barrier_hang", "a long decode on a traced port",
+        "a device hang about once in 20,000 decode steps: the LM head waits in a NoC atomic barrier. The cause is inferred by the card (multicast readers of the final "
+        "RMSNorm exit with a semaphore increment in flight) and not proven; the fix drains NoC transactions before kernel exit, and 200,000 replays of "
+        "norm plus LM head ran afterwards without a hang",
+        "Lottolabs Qwen3.8-27B card, section 'A rare device hang is addressed' (a card claim that is not reproduced here)",
+        "run a decode soak of at least 20,000 steps under a lease; when a step times out, capture tt-triage before the reset and record the step count",
+        "no check found when this row was written (2026-11-24): no stage runs a decode of that length"),
+    RuntimeHazard(
+        "host_read_during_trace_capture", "a traced port whose lookup table stays on the host",
+        "TT_FATAL: Reads are not supported during trace capture, when a vocabulary or lookup table that the traced step reads is on the host; the card's fix "
+        "keeps the table on the device",
+        "Lottolabs Qwen3.6-35B-A3B card, section 'MTP-off fix' (a card claim that is not reproduced here)",
+        "capture the traced step once with every table the step reads on the device; a host-resident table fails at capture with this message",
+        "no check found when this row was written (2026-11-24)"),
+    RuntimeHazard(
+        "tensor_cache_identity_is_name_and_shape", "a converted-tensor cache reused across checkpoints or runtime builds",
+        "the runtime's converted-tensor cache is keyed by tensor name and shape only, so a cache made from another checkpoint is read without complaint and serves "
+        "wrong weights. The card's launcher writes an identity file (the checkpoint manifest hash plus the serving image id) beside the cache and refuses a cache "
+        "whose identity differs",
+        "Lottolabs Qwen3.6-35B-A3B card, section 'Cache safety', and Lottolabs Qwen3.8-27B card (a card claim that is not reproduced here)",
+        "record the checkpoint's file hashes and the serving image id next to the cache when it is made, and compare them before each start",
+        "`.orchard-model` names the model whose weights a cache holds (orchard/caches.py, the swap templates) and the operator bundle checks it; it does not record "
+        "the checkpoint revision or the serving image, so a cache made from an older checkpoint of the same model passes that check"),
+    # ---- the published Inkling-2-Mini bundle (study of 2026-11-24, learning 12). The first four come from comments in the bundle's model code as the study
+    # reported them; this repository has not read or run that code. The fifth is visible in the bundle's own manifest.
+    RuntimeHazard(
+        "dram_bank_tile_columns_limit_reader_count", "a port that streams weights with a fixed number of readers per DRAM bank, at a hidden size of 2304",
+        "a hidden size of 2304 is 72 tiles wide, which gives 9 tile columns per DRAM bank over 8 banks (the bundle's figure; the bank count of 8 is our "
+        "assumption from the 8 memory channels of a p150), so the number of weight readers must divide 9. A count that does not divide it leaves readers with unequal work",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "list the reader counts the port uses for each weight shape and check that every one divides the tile columns per bank; run one projection at each count and compare with the CPU result",
+        "no check found when this row was written (2026-11-24): the config scan checks tile alignment per die (ffn_per_die_not_whole_tiles) and does not count tiles per DRAM bank"),
+    RuntimeHazard(
+        "tp4_down_projection_needs_zero_k_pad_row", "a port that divides the down projection over 4 dies",
+        "a tensor-parallel down projection over 4 dies needs a zero row appended to its K dimension, as the bundle's code comment says; without it the projection reads past "
+        "its shard. The comment as reported does not say which shapes need it",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "run the down projection sharded over 4 dies at the model's widths with and without the pad row and compare both with the CPU result",
+        "no check found when this row was written (2026-11-24): nothing in orchard/ knows about a pad row"),
+    RuntimeHazard(
+        "fast_runtime_mode_skips_circular_buffer_and_l1_overlap_checks", "a port run in a runtime mode that turns off the circular buffer and L1 checks (the bundle's I2M_L1_CHECK switch)",
+        "the bundle's fast runtime mode does not check circular buffers or L1 for clashes, and an overlap hangs or corrupts. The checks are meant to be turned on while a "
+        "new kernel or a new shape is brought up and off for serving",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "run every new kernel and shape once with the checks on; treat a hang in a run with the checks off as a possible overlap and rerun it with them on before blaming the device",
+        "no check found when this row was written (2026-11-24): nothing in orchard/ distinguishes a run with the L1 checks on from one with them off"),
+    RuntimeHazard(
+        "program_compiled_after_trace_capture_overwritten", "a traced port that compiles a new program (a new shape or length) after a trace was captured",
+        "a program first compiled after a trace capture can be overwritten by replays of the trace, according to the bundle's code comment in its speculative-decoding "
+        "module. This is the mechanism of trace_inputs_overwritten_by_later_capture, applied to program binaries",
+        "raahemnabeel/inkling-2-mini, a code comment in the model's runtime as the 2026-11-24 study reported it (a bundle claim that is not reproduced here)",
+        "compile every shape the server can see before the first capture (a warm-up over the lengths and batch sizes), then replay and compare a late-shape request with an eager run",
+        "no check found when this row was written (2026-11-24): the stage 2 port check counts captures and replays (issue 547) and does not look at what is compiled after a capture"),
+    RuntimeHazard(
+        "serve_profile_fixed_visible_devices_conflicts_with_lease", "a bundle whose serve profile sets TT_VISIBLE_DEVICES to fixed dies, run under a gozer lease",
+        "two serve profiles of the bundle set TT_VISIBLE_DEVICES to 0,1 in their env (serve_profiles[2] and [3] of its tt_kernel_manifest.json). Under a gozer lease on other chips, "
+        "if the profile's value wins over the lease's, the container opens dies that the lease does not hold. Whether the profile's value wins was not checked",
+        "raahemnabeel/inkling-2-mini, the serve_profiles of its tt_kernel_manifest.json, read on 2026-11-24 (the manifest values are plain facts; that they override a lease is a bundle claim that is not reproduced here)",
+        "serve the profile under a lease on chips other than 0 and 1 and read the die indices the container reports; compare them with the lease",
+        "the boot check (orchard/package_cmd.py) passes the lease's TT_VISIBLE_DEVICES to the child it starts; nothing in orchard/ reads a bundle profile's own TT_VISIBLE_DEVICES"),
+)
+_RUNTIME_BY_NAME = {r.name: r for r in RUNTIME_HAZARD_TABLE}
+
+
+def runtime_hazard(name: str) -> RuntimeHazard:
+    """The runtime-hazard row called `name`. Raises KeyError for an unknown name."""
+    return _RUNTIME_BY_NAME[name]
 
 
 class HazardInputError(ValueError):
@@ -215,6 +322,8 @@ def _mixers(d: mc.ModelDims) -> list[str]:
         kinds.add("hyper_connections")
     if d.keys & NGRAM_EMBEDDING_KEYS:
         kinds.add("ngram_embedding")
+    if any(n > 1 for n in d.loop_passes):
+        kinds.add("looped_layers")
     return sorted(kinds)
 
 
@@ -440,15 +549,25 @@ def _generated_entry(name: str, why: str | None) -> TableEntry:
 
 
 def main(argv=None) -> int:
-    """`python3 -m orchard.hazards MODEL_CONFIG --nearest NEAREST_CONFIG [--dies N]`: print the scan record as JSON. Exit 2 on a bad input."""
+    """`python3 -m orchard.hazards MODEL_CONFIG --nearest NEAREST_CONFIG [--dies N]`: print the scan record as JSON. Exit 2 on a bad input.
+    `python3 -m orchard.hazards --runtime` prints the runtime hazards that a config cannot show (RUNTIME_HAZARD_TABLE)."""
     import argparse
     import os
     import json
-    ap = argparse.ArgumentParser(description="Scan a model config for dimensions that break known kernels.")
-    ap.add_argument("config", help="the model's config.json")
+    ap = argparse.ArgumentParser(description="Scan a model config for dimensions that break known kernels, or list the runtime hazards.")
+    ap.add_argument("config", nargs="?", help="the model's config.json")
+    ap.add_argument("--runtime", action="store_true", help="print the runtime hazards that the Lottolabs cards report (no config)")
     ap.add_argument("--nearest", help="the nearest bundle's model config.json (without it the comparisons with the bundle are skipped)")
     ap.add_argument("--dies", type=int, default=2, help="dies the vocabulary is split over (default 2)")
     a = ap.parse_args(argv)
+    if a.runtime:
+        if a.config or a.nearest:
+            print("hazards: --runtime lists the runtime hazards and takes no config")
+            return 2
+        print(json.dumps({"runtime_hazards": [r.as_dict() for r in RUNTIME_HAZARD_TABLE]}, indent=2))
+        return 0
+    if not a.config:
+        ap.error("the model's config.json is required (or use --runtime)")
     try:
         model = mc.read_model_config(os.path.realpath(a.config))      # a Hugging Face cache snapshot file is a link into blobs/
         nearest = mc.read_model_config(os.path.realpath(a.nearest)) if a.nearest else None
