@@ -1853,8 +1853,14 @@ def test_an_interrupt_is_not_lost_when_the_second_scan_fails(tmp_path, monkeypat
     monkeypatch.setattr(kp, "scan_strays", scan)
     sent, violations = [], []
 
-    def interrupted(_s):
-        raise KeyboardInterrupt
+    slept = []
+
+    def interrupted(s):
+        # Ctrl-C lands in the grace (the first wait). The later waits (for the SIGSTOP to take effect, issue 476, and for the kill to show) sleep for real.
+        if not slept:
+            slept.append(s)
+            raise KeyboardInterrupt
+        _time.sleep(s)
     try:
         assert stubborn.stdout.readline().strip() == b"ready"
         kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
@@ -4177,3 +4183,101 @@ def test_a_rung_run_told_its_directory_is_already_locked_does_not_lock_it_again_
             kp.acquire_lock(tmp_path / "out")
     finally:
         kp.release_lock(held)
+
+
+# ---- issue 477: no authoritative check, and no later attempt, while a helper from an earlier sweep may still run ----------------------------
+
+class _QuietStep:
+    """Stands in for AgentStep: the agent step ends at once, and the test controls what the sweeps say."""
+
+    def __init__(self, **kw):
+        self.run_dir = kw["run_dir"]
+
+    def run(self, system, user):
+        (Path(self.run_dir) / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+        return Outcome("done", 1, "done")
+
+
+def _sweep_saying(live=(), problems=(), calls=None):
+    """A sweep stand-in. It adds one record per pid in `live` (still running, stopped False) and one problem per text in `problems`."""
+    def sweep(run_dir, *, status=None, into=None, **kw):
+        if calls is not None:
+            calls.append("sweep")
+        recs = [{"pid": pid, "cmdline": "helper", "stopped": False} for pid in live]
+        if into is not None:
+            into.extend(recs)
+        if status is not None:
+            status["problems"] = list(problems)
+            status["complete"] = not problems
+        return recs
+    return sweep
+
+
+def _attempt_with(monkeypatch, tmp_path, fake_kenv, sweep, order):
+    monkeypatch.setattr(kp, "AgentStep", _QuietStep)
+    monkeypatch.setattr(kp, "sweep_strays", sweep)
+    writer = check_writer({"passed": True, "category": None, "first_line": "", "sets": [], "kernel_sha256": "k" * 64})
+
+    def check(argv, **kw):
+        order.append("check")
+        return writer(argv, **kw)
+    return kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1", model="m", coder_model="m",
+                          probe_id="t", run_watched=check, tt_lang=FACTS)
+
+
+def test_a_helper_that_may_still_run_blocks_the_authoritative_check(tmp_path, fake_kenv, monkeypatch):
+    order = []
+    attempt = _attempt_with(monkeypatch, tmp_path, fake_kenv, _sweep_saying(live=[4242], calls=order), order)
+    assert "check" not in order, order
+    assert attempt["passed_sim"] is False
+    assert attempt["status"] == "blocked-helper"
+    assert "4242" in attempt["check_skipped"] and "may still run" in attempt["check_skipped"]
+    assert attempt["status_detail"] == attempt["check_skipped"]
+    assert attempt["category"] == "helper_may_run"
+    on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+    assert on_disk["check_skipped"] == attempt["check_skipped"]
+
+
+def test_an_incomplete_sweep_blocks_the_authoritative_check(tmp_path, fake_kenv, monkeypatch):
+    order = []
+    attempt = _attempt_with(monkeypatch, tmp_path, fake_kenv,
+                            _sweep_saying(problems=["the process list could not be read"], calls=order), order)
+    assert "check" not in order, order
+    assert attempt["status"] == "blocked-helper" and attempt["passed_sim"] is False
+    assert "process list could not be read" in attempt["check_skipped"]
+
+
+def test_a_clean_sweep_lets_the_check_run_as_before(tmp_path, fake_kenv, monkeypatch):
+    order = []
+    attempt = _attempt_with(monkeypatch, tmp_path, fake_kenv, _sweep_saying(calls=order), order)
+    assert order == ["sweep", "check", "sweep"], order
+    assert attempt["passed_sim"] is True and attempt["status"] == "done" and attempt["check_skipped"] is None
+
+
+def test_the_sweep_after_a_skipped_check_still_runs(tmp_path, fake_kenv, monkeypatch):
+    """The second sweep gives a surviving helper another chance to go; the attempt stays blocked either way."""
+    order = []
+    _attempt_with(monkeypatch, tmp_path, fake_kenv, _sweep_saying(live=[4242], calls=order), order)
+    assert order == ["sweep", "sweep"], order
+
+
+def test_the_report_names_a_blocked_attempt(tmp_path, fake_kenv, monkeypatch):
+    attempt = _attempt_with(monkeypatch, tmp_path, fake_kenv, _sweep_saying(live=[4242]), [])
+    kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
+    text = (tmp_path / "kernel-probe-report.md").read_text()
+    assert "blocked-helper" in text and "4242" in text
+
+
+def test_a_blocked_attempt_ends_the_run_so_no_later_attempt_and_no_hardware_phase_start(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = []
+
+    def run_attempt(*, op, n, **kw):
+        seen.append(n)
+        rec = canned(op, n)
+        rec |= {"status": "blocked-helper", "check_skipped": "a helper (pid 4242) may still run", "passed_sim": False}
+        return rec
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    code = kp.main(probe_args(tmp_path, attempts=4, phase="hw"), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_BLOCKED and seen == [1]
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert "attempt 1" in data["header"]["stopped"] and "4242" in data["header"]["stopped"] and data["header"]["hw"] is None
