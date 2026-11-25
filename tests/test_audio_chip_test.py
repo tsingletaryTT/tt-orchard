@@ -120,3 +120,31 @@ def test_the_timeout_covers_the_repeats_and_the_warmup(rig, monkeypatch):
     path = config(tmp_path, runs_for("small-music", 3), per_run_timeout_s=100)
     mod.main(["--config", str(path)])
     assert seen == [400.0]
+
+
+# ---- a test that ran nothing is not a pass (audit of gates for a positive sign, 2026-11-25) ------------------------------------------------
+
+def test_a_config_with_no_runs_fails_and_says_nothing_was_tested(rig, capsys):
+    mod, tmp_path = rig
+    path = config(tmp_path, [])
+    assert mod.main(["--config", str(path)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and out["runs"] == [] and "no runs" in out["problem"]
+    assert json.loads((tmp_path / "stage" / "chip_test.json").read_text())["runs"] == []
+
+
+def test_a_config_with_runs_that_all_made_a_manifest_still_passes_and_names_no_problem(rig, capsys):
+    mod, tmp_path = rig
+    path = config(tmp_path, runs_for("small-base", 2))
+    assert mod.main(["--config", str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True and "problem" not in out
+
+
+def test_a_process_that_left_every_manifest_but_exited_nonzero_fails_the_test(rig):
+    mod, tmp_path = rig
+    (tmp_path / "tpl" / "chip_generate.py").write_text(FAKE_GENERATE + "\nraise SystemExit(4)\n")
+    path = config(tmp_path, runs_for("small-music", 2))
+    assert mod.main(["--config", str(path)]) == 1
+    runs = json.loads((tmp_path / "stage" / "chip_test.json").read_text())["runs"]
+    assert all(r["manifest"] and r["returncode"] == 4 for r in runs)
