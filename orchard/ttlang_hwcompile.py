@@ -99,7 +99,7 @@ def package_identity(python) -> dict:
 
 
 def identity_of(ttl) -> dict:
-    """The identity (as `package_identity` returns it) of the tt-lang compiler package in the directory `ttl`, the one that holds `_src/` and
+    """The identity (as `package_identity` returns it) of the tt-lang compiler package in the directory `ttl`, which holds `_src/` and
     `operators.py`; its version comes from the distribution's METADATA next to it. For a caller that has the package's directory and no
     interpreter (scripts/verify_cheat_sheet.py). Raises HwCompileError."""
     ttl = Path(ttl)

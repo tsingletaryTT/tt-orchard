@@ -580,7 +580,7 @@ def verify(sheet: dict, indexes: dict, compiles: dict | None = None, hardware_ta
 
 
 def _compile_problems(sheet: dict, compiles, hardware_target) -> list[str]:
-    """The chip claims judged by recorded compiles of the hardware package; what is missing is said, not skipped."""
+    """The chip claims judged by recorded compiles of the hardware package; a check with no record says what it did not check."""
     if compiles is None:
         return ["no compile results were given, so the chip claims were judged by the package's files alone, which cannot show that the "
                 "compiler takes a call"]

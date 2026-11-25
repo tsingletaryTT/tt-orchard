@@ -462,7 +462,7 @@ def test_the_static_check_alone_passes_math_fill_and_the_compile_records_catch_i
 
 @on_pair
 def test_the_identity_of_a_package_directory_is_the_identity_of_its_interpreter():
-    """scripts/verify_cheat_sheet.py is given the `ttl/` directory of the hardware package, not an interpreter."""
+    """scripts/verify_cheat_sheet.py takes the `ttl/` directory of the hardware package and has no interpreter argument."""
     assert hc.identity_of(hc.package_dir(PAIR)) == hc.package_identity(PAIR)
 
 
@@ -483,7 +483,7 @@ def _script(name: str):
 
 
 def test_verify_cheat_sheet_names_a_hardware_root_that_is_not_a_compiler_package(tmp_path, capsys):
-    """The identity of the hardware package comes from its directory; a directory without the compiler is an error, not a silent pass."""
+    """The identity of the hardware package comes from its directory; a directory without the compiler is an error."""
     empty = tmp_path / "ttl"
     empty.mkdir()
     argv = ["ttlang"] + [a for name in ("hardware", "shared", "tree", "sim") for a in ("--root", f"{name}={empty}")]
