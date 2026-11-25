@@ -183,6 +183,20 @@ FIDELITY_SEED = 20260721         # choice: fixed, so a rerun of stage 1 gives th
 FIDELITY_FILE = "fidelity-ids.json"
 FIDELITY_SAVE_EVERY = 256        # a partial file (complete false) is rewritten this often, so an interrupted run leaves its progress on disk
 REASONING_STARTS = ("Let me", "We need", "<think")
+# Issue 15: the CPU reference of the agreement set. `agreement_set: true` in reference_config.json asks for it. The set is the file
+# `agreement_prompts.json` copied next to this script from orchard/skills/weights-swap-templates; the script renders each prompt through the chat
+# template, decodes AGREEMENT_TOKENS greedy tokens and writes `evidence/reference/agreement-reference.json`, which the stage 2 and 4 check
+# (serve_and_compare.py, step j) scores the chip against. A prompt of at most AGREEMENT_RECOMPUTE_MAX tokens is decoded the way the main reference
+# is, with a forward pass over the whole sequence at every step and no cache, because the chip check teacher-forces the same way (one request per
+# position). A longer prompt (the set's 2,000-token needle prompt) uses the key-value cache: a full pass per token over 2,000 tokens would take
+# hours for a 27B model on this CPU. The entry records which way it was made.
+AGREEMENT_PROMPTS_NAME = "agreement_prompts.json"
+AGREEMENT_FILE = "agreement-reference.json"
+AGREEMENT_ERROR_FILE = "agreement-reference-error.json"
+AGREEMENT_TOKENS = 32            # the chip check compares the first 32 tokens of each prompt (serve_and_compare.py N_TOKENS)
+AGREEMENT_RECOMPUTE_MAX = 512    # choice: prompts up to this many tokens are decoded without the cache
+AGREEMENT_MIN_PROMPTS = 5        # the same floor as orchard/agreement_core.py MIN_PROMPTS
+AGREEMENT_FILE_MAX_BYTES = 1 << 20
 
 ROUNDTRIP_STRINGS = [
     "Hello, world.",
@@ -217,6 +231,49 @@ def write_json(path: Path, data) -> Path:
     return path
 
 
+def write_json_atomic(path: Path, data) -> Path:
+    """Write `data` to `path` so that a reader sees the old file or the whole new one: a file that exists is taken for a complete reference.
+    The temporary file is created with O_NOFOLLOW and O_EXCL, so a link or a file left at its name is never written through."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    payload = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    return path
+
+
+def read_small_regular(path: Path, limit: int) -> bytes:
+    """The bytes of a regular file of at most `limit` bytes. A link, a FIFO, a directory or a larger file raises OSError: this script runs where the
+    stage agent can put files, and a FIFO named like the prompt set would block the read."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(f"{path.name} is not a regular file")
+    if st.st_size > limit:
+        raise OSError(f"{path.name} is larger than {limit} bytes")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise OSError(f"{path.name} grew past {limit} bytes while it was read")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def write_text(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -239,6 +296,8 @@ def load_config() -> dict:
         fail(f"this script's directory {HERE_DIR} is not inside run_dir {run_dir}; copy it into "
              "the stage directory and run it from there")
     fidelity_setting(cfg)
+    if agreement_setting(cfg):
+        load_agreement_prompts()          # a missing or unusable prompt set stops the script before the model loads
     return cfg
 
 
@@ -653,6 +712,125 @@ def prompt_sha(prompt_ids: list) -> str:
     return hashlib.sha256(json.dumps(prompt_ids, separators=(",", ":")).encode()).hexdigest()
 
 
+def agreement_setting(cfg: dict) -> bool:
+    """Whether the config asks for the agreement set's reference. The key is missing, false or true; any other value stops the script before the
+    model loads (exit 2): 1, "yes" and null are mistakes that would otherwise turn the set on or off silently."""
+    if "agreement_set" not in cfg:
+        return False
+    value = cfg["agreement_set"]
+    if type(value) is not bool:
+        fail(f"reference_config.json agreement_set must be true or false; got {str(value)[:40]!r}")
+    return value
+
+
+def agreement_prompt_problems(data) -> list:
+    """Why `data` is not a usable agreement prompt set (empty when it is). A copy of orchard/agreement_core.py prompt_set_problems: this script
+    cannot import orchard, and a test holds the two to the same verdict."""
+    if not isinstance(data, dict) or not isinstance(data.get("prompts"), list):
+        return ["the prompt set has no prompts list"]
+    out, seen = [], set()
+    if len(data["prompts"]) < AGREEMENT_MIN_PROMPTS:
+        out.append(f"the prompt set has {len(data['prompts'])} prompts and at least {AGREEMENT_MIN_PROMPTS} are needed")
+    for i, p in enumerate(data["prompts"]):
+        ok = (isinstance(p, dict) and isinstance(p.get("id"), str) and p["id"] and isinstance(p.get("kind"), str)
+              and isinstance(p.get("messages"), list) and p["messages"]
+              and all(isinstance(m, dict) and isinstance(m.get("role"), str) and isinstance(m.get("content"), str) for m in p["messages"]))
+        if not ok:
+            out.append(f"prompt {i} needs a string id, a string kind and a non-empty messages list of role and content")
+            continue
+        if p["id"] in seen:
+            out.append(f"duplicate prompt id {p['id']!r}")
+        seen.add(p["id"])
+    return out
+
+
+def load_agreement_prompts() -> tuple:
+    """(the prompt set, the sha256 of the file's bytes) from `agreement_prompts.json` next to this script. Exits 2 when the file is missing,
+    too large, not JSON or not a usable set: the stage 2 and 4 check names the set by this hash, so a reference made from another file is useless."""
+    path = HERE_DIR / AGREEMENT_PROMPTS_NAME
+    try:
+        raw = read_small_regular(path, AGREEMENT_FILE_MAX_BYTES)
+    except OSError as exc:
+        fail(f"reference_config.json asks for the agreement set (agreement_set), but {path} cannot be read ({exc.strerror or exc}). "
+             f"Copy {AGREEMENT_PROMPTS_NAME} from orchard/skills/weights-swap-templates next to this script.")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:                 # UnicodeDecodeError is a ValueError
+        fail(f"{path} is not JSON: {exc}")
+    problems = agreement_prompt_problems(data)
+    if problems:
+        fail(f"{path} has problems: " + "; ".join(problems))
+    return data, hashlib.sha256(raw).hexdigest()
+
+
+def agreement_render(tokenizer, prompt: dict) -> tuple:
+    """(prompt text, whether the chat template was used) for one prompt of the set. A tokenizer with no chat template gets the prompt's `text`
+    when it has one and else its messages' contents on separate lines."""
+    if getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(prompt["messages"], tokenize=False, add_generation_prompt=True), True
+    text = prompt.get("text")
+    return (text if isinstance(text, str) and text else "\n".join(m["content"] for m in prompt["messages"])), False
+
+
+def agreement_greedy(torch, model, tokenizer, prompt_ids: list, n: int, recompute_max: int = AGREEMENT_RECOMPUTE_MAX) -> dict:
+    """`n` greedy tokens after `prompt_ids` with the model's log-probability of each (log-softmax over the whole vocabulary). A prompt of at most
+    `recompute_max` tokens runs the whole sequence at every step with no cache, as the main reference does; a longer one keeps a key-value cache.
+    Returns {"generated_ids", "logprobs", "mode"}. A model that returns no logits or no cache raises."""
+    ids: list = []
+    logprobs: list = []
+    if len(prompt_ids) <= recompute_max:
+        seq = list(prompt_ids)
+        for _ in range(n):
+            logits = last_logits(torch, model, seq)
+            chosen = int(torch.argmax(logits))
+            logprobs.append(round(float(torch.log_softmax(logits, dim=-1)[chosen]), 6))      # finite: ok a torch scalar from log_softmax
+            ids.append(chosen)
+            seq.append(chosen)
+        return {"generated_ids": ids, "logprobs": logprobs, "mode": "recompute"}
+    past, feed = None, list(prompt_ids)
+    with torch.inference_mode():
+        for _ in range(n):
+            out = model(input_ids=torch.tensor([feed], dtype=torch.long), past_key_values=past, use_cache=True)
+            logits = getattr(out, "logits", None)
+            past = getattr(out, "past_key_values", None)
+            if logits is None or past is None:
+                raise RuntimeError(f"{type(model).__name__} returned no {'logits' if logits is None else 'key-value cache'}")
+            row = logits[0, -1].float()
+            chosen = int(torch.argmax(row))
+            logprobs.append(round(float(torch.log_softmax(row, dim=-1)[chosen]), 6))          # finite: ok a torch scalar from log_softmax
+            ids.append(chosen)
+            feed = [chosen]
+    return {"generated_ids": ids, "logprobs": logprobs, "mode": "key-value cache"}
+
+
+def agreement_reference(torch, model, tokenizer, prompts_path: Path, n: int = AGREEMENT_TOKENS, recompute_max: int = AGREEMENT_RECOMPUTE_MAX) -> dict:
+    """Decode every prompt of the set and write `evidence/reference/agreement-reference.json`. The file is written only when every prompt
+    finished: the supervisor takes the file's presence for a complete reference, so a failure writes `agreement-reference-error.json` instead
+    and the record it returns says `complete` false with the reason. The stage's verdict does not depend on this reference."""
+    raw = read_small_regular(Path(prompts_path), AGREEMENT_FILE_MAX_BYTES)
+    prompts = json.loads(raw.decode("utf-8"))["prompts"]
+    entries, started = [], time.time()
+    doc = {"prompt_set_sha256": hashlib.sha256(raw).hexdigest(), "n_new_tokens": n,
+           "decode": "greedy argmax; a prompt of at most %d tokens runs the whole sequence at every step, a longer one uses the key-value cache" % recompute_max}
+    for p in prompts:
+        try:
+            text, templated = agreement_render(tokenizer, p)
+            prompt_ids = [int(i) for i in tokenizer(text, add_special_tokens=False)["input_ids"]]
+            run = agreement_greedy(torch, model, tokenizer, prompt_ids, n, recompute_max)
+        except Exception as exc:  # noqa: BLE001 - recorded, and the stage goes on without this reference
+            doc.update({"complete": False, "seconds": round(time.time() - started, 1), "entries_done": [e["id"] for e in entries],
+                        "error": f"prompt {p['id']!r} failed: {type(exc).__name__}: {exc}"[:600]})
+            write_json(REFERENCE / AGREEMENT_ERROR_FILE, doc)
+            return doc
+        entries.append({"id": p["id"], "kind": p["kind"], "chat_template_used": templated, "prompt_ids": prompt_ids,
+                        "generated_ids": run["generated_ids"], "generated_text": tokenizer.decode(run["generated_ids"]),
+                        "logprobs": run["logprobs"], "decode_mode": run["mode"]})
+        say(f"agreement reference: {p['id']} done ({len(prompt_ids)} prompt tokens, {run['mode']}); {time.time() - started:.1f} s so far")
+    doc.update({"complete": True, "entries": entries})
+    write_json_atomic(REFERENCE / AGREEMENT_FILE, doc)         # no timing in the file: a rerun on the same model writes the same bytes
+    return {**doc, "seconds": round(time.time() - started, 1)}
+
+
 def has_thai_tokens(tokenizer) -> bool:
     """True when some token of a Thai sample decodes to a whole Thai character."""
     ids = tokenizer(THAI_SAMPLE, add_special_tokens=False)["input_ids"]
@@ -762,6 +940,13 @@ def main() -> int:
         say(f"wrote evidence/reference/{FIDELITY_FILE} ({len(fidelity_run['ids'])} of {fidelity_n} tokens, "
             f"{fidelity_run['seconds']} s)" + (f"; stopped: {fidelity_run['error']}" if "error" in fidelity_run else ""))
 
+    agreement_run = None
+    if agreement_setting(cfg):
+        say(f"decoding the agreement set's CPU reference ({AGREEMENT_TOKENS} greedy tokens for each prompt)")
+        agreement_run = agreement_reference(torch, model, tokenizer, HERE_DIR / AGREEMENT_PROMPTS_NAME)
+        say(f"wrote evidence/reference/{AGREEMENT_FILE} ({len(agreement_run.get('entries', []))} prompts, {agreement_run['seconds']} s)"
+            if agreement_run["complete"] else f"agreement reference stopped: {agreement_run['error']}")
+
     card_ok, card_note = card_check(snapshot, main_run["text"])
     write_text(EVIDENCE / "card-check.txt",
                card_note + f"\n\ngenerated text: {main_run['text']!r}\n")
@@ -813,6 +998,11 @@ def main() -> int:
     if fidelity_run is not None:
         summary["fidelity_reference"] = {"asked": fidelity_n, "tokens": len(fidelity_run["ids"]), "complete": fidelity_run["complete"],
                                          "seconds": fidelity_run["seconds"], **({"error": fidelity_run["error"]} if "error" in fidelity_run else {})}
+    if agreement_run is not None:
+        summary["agreement_reference"] = {"prompts": len(agreement_run.get("entries", [])), "tokens_each": AGREEMENT_TOKENS,
+                                          "complete": agreement_run["complete"], "seconds": agreement_run["seconds"],
+                                          "prompt_set_sha256": agreement_run["prompt_set_sha256"],
+                                          **({"error": agreement_run["error"]} if "error" in agreement_run else {})}
     write_json(EVIDENCE / "summary.json", summary)
     ref = {"verdict": verdict, "environment": env, "checks": checks,
            "draft": "written by reference_gate.py; the agent reviews each note",
@@ -821,6 +1011,8 @@ def main() -> int:
                                    "top5_logits": rel(REFERENCE / "top5-logits.json")}}
     if fidelity_run is not None:
         ref["reference_artifacts"]["fidelity_ids"] = rel(REFERENCE / FIDELITY_FILE)
+    if agreement_run is not None and agreement_run["complete"]:
+        ref["reference_artifacts"]["agreement_reference"] = rel(REFERENCE / AGREEMENT_FILE)
     write_json(HERE_DIR / "reference.json", ref)
     say(f"wrote evidence/summary.json and reference.json: verdict {verdict}")
     return 0
