@@ -1,0 +1,2 @@
+target = "0.9.198"
+summary = "The kernel probe skips the authoritative check, and ends the run, when the sweep before it reports a helper that may still run or cannot say what is left (issue 477)."

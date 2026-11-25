@@ -1155,6 +1155,25 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     return records
 
 
+BLOCKED_HELPER = "blocked-helper"      # an attempt's status when its authoritative check did not run because a helper may still run (issue 477)
+
+
+def helper_block_reason(swept, problems) -> str | None:
+    """Why the authoritative check must not run, or None. `swept` are the sweep's records and `problems` the reasons a sweep could not vouch
+    for its result. A record whose `stopped` is False is a helper that may still run; a problem is a sweep that cannot say what is left.
+    Either one blocks: a surviving helper can change the attempt's files while the check reads them."""
+    live = [r.get("pid") for r in swept or [] if isinstance(r, dict) and r.get("stopped") is False]
+    notes = [p for p in problems or [] if isinstance(p, str) and p]
+    if not live and not notes:
+        return None
+    parts = []
+    if live:
+        parts.append("a helper from the earlier sweep may still run (pid" + ("s " if len(live) != 1 else " ") + ", ".join(str(p) for p in live) + ")")
+    if notes:
+        parts.append("the sweep could not vouch that nothing was left: " + "; ".join(notes[:3]))
+    return "the check did not run because " + " and ".join(parts)
+
+
 def _sweep_noting(adir, problems: list, into: list) -> None:
     """sweep_strays over an attempt directory. The records go into `into` as they are found and the reasons the sweep could not vouch for its
     result into `problems`, also when an interrupt ends the sweep: a caller that passes the lists the saved attempt reads from keeps both."""
@@ -1287,8 +1306,14 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         # command's own sweep stopped (agent.spawn_checked) are no longer there to find, so the tools' records come first.
         _sweep_noting(adir, tools.sweep_problems, tools.swept)
     agent_wall_s = round(time.monotonic() - started, 2)
+    # A helper the sweep could not confirm stopped, or a sweep that cannot vouch for what is left, may still change the attempt's files while
+    # the check reads them, and the attempt could then report a pass (issue 477). The check does not run; the attempt says why.
+    blocked = helper_block_reason(tools.swept, tools.sweep_problems)
     try:
-        check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+        if blocked:
+            check = {"passed": False, "category": "helper_may_run", "first_line": blocked, "sets": [], "violations": [], "kernel_sha256": None}
+        else:
+            check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     finally:
         # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
         # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
@@ -1298,7 +1323,8 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
     measures = set_measures(sets)
     passed = check.get("passed") is True
     attempt = {
-        "op": op, "attempt": n, "status": outcome.status, "status_detail": outcome.detail or control.detail,
+        "op": op, "attempt": n, "status": BLOCKED_HELPER if blocked else outcome.status,
+        "status_detail": blocked or outcome.detail or control.detail, "check_skipped": blocked,
         "turns": outcome.turns, "agent_wall_s": agent_wall_s, "passed_sim": passed,
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
@@ -2765,6 +2791,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     held = (record.get("agent_hw") or {}).get("stopped")
                     if held:
                         stopped, code = f"an agent's hardware call left a chip held: {held}", EXIT_BLOCKED
+                        break
+                    # A helper that may still run could change the next attempt's files (issue 477): end the run here, so no later attempt
+                    # and no hardware phase starts beside it.
+                    skipped = record.get("check_skipped")
+                    if isinstance(skipped, str) and skipped:
+                        stopped, code = f"attempt {n}: {skipped}", EXIT_BLOCKED
                         break
                 if getattr(args, "phase", "sim") == "hw" and not stopped:
                     where, hw_started = "the hardware phase", True
