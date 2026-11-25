@@ -20,7 +20,9 @@ How an entry is verified (`verify`):
   line is in the signature. This catches an invented argument.
 - `status` (TT-Lang entries) must be supported: `compiles on hardware` needs the call in the `hardware` root and an `evidence` field;
   `simulator only` needs a name or argument the `hardware` root lacks, and the entry lists it in `hardware_absent`; and
-  `hardware signature only` says the signature is in the hardware package and no compile was shown.
+  `hardware signature only` says the signature is in the hardware package and no compile was shown. Since issue 801 these claims are also
+  judged by recorded compiles with the hardware package's own compiler (`verify` takes them; orchard/cheat_compiles.py): a name found in the
+  package's files does not show the compiler takes the call.
 - A mistake may carry `checks`: each check says an argument a coder would guess is absent from a root (or present, for a correction).
 - `reported` is a separate, optional list of pitfalls another project wrote down (symptom, fix, source, and a `reproduced` flag that is true only
   when it was seen on our pin). `verify` makes no claim about them, and `render` prints them under their own heading with a label per item, so a
@@ -36,7 +38,7 @@ import json
 import re
 from pathlib import Path
 
-from orchard import safeio
+from orchard import cheat_compiles, safeio
 
 SCHEMA = "orchard-cheat-sheet/1"
 SHEET_MAX_BYTES = 400_000
@@ -502,9 +504,14 @@ def usage_keywords(usage: str, name: str) -> tuple[set, bool]:
     return kw, seen
 
 
-def verify(sheet: dict, indexes: dict) -> list[str]:
+def verify(sheet: dict, indexes: dict, compiles: dict | None = None, hardware_target: dict | None = None) -> list[str]:
     """Problems found by checking `sheet` against `indexes` (root name to Index). An empty list means every entry's name and arguments were found.
-    A root that was claimed and has no index is a problem: nothing was checked for it."""
+    A root that was claimed and has no index is a problem: nothing was checked for it.
+
+    For the TT-Lang sheet the chip claims are also judged by recorded compiles (issue 801): `compiles` is the data of orchard/cheat_compiles.py
+    and `hardware_target` is the identity of the hardware package (ttlang_hwcompile.package_identity). A name found in the package's files does
+    not show that the chip compiler takes the call, so a call is never passed on that evidence alone: without `compiles` or `hardware_target`
+    the result says what was not checked."""
     problems = shape_problems(sheet)
     if problems:
         return problems
@@ -543,6 +550,8 @@ def verify(sheet: dict, indexes: dict) -> list[str]:
                 problems.append(f"{where}: the usage passes {k!r}, which the signature does not list")
         if sheet["sheet"] == "ttlang":
             problems += _status_problems(entry, indexes)
+    if sheet["sheet"] == "ttlang":
+        problems += _compile_problems(sheet, compiles, hardware_target)
     for i, m in enumerate(sheet.get("mistakes", [])):
         for c in m.get("checks", []):
             index = indexes.get(c["root"])
@@ -568,6 +577,16 @@ def verify(sheet: dict, indexes: dict) -> list[str]:
                 if a not in args:
                     problems.append(f"mistake {i}: {a!r} is claimed present in {c['name']} in {c['root']!r} but is not")
     return problems
+
+
+def _compile_problems(sheet: dict, compiles, hardware_target) -> list[str]:
+    """The chip claims judged by recorded compiles of the hardware package; a check with no record says what it did not check."""
+    if compiles is None:
+        return ["no compile results were given, so the chip claims were judged by the package's files alone, which cannot show that the "
+                "compiler takes a call"]
+    if hardware_target is None:
+        return ["the hardware package was not identified, so its compile results could not be found"]
+    return cheat_compiles.claim_problems(sheet, compiles, hardware_target)
 
 
 def _status_problems(entry: dict, indexes: dict) -> list[str]:

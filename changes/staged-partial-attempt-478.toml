@@ -1,0 +1,2 @@
+target = "0.9.198"
+summary = "An interrupted or crashed staged kernel attempt saves a partial record (finished stages and the helpers the sweeps removed) and attaches it to the exception (issue 478)."
