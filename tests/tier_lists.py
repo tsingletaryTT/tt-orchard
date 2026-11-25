@@ -34,6 +34,7 @@ WHOLE_REPO: dict[str, tuple[str, ...]] = {
 NOT_GUARDS: dict[str, str] = {
     "tests/test_expert_skew.py": "the script reads docs/*.md only in read_text_chunks, which the tests never call",
     "tests/test_fidelity_score.py": "the script reads docs/*.md only in read_prompts, which the tests never call",
+    "tests/test_fidelity_floors.py": "the script reads docs/*.md only in read_prompts, which the tests never call",
     "tests/test_text_package.py": "it walks a package the test builds in a temporary directory, not the repository",
 }
 
