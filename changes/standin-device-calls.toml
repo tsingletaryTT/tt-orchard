@@ -1,0 +1,3 @@
+target = "0.9.205"
+summary = "The torch stand-in of ttnn has the device-open, fabric and trace calls of the stage 2 board path, and accepts a float32 or float16 host tensor when a float dtype is given."
+kind = "fix"
