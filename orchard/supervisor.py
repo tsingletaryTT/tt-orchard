@@ -130,7 +130,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
-from orchard import audio_reference_env, audio_runtime, audio_stage0, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
+from orchard import audio_reference_env, audio_runtime, audio_stage0, quantized_copy, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
@@ -213,6 +213,7 @@ STALL_CODE = "agent-stuck"     # the block code that leaves the coder up with --
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+QUANTIZED_COPY_NOTED = "quantized copy noted"      # the ledger decision written when stage 0's evidence shows a quantized copy of the nearest model (issue 63)
 # CLASS_UNKNOWN (the fixed start of the unknown-class pause reason) lives in orchard/classes.py, so status.py can read it first without this module.
 
 
@@ -227,9 +228,15 @@ def class_unknown_reason(reasons) -> str:
     return CLASS_UNKNOWN + (f": {shown}" if shown else "") + "; a person decides whether to go on"
 
 
+def full_port_reason(copy) -> str:
+    """The full-port pause reason. For a model that stage 0 found to be a quantized copy of the nearest model (`orchard/quantized_copy.py`, issue 63) the fixed
+    text is followed by one sentence that says so; the class and the pause kind are the same."""
+    return FULL_PORT if not copy else FULL_PORT + ". " + quantized_copy.sentence(copy)
+
+
 def is_full_port_pause(reason) -> bool:
-    """Whether a pause reason is the full-port pause (the older text) or the unknown-class pause."""
-    return reason == FULL_PORT or (isinstance(reason, str) and reason.startswith(CLASS_UNKNOWN))
+    """Whether a pause reason is the full-port pause (the older text, or with the quantized-copy sentence after it) or the unknown-class pause."""
+    return (reason == FULL_PORT or (isinstance(reason, str) and (reason.startswith(CLASS_UNKNOWN) or reason.startswith(FULL_PORT + ". "))))
 
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
@@ -1436,7 +1443,7 @@ class Supervisor:
                 continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 reason = (class_unknown_reason(delta_path_reasons(self.run_dir)) if run_class(self.ledger.read(), self.run_dir) == "unknown"
-                          else FULL_PORT)
+                          else full_port_reason(self._quantized_copy_note()))
                 self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
             if p.next_stage == 5 and self._full_port_stages_unbuilt():
@@ -1507,6 +1514,15 @@ class Supervisor:
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and (is_full_port_pause(e["data"].get("reason")) or e["data"].get("reason") == RESTRICTED_HEAD) for e in entries)
+
+    def _quantized_copy_note(self) -> dict | None:
+        """Issue 63: what stage 0 saw when the model is a quantized copy of the nearest model (`orchard/quantized_copy.py`), or None. It is read from stage 0's
+        own evidence and the model's config, is only a hint for the pause text, and is written to the ledger once so the operator's record shows it. A run
+        directory that cannot be read gives None, so the plain message stands."""
+        copy = quantized_copy.from_run(self.run_dir, self.inputs.get("model"))
+        if copy:
+            self.ledger.append("decision", 2, decision=QUANTIZED_COPY_NOTED, format=copy["format"], nearest=copy["nearest"], signals=copy["signals"])
+        return copy
 
     def _full_port_stages_unbuilt(self) -> bool:
         """Whether a full-port run pauses after stage 4 because the stages after it are not built. Stages 3 (the port on the configured chips),

@@ -1,0 +1,2 @@
+target = "0.9.204"
+summary = "The full-port pause says when stage 0 found a quantized copy of the nearest model (FP8, NVFP4, GPTQ, AWQ), with what it saw, and records it in the ledger; the class stays full-port until a hardware test of the format (issue 63)."
