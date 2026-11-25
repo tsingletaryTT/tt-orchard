@@ -131,17 +131,19 @@ def shape(config) -> Shape:
             raise TierPlanError(f"unknown family: {exc}") from exc
         if d.moe_layers[i]:
             moe += 1
-            router += d.hidden * d.routed_experts
+            router += d.hidden * d.routed_experts + df._latent_params(d)       # the router, and the latent projections around the experts if any
             shared += df._mlp_params(d, d.shared_intermediate) if d.shared_intermediate else 0
         else:
             dense += df._mlp_params(d, d.intermediate)
     table = d.hidden * d.vocab
-    expert = df._mlp_params(d, d.moe_intermediate)
+    expert = df._expert_params(d)
     for name, n in (("attention", attention), ("dense MLP", dense), ("router", router), ("shared experts", shared), ("embedding table", table),
                     ("routed experts", d.routed_experts * moe * expert)):
         if n > MAX_GROUP_PARAMS:
             raise TierPlanError(f"the config describes more than {MAX_GROUP_PARAMS:.0e} parameters in the {name}; no real model is that large")
     counts = [("attention heads", d.heads, 1), ("key-value heads", d.kv_heads, 1)]
+    if d.swa_heads:
+        counts.append(("sliding-window attention heads", d.swa_heads, 1))
     if d.linear:
         counts += [("linear-attention key heads", d.linear["key_heads"], 1), ("linear-attention value heads", d.linear["value_heads"], 1)]
     if d.mamba:
@@ -176,6 +178,12 @@ def caveats(config) -> list[str]:
         out.append("the sparse-attention indexer (indexer_ keys): its weights are not counted")
     if has("ngram_", "ple_", "heads_per_ngram", "make_ngram"):
         out.append("a hashed n-gram embedding (ngram_ and ple_ keys): its table is not counted and can be large")
+    if has("engram_"):
+        table = mc.engram_table(cfg)
+        size = (f": {table['params'] / 1e9:.1f}B parameters in {table['layers']} layers, {table['bytes'] / (1 << 30):.1f} GiB as "
+                f"{'FP8 rows with a bf16 scale each' if table['fp8'] else 'bf16'}, "
+                f"kept in host memory by the published bundle (the card's figure; the plan does not place it)") if table else " (the table sizes in the config could not be read)"
+        out.append("an Engram n-gram memory (engram_ keys)" + size)
     if has("mtp_num_hidden_layers", "num_nextn_predict_layers"):
         out.append("a multi-token-prediction layer (mtp keys): its weights are not counted")
     if isinstance(cfg.get("loop_config"), dict):

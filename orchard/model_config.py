@@ -87,6 +87,8 @@ class ModelDims:
     linear: dict = field(default_factory=dict)   # linear_attention shapes: key_heads, value_heads, key_dim, value_dim, conv_kernel
     mamba: dict = field(default_factory=dict)    # Mamba-2 mixer shapes (heads, head_dim, state, groups, conv_kernel), empty when the model has none
     mla: dict = field(default_factory=dict)      # multi-latent attention shapes, empty when the model has none
+    expert_hidden: int = 0                  # the width the routed experts work in when it is not the hidden size (Hy4-flash latent MoE: 1,536 against 3,072), else 0
+    swa_heads: int = 0                      # query heads of the sliding-window layers when the config gives them apart from `num_attention_heads` (Hy4-flash: 64 against 32), else 0
     mlp_projections: int = 3                # matrices per MLP or expert: 3 for a gated MLP, 2 for the families in TWO_PROJECTION_MLP_TYPES
     keys: frozenset = frozenset()           # every key of the flat config whose value is not null, for detecting mixers that have no layer-type name
     loop_passes: tuple = ()                 # how many times each layer runs for one token (all 1 without a `loop_config`); () only on a hand-built ModelDims
@@ -122,8 +124,11 @@ def dims(config) -> ModelDims:
     vocab = _num(cfg, "vocab_size")
     kv_heads = _kv_heads(cfg, heads)
     mla = _mla(cfg)
-    # without a head_dim: multi-latent attention heads are as wide as the query/key (nope + rope) parts, other models split the hidden size
-    head_dim = _num(cfg, "head_dim", default=(mla["qk_nope_head_dim"] + mla["qk_rope_head_dim"]) if mla else max(1, hidden // heads))
+    # multi-latent attention heads are as wide as the query/key (nope + rope) parts. A `head_dim` key does not change that: Hy4-flash's config
+    # carries head_dim 64, which is its rope part (qk_head_dim is 256). Other models take the key, or split the hidden size.
+    head_dim = (mla["qk_nope_head_dim"] + mla["qk_rope_head_dim"]) if mla else _num(cfg, "head_dim", default=max(1, hidden // heads))
+    swa_heads = _swa_heads(cfg, mla)
+    expert_hidden = _num(cfg, "routed_expert_hidden_size", default=0, lo=1) if cfg.get("routed_expert_hidden_size") is not None else 0
 
     expert_key = _first(cfg, ("num_experts", "n_routed_experts", "num_local_experts"))
     experts = _num(cfg, expert_key, lo=0) if expert_key else 0      # a count of 0 (Granite-4.0-H dense sizes) says there are none
@@ -175,7 +180,7 @@ def dims(config) -> ModelDims:
         hidden=hidden, intermediate=intermediate, layers=layers, heads=heads, kv_heads=kv_heads, head_dim=head_dim, vocab=vocab,
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
-        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mamba=mamba, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None),
+        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mamba=mamba, mla=mla, swa_heads=swa_heads, expert_hidden=expert_hidden if expert_hidden != hidden else 0, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None),
         loop_passes=loop_passes, loop_variable=loop_variable)
 
 
@@ -236,6 +241,53 @@ def _mla(cfg: dict) -> dict:
     return {"kv_lora_rank": _num(cfg, "kv_lora_rank"), "q_lora_rank": _num(cfg, "q_lora_rank", default=0, lo=0),
             "qk_nope_head_dim": _num(cfg, "qk_nope_head_dim"), "qk_rope_head_dim": _num(cfg, "qk_rope_head_dim"),
             "v_head_dim": _num(cfg, "v_head_dim")}
+
+
+def _swa_heads(cfg: dict, mla: dict) -> int:
+    """The query heads of the sliding-window layers of an MLA model that gives them apart from `num_attention_heads` (`swa_num_attention_heads`),
+    or 0. The sliding-window layers must then use the same latent shapes as the others (`swa_qk_nope_head_dim`, `swa_qk_rope_head_dim` and
+    `swa_v_head_dim` equal the plain ones when present): the counting reads one set of shapes, so a model whose sliding layers differ is refused
+    instead of being counted with the wrong numbers."""
+    if not mla or cfg.get("swa_num_attention_heads") is None:
+        return 0
+    for swa_key, plain_key in (("swa_qk_nope_head_dim", "qk_nope_head_dim"), ("swa_qk_rope_head_dim", "qk_rope_head_dim"), ("swa_v_head_dim", "v_head_dim")):
+        if cfg.get(swa_key) is not None and _num(cfg, swa_key) != mla[plain_key]:
+            raise ModelConfigError(f"model config {swa_key} differs from {plain_key}: the counting reads one set of latent shapes for the sliding-window layers too")
+    return _num(cfg, "swa_num_attention_heads")
+
+
+def engram_table(cfg: dict) -> dict | None:
+    """The Engram memory of a config (Hy4-flash: hashed 2-gram and 3-gram embedding tables kept in host memory), or None when the config has no
+    `engram_*` table description or the description cannot be read. `cfg` is the language model's settings (`text_config`).
+
+    Rows are the sum of every head's vocabulary over every layer and n-gram order in `engram_layer_head_vocab_sizes`; one row holds
+    `engram_n_embed_per_ngram / engram_n_head_per_ngram` values. With `engram_fp8_embedding` a value takes one byte and each row carries a bf16 scale
+    (two bytes); without it a value takes two bytes. These are the config's own sizes, not a measurement of a loaded model."""
+    tables = cfg.get("engram_layer_head_vocab_sizes")
+    if not isinstance(tables, dict) or not tables:
+        return None
+    try:
+        embed, heads = _num(cfg, "engram_n_embed_per_ngram"), _num(cfg, "engram_n_head_per_ngram")
+        if embed % heads:
+            return None
+        rows, orders, per_order = 0, set(), set()
+        for orders_of_layer in tables.values():
+            if not isinstance(orders_of_layer, list) or not orders_of_layer:
+                return None
+            orders.add(len(orders_of_layer))
+            for head_vocabs in orders_of_layer:
+                if not isinstance(head_vocabs, list) or not head_vocabs:
+                    return None
+                per_order.add(len(head_vocabs))
+                for v in head_vocabs:
+                    rows += safeio.whole_number(v, lo=1, hi=1 << 40, what="an engram head vocabulary")
+    except (ModelConfigError, safeio.BadValue):
+        return None
+    values = embed // heads
+    params = rows * values
+    fp8 = cfg.get("engram_fp8_embedding") is True
+    return {"layers": len(tables), "orders": orders.pop() if len(orders) == 1 else None, "heads_per_order": per_order.pop() if len(per_order) == 1 else None,
+            "values_per_row": values, "rows": rows, "params": params, "fp8": fp8, "bytes": params + 2 * rows if fp8 else params * 2}
 
 
 def _layer_types(cfg: dict, layers: int) -> tuple:
