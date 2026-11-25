@@ -1,0 +1,2 @@
+target = "0.9.198"
+summary = "The helper sweep waits, with a bound, until each helper it sent SIGSTOP shows as stopped before it scans again, and reports an incomplete sweep when one does not (issue 476)."
