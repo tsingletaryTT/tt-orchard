@@ -36,6 +36,13 @@ class Tensor:
         self.shape = (1,) + tuple(t.shape[1:]) if chips else tuple(t.shape)
 
 
+# The port check's weight scan (port_check.weight_kind) calls an object a ttnn tensor only when the first part of its class's module name is `ttnn`
+# (it reads the type and its attributes and imports nothing). A class takes its module name from the name this file was loaded under, and the CPU
+# run loads it as `orchard_cpu_ttnn`, so without this line every stand-in tensor failed that test, the scan walked into it and counted its inner
+# torch tensor as a host weight: a port that held every weight as a stand-in device tensor showed 0 device elements. The real class reports `ttnn`.
+Tensor.__module__ = "ttnn"
+
+
 def _block_float(x: torch.Tensor, mant_bits: int) -> torch.Tensor:
     """Round to a shared power-of-two exponent per 16 values along the last dimension, each value keeping `mant_bits` mantissa bits and a sign (the block-float
     formats of the chip, approximately: this is the rounding of scripts/fidelity_score.py)."""

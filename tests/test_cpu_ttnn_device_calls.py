@@ -127,3 +127,57 @@ def test_a_bfloat16_host_tensor_with_no_dtype_is_uploaded_as_before(tt):
 def test_token_ids_still_need_an_integer_tensor_in_row_major_layout(tt):
     with pytest.raises(TypeError):
         tt.from_torch(torch.ones(1, 4, dtype=torch.float32), dtype=tt.uint32, layout=tt.ROW_MAJOR_LAYOUT, device=tt.open_device(device_id=0))
+
+
+# ---- what the template's weight scan makes of the stand-in's tensors --------------------------------------------------------------------------
+
+def load_as(name):
+    """The stand-in loaded under `name`, as port_check.load_stand_in loads it (`orchard_cpu_ttnn`) or as a rehearsal of the board path that puts it in
+    sys.modules as `ttnn` loads it. A class takes its module name from the name the file was loaded under."""
+    spec = importlib.util.spec_from_file_location(name, TEMPLATES / "cpu_ttnn.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.make()
+
+
+@pytest.mark.parametrize("name", ["orchard_cpu_ttnn", "ttnn", "some_other_loader_name"])
+def test_the_weight_scan_calls_a_stand_in_tensor_a_ttnn_device_tensor_whatever_the_file_was_loaded_as(check, name):
+    tt = load_as(name)
+    w = upload(tt, torch.ones(32, 64, dtype=torch.bfloat16))
+    assert check.weight_kind(w) == ("device", 32 * 64, (32, 64), "ttnn")
+
+
+def test_a_tensor_an_op_returns_is_a_device_tensor_to_the_scan_too(check):
+    tt = load_as("orchard_cpu_ttnn")
+    x = upload(tt, torch.ones(1, 1, 32, 64, dtype=torch.bfloat16))
+    w = upload(tt, torch.ones(64, 32, dtype=torch.bfloat16))
+    assert check.weight_kind(tt.linear(x, w))[0] == "device"
+
+
+def test_a_sharded_stand_in_tensor_is_one_chips_slice_of_device_elements(check):
+    tt = load_as("orchard_cpu_ttnn")
+    dev = tt.open_mesh_device(tt.MeshShape(1, 2))
+    w = tt.from_torch(torch.ones(2, 16, 32, dtype=torch.bfloat16), dtype=tt.bfloat16, layout=tt.TILE_LAYOUT, device=dev, mesh_mapper=tt.ShardTensorToMesh(dev, dim=0))
+    assert check.weight_kind(w)[0] == "device"
+
+
+def test_a_port_that_holds_stand_in_weights_has_no_host_weight_elements_in_the_scan(check):
+    tt = load_as("orchard_cpu_ttnn")
+
+    class Port:
+        pass
+    port = Port()
+    port.weights = {"layer0": upload(tt, torch.ones(32, 32, dtype=torch.bfloat16)), "layer1": upload(tt, torch.ones(32, 32, dtype=torch.bfloat16))}
+    scan = check.scan_weights(port, labels=["model"])
+    assert scan["device_elements"] == 2 * 32 * 32 and scan["host_elements"] == 0 and scan["device_tensors"] == 2
+
+
+def test_a_port_that_keeps_a_real_torch_weight_still_counts_it_as_host(check):
+    tt = load_as("orchard_cpu_ttnn")
+
+    class Port:
+        pass
+    port = Port()
+    port.weights = {"on_device": upload(tt, torch.ones(32, 32, dtype=torch.bfloat16)), "kept": torch.ones(32, 32)}
+    scan = check.scan_weights(port, labels=["model"])
+    assert scan["device_elements"] == 32 * 32 and scan["host_elements"] == 32 * 32
