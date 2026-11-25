@@ -1,0 +1,3 @@
+target = "0.9.205"
+summary = "The audio chip test reports a failure, with a reason, when its config lists no runs; it used to print ok for a test that ran nothing."
+kind = "fix"
