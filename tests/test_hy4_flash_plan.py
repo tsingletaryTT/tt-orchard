@@ -244,3 +244,143 @@ def test_an_expert_width_equal_to_the_hidden_size_is_not_a_latent_moe():
     d = mc.dims(cfg)
     assert d.expert_hidden == 0 and df._latent_params(d) == 0
     assert df._expert_params(d) == 3 * 3072 * 1536
+
+
+# ---- a KV estimate for latent attention (learning 3) ----
+# The plan holds back a flat 4 GiB of KV cache for every model. A latent-attention model caches one small row per token per full-attention layer
+# (kv_lora_rank + qk_rope_head_dim values), the same on every die, and a ring of `sliding_window` rows per user for each sliding-window layer.
+# Hy4-flash: 12 full-attention layers x 576 values x 2 bytes (bf16) x 202,752 tokens, plus 30 rings of 512 rows per user.
+import io
+import contextlib
+
+ROW = (512 + 64) * 2
+
+
+def test_the_kv_estimate_counts_latent_rows_of_the_full_layers_and_a_ring_per_sliding_layer():
+    e = tier_plan.kv_estimate(HY4, 202_752, 1)
+    assert e["row_bytes"] == ROW == 1152
+    assert e["full_layers"] == 12 and e["sliding_layers"] == 30 and e["window"] == 512
+    assert e["bytes"] == 12 * ROW * 202_752 + 30 * ROW * 512
+    assert e["bytes"] / (1 << 30) == pytest.approx(2.6268, abs=1e-3)
+
+
+def test_the_rings_grow_with_the_users_and_the_full_layers_do_not():
+    one, eight = tier_plan.kv_estimate(HY4, 202_752, 1), tier_plan.kv_estimate(HY4, 202_752, 8)
+    assert eight["bytes"] - one["bytes"] == 7 * 30 * ROW * 512
+
+
+def test_a_context_shorter_than_the_window_fills_each_ring_only_that_far():
+    e = tier_plan.kv_estimate(HY4, 100, 1)
+    assert e["bytes"] == 12 * ROW * 100 + 30 * ROW * 100
+
+
+def test_the_estimate_says_what_it_leaves_out():
+    assert "indexer" in tier_plan.kv_estimate(HY4, 1000, 1)["label"]
+
+
+def test_a_model_without_latent_attention_has_no_estimate():
+    assert tier_plan.kv_estimate(json.loads((FIX / "qwen3-coder-30b-a3b.json").read_text()), 1000, 1) is None
+
+
+def test_sliding_layers_with_no_usable_window_give_no_estimate():
+    cfg = copy.deepcopy(HY4)
+    cfg["text_config"]["sliding_window"] = None
+    assert tier_plan.kv_estimate(cfg, 1000, 1) is None
+    cfg["text_config"]["sliding_window"] = True
+    assert tier_plan.kv_estimate(cfg, 1000, 1) is None
+
+
+def test_the_budget_takes_the_whole_estimate_from_every_chip_not_a_share():
+    flat = tier_plan.budget_bytes(32.0, chips=4, reserve_gib=3.0, kv_gib=4.0)
+    est = tier_plan.budget_bytes(32.0, chips=4, reserve_gib=3.0, kv_gib=4.0, kv_per_chip_gib=2.5)
+    assert flat == pytest.approx((32 * tier_plan.USABLE_FRACTION - 3.0 - 1.0) * (1 << 30))
+    assert est == pytest.approx((32 * tier_plan.USABLE_FRACTION - 3.0 - 2.5) * (1 << 30))
+
+
+def test_a_plan_with_an_estimate_records_it_as_an_estimate_from_the_config():
+    est = tier_plan.kv_estimate(HY4, 202_752, 8)
+    res = tier_plan.plan(HY4, chips_list=(4,), chip_gib=32.0, reserve_gib=3.0, kv_gib=4.0, kv_estimate=est)
+    kv = res["inputs"]["kv_gib"]
+    assert kv["source"] == "estimate from the config" and kv["value"] == pytest.approx(est["bytes"] / (1 << 30))
+    assert res["kv_estimate"]["context_tokens"] == 202_752 and res["kv_estimate"]["users"] == 8
+    assert "on each chip" in tier_plan.render(res)
+
+
+def run_cli(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = tier_plan.main(list(argv), out)
+    return code, out.getvalue(), err.getvalue()
+
+
+FIXTURE = str(FIX / "hy4-flash.pinned.config.json")
+
+
+def test_the_command_takes_a_context_and_users_and_prints_the_estimate():
+    code, out, err = run_cli(FIXTURE, "--chips", "4", "--context", "202752", "--users", "8")
+    assert code == 0, err
+    assert "KV cache" in out and "estimate from the config" in out and "on each chip" in out
+
+
+def test_the_command_json_carries_the_estimate():
+    code, out, err = run_cli(FIXTURE, "--chips", "4", "--context", "202752", "--json")
+    assert code == 0, err
+    res = json.loads(out)
+    assert res["kv_estimate"]["bytes"] == 12 * ROW * 202_752 + 30 * ROW * 512
+
+
+def test_a_context_and_a_kv_allowance_together_are_refused():
+    code, out, err = run_cli(FIXTURE, "--chips", "4", "--context", "202752", "--kv-gib", "4")
+    assert code == 2 and "--context" in err and "--kv-gib" in err
+
+
+def test_users_without_a_context_are_refused():
+    code, out, err = run_cli(FIXTURE, "--chips", "4", "--users", "8")
+    assert code == 2 and "--users" in err and "--context" in err
+
+
+@pytest.mark.parametrize("flag,value", [("--context", "0"), ("--context", "-5"), ("--context", str(1 << 40)), ("--users", "0")])
+def test_a_context_or_user_count_that_is_not_a_sensible_whole_number_is_refused(flag, value):
+    argv = [FIXTURE, "--chips", "4", "--context", "1000"]
+    if flag == "--users":
+        argv += ["--users", value]
+    else:
+        argv = [FIXTURE, "--chips", "4", flag, value]
+    code, out, err = run_cli(*argv)
+    assert code == 2 and flag in err
+
+
+def test_a_context_for_a_model_without_latent_attention_keeps_the_flat_allowance_and_says_so():
+    code, out, err = run_cli(str(FIX / "qwen3-coder-30b-a3b.json"), "--chips", "4", "--context", "8192", "--json")
+    assert code == 0, err
+    res = json.loads(out)
+    assert res["inputs"]["kv_gib"]["source"] == "assumed constant" and "kv_estimate" not in res
+    assert any("no model-aware KV estimate" in n for n in res["notes"])
+
+
+def test_a_context_that_is_not_an_integer_is_refused_by_the_parser():
+    with contextlib.redirect_stderr(io.StringIO()), pytest.raises(SystemExit) as exc:
+        tier_plan.main([FIXTURE, "--chips", "4", "--context", "1e3"], io.StringIO())
+    assert exc.value.code == 2
+
+
+def test_a_latent_model_with_a_layer_type_outside_full_and_sliding_gets_no_estimate():
+    cfg = {"model_type": "x", "hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 4, "vocab_size": 100,
+           "intermediate_size": 128, "kv_lora_rank": 32, "q_lora_rank": 0, "qk_nope_head_dim": 16, "qk_rope_head_dim": 8, "v_head_dim": 16,
+           "layer_types": ["full_attention", "some_other_mixer"]}
+    assert tier_plan.kv_estimate(cfg, 1000, 1) is None
+    assert tier_plan.kv_estimate(dict(cfg, layer_types=["full_attention", "full_attention"]), 1000, 1) is not None
+
+
+def test_the_overhead_a_row_reports_is_the_reserve_plus_the_whole_estimate():
+    est = tier_plan.kv_estimate(HY4, 202_752, 8)
+    res = tier_plan.plan(HY4, chips_list=(4,), chip_gib=32.0, reserve_gib=3.0, kv_gib=4.0, kv_estimate=est)
+    expected = (3.0 + est["bytes"] / (1 << 30)) * (1 << 30)
+    assert all(r["assumed_overhead_bytes"] == pytest.approx(expected) for r in res["rows"])
+
+
+def test_without_a_context_the_flat_allowance_stays_for_a_latent_model_too():
+    code, out, err = run_cli(FIXTURE, "--chips", "4", "--json")
+    assert code == 0, err
+    res = json.loads(out)
+    assert "kv_estimate" not in res and res["inputs"]["kv_gib"]["source"] == "assumed constant" and res["inputs"]["kv_gib"]["value"] == 4.0

@@ -52,9 +52,20 @@ scale each, kept in host memory by the published bundle; the plan does not place
 
 The card's 11.3B and the count's 9.3B differ by about 2B, and the config does not say where they go. That stays open.
 
+## KV cache: the flat allowance against an estimate from the config
+
+`--context 202752 --users 8` gives a model-aware estimate for a latent-attention model. For Hy4-flash it is 12 full-attention layers (the
+`deepseek_sparse_attention` ones) x 576 values x 2 bytes (bf16) x 202,752 tokens = 2.610 GiB, plus 30 sliding-window layers x 512 rows x 1,152 bytes
+for each user (17.7 MB a user), which is 2.627 GiB for one user and 2.74 GiB for eight. The latent row is shared by all heads, so a split over heads
+repeats it on every die and the estimate is not divided by the die count (the flat 4.0 GiB was divided by four).
+
+The study of the bundle's code put the cache at about 2.9 GiB a die (15 KB a token a die). The 0.2 to 0.3 GiB between that and 2.63 GiB is the
+sparse-attention indexer's group keys, which the config-only estimate leaves out and says so. The estimate changes one row of the four-chip plan:
+`bfp8 + bfp4 experts` no longer fits with the experts split in the old layout (24.46 GiB a chip against a budget of 24.15 GiB) and is placed in the
+tensor-parallel layout (21.32 GiB a chip), which still fits.
+
 ## What is not done here
 
-- The KV cache allowance is still a flat 4.0 GiB (the next change makes it model-aware for latent attention).
 - The Engram memory is named and sized. The plan does not place it, because it has no row for host-resident embedding tables.
 - The two hazard rows `routed_experts_above_256` and `mla_flash_decode_needs_core_grid` stay in the list. They describe the stock ttnn ops. The bundle's card
   claims its own gather kernels serve the 512 experts and its own latent attention serves the model; nobody here has measured that, so the scan's notes

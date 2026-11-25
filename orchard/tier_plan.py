@@ -194,10 +194,46 @@ def caveats(config) -> list[str]:
     return out
 
 
-def budget_bytes(chip_gib: float, *, chips: int, reserve_gib: float, kv_gib: float) -> float:
+def budget_bytes(chip_gib: float, *, chips: int, reserve_gib: float, kv_gib: float, kv_per_chip_gib: float | None = None) -> float:
     """Bytes of one chip that weights may use: the usable share of its DRAM, less the per-chip reserve and this chip's share of the KV cache
-    allowance. Never negative."""
-    return max(0.0, (chip_gib * USABLE_FRACTION - reserve_gib - kv_gib / chips) * GIB)
+    allowance. Never negative. With `kv_per_chip_gib` (an estimate for a model whose cache is the same on every die) each chip loses that much
+    and the allowance is not divided."""
+    kv_here = kv_gib / chips if kv_per_chip_gib is None else kv_per_chip_gib
+    return max(0.0, (chip_gib * USABLE_FRACTION - reserve_gib - kv_here) * GIB)
+
+
+KV_BYTES_PER_VALUE = 2          # the bundles cache the latent rows in bf16 (the Hy4-flash card: "KV: bf16")
+KV_ESTIMATE_LABEL = ("estimate from the config: the latent rows only (kv_lora_rank + qk_rope_head_dim values, bf16), the same on every die; the sparse-attention "
+                     "indexer's keys and any other state are not counted")
+MAX_CONTEXT_TOKENS = 1 << 31
+MAX_USERS = 1 << 20
+
+
+def kv_estimate(config, context_tokens: int, users: int = 1) -> dict | None:
+    """A KV cache estimate for a model with multi-latent attention, or None for any other model (the flat allowance applies) or a layout it cannot read.
+
+    A full-attention layer (`full_attention`, `attention` or `deepseek_sparse_attention`) caches one latent row for each of the `context_tokens`
+    held across all users (a shared pool, as the Hy4-flash card describes). A sliding-window layer keeps a ring of `sliding_window` rows for each user
+    (or `context_tokens` rows when that is fewer). A row is `kv_lora_rank + qk_rope_head_dim` values. Latent attention shares the row between heads,
+    so a tensor-parallel split over heads repeats it on every die: the estimate is per die and is not divided by the die count."""
+    try:
+        d = mc.dims(config)
+        cfg = mc.text_config(config)
+    except mc.ModelConfigError:
+        return None
+    if not d.mla:
+        return None
+    full = sum(1 for t in d.layer_types if t in ("full_attention", "attention", "deepseek_sparse_attention"))
+    sliding = sum(1 for t in d.layer_types if t == "sliding_attention")
+    if full + sliding != d.layers:
+        return None
+    window = cfg.get("sliding_window")
+    if sliding and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+        return None
+    row = (d.mla["kv_lora_rank"] + d.mla["qk_rope_head_dim"]) * KV_BYTES_PER_VALUE
+    ring = min(context_tokens, window) if sliding else 0
+    return {"bytes": full * row * context_tokens + sliding * row * ring * users, "label": KV_ESTIMATE_LABEL, "row_bytes": row,
+            "full_layers": full, "sliding_layers": sliding, "window": window if sliding else None, "context_tokens": context_tokens, "users": users}
 
 
 def parse_skew(text: str) -> tuple:
@@ -434,8 +470,10 @@ def checkpoint_note(s: Shape, index_total: int | None) -> str | None:
 # ---- the plan ----------------------------------------------------------------------------------------------------------
 
 def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=HOST_MARGIN_GIB, host_free_gib=None, skew=OLMOE_SKEW,
-         skew_source=None, scores=None, rule=None, flags=frozenset(), index_total=None, where=None) -> dict:
-    """The rows for every precision combination and chip count, with each input and where it came from. `flags` names the inputs the caller set."""
+         skew_source=None, scores=None, rule=None, flags=frozenset(), index_total=None, where=None, kv_estimate=None) -> dict:
+    """The rows for every precision combination and chip count, with each input and where it came from. `flags` names the inputs the caller set.
+    `kv_estimate` is a result of `kv_estimate()`: when given, each chip loses that whole estimate (the latent cache is the same on every die) in place of its
+    share of the flat `kv_gib` allowance."""
     s = shape(config)
     rule = rule or weights_plan.DEFAULT_RULE
 
@@ -451,7 +489,8 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
         "chip_gib": entry("chip_gib", chip_gib, "DRAM per chip as the cards and run logs state it (orchard/defaults.py)"),
         "usable_fraction": {"value": USABLE_FRACTION, "source": "assumed constant", "note": "probe 14: 29.9 GiB usable of 32 (orchard/plan.py)"},
         "reserve_gib": entry("reserve_gib", reserve_gib, "per chip: trace regions, program binaries and circular buffers (orchard/defaults.py)"),
-        "kv_gib": entry("kv_gib", kv_gib, "KV cache and state for the whole model, spread over the chips (orchard/defaults.py)"),
+        "kv_gib": ({"value": kv_estimate["bytes"] / GIB, "source": "estimate from the config", "note": kv_estimate["label"]} if kv_estimate else
+                   entry("kv_gib", kv_gib, "KV cache and state for the whole model, spread over the chips (orchard/defaults.py)")),
         "host_margin_gib": entry("host_margin_gib", host_margin_gib, "host memory kept free beside the pinned experts (the issue text: about 10 GB)"),
         "expert_pick_skew": {"value": [list(p) for p in skew], "source": "caller's flag" if skew_source else "estimate",
                              "note": skew_source or OLMOE_LABEL},
@@ -460,9 +499,10 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
         inputs["host_free_gib"] = {"value": host_free_gib, "source": "caller's flag", "note": "the free host memory the caller says there is"}
     rows = []
     for chips in chips_list:
-        budget = budget_bytes(chip_gib, chips=chips, reserve_gib=reserve_gib, kv_gib=kv_gib)
+        kv_here = kv_estimate["bytes"] / GIB if kv_estimate else None          # per chip, not divided: the latent cache is repeated on every die
+        budget = budget_bytes(chip_gib, chips=chips, reserve_gib=reserve_gib, kv_gib=kv_gib, kv_per_chip_gib=kv_here)
         usable = chip_gib * USABLE_FRACTION * GIB
-        overhead = (reserve_gib + kv_gib / chips) * GIB
+        overhead = (reserve_gib + (kv_gib / chips if kv_here is None else kv_here)) * GIB
         for name, other_fmt, expert_fmt in weights_plan.COMBINATIONS:
             r = place(s, other_fmt, expert_fmt, chips, budget, host_margin_gib=host_margin_gib, host_free_gib=host_free_gib, skew=skew,
                       skew_source=skew_source, usable_bytes=usable, overhead_bytes=overhead)
@@ -471,10 +511,13 @@ def plan(config, *, chips_list, chip_gib, reserve_gib, kv_gib, host_margin_gib=H
             rows.append(r)
     notes = [n for n in (checkpoint_note(s, index_total),) if n]
     cav = caveats(config)
-    return {"source": where, "caveats": cav, "always_resident_is_lower_bound": bool(cav), "model": {"layers": s.layers, "moe_layers": s.moe_layers, "routed_experts_per_layer": s.experts,
+    out = {"source": where, "caveats": cav, "always_resident_is_lower_bound": bool(cav), "model": {"layers": s.layers, "moe_layers": s.moe_layers, "routed_experts_per_layer": s.experts,
                                        "experts_per_token": s.top_k, "always_resident_params": s.always_params,
                                        "routed_expert_params_total": s.expert_params_total, "params_per_expert_index": s.expert_index_params},
             "inputs": inputs, "fidelity_rule": rule.as_dict(), "rows": rows, "notes": notes}
+    if kv_estimate:
+        out["kv_estimate"] = dict(kv_estimate)
+    return out
 
 
 def render(res: dict) -> str:
@@ -484,8 +527,14 @@ def render(res: dict) -> str:
     if res.get("caveats"):
         lines.append("the always-resident figure is a lower bound: it leaves out " + "; ".join(res["caveats"]) + ". Every row below is optimistic by that much.")
     i = res["inputs"]
+    if res.get("kv_estimate"):
+        k = res["kv_estimate"]
+        kv_text = (f"{i['kv_gib']['value']:.2f} GiB KV cache on each chip [estimate from the config for {k['context_tokens']:,} tokens and {k['users']} user(s): "
+                   f"latent rows only, the sparse-attention indexer's keys are not counted]")
+    else:
+        kv_text = f"{i['kv_gib']['value']} GiB KV cache over the chips"
     lines.append(f"chip DRAM {i['chip_gib']['value']} GiB, {i['usable_fraction']['value']:.1%} usable, {i['reserve_gib']['value']} GiB reserve per chip, "
-                 f"{i['kv_gib']['value']} GiB KV cache over the chips, host margin {i['host_margin_gib']['value']} GiB [assumed constant unless a flag was given; "
+                 f"{kv_text}, host margin {i['host_margin_gib']['value']} GiB [assumed constant unless a flag was given; "
                  f"the sources are in --json]")
     rule = res.get("fidelity_rule") or {}
     if rule.get("name") not in (None, weights_plan.DEFAULT_RULE.name):
@@ -555,6 +604,10 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
     p.add_argument("--chip-gib", type=float, help=f"DRAM per chip in GiB (default {defaults.CHIP_DRAM_GIB})")
     p.add_argument("--reserve-gib", type=float, help=f"per-chip reserve in GiB (default {defaults.CHIP_RESERVE_GIB})")
     p.add_argument("--kv-gib", type=float, help=f"KV cache allowance for the whole model in GiB, spread over the chips (default {defaults.KV_BUDGET_GIB})")
+    p.add_argument("--context", type=int, metavar="TOKENS",
+                   help="plan for this many tokens of context held across all users: for a model with multi-latent attention the KV allowance then comes from the "
+                        "config (an estimate, the same on every die) in place of the flat --kv-gib figure; other models keep the flat figure")
+    p.add_argument("--users", type=int, metavar="N", help="with --context: how many users share it (each sliding-window layer keeps a ring per user; default 1)")
     p.add_argument("--host-margin-gib", type=float, help=f"host memory kept free beside the pinned experts (default {HOST_MARGIN_GIB})")
     p.add_argument("--host-free-gib", type=float, help="free host memory in GiB; a row that needs more is a no (default: not checked)")
     p.add_argument("--skew", metavar="FRACTION:SHARE,...",
@@ -571,6 +624,23 @@ def _positive(name: str, v, *, zero_ok: bool = False):
         raise TierPlanError(f"{name} must be a finite number {'of zero or more' if zero_ok else 'above zero'}")
 
 
+def _context_and_users(args) -> tuple:
+    """The `--context` and `--users` values as whole numbers (None, 1 when not given), or TierPlanError: a context with an explicit `--kv-gib`, users with
+    no context, and a value that is not a whole number from 1 up are all refused."""
+    ctx, users = getattr(args, "context", None), getattr(args, "users", None)
+    if users is not None and ctx is None:
+        raise TierPlanError("--users needs --context (it says how many users share that context)")
+    if ctx is not None and args.kv_gib is not None:
+        raise TierPlanError("--context and --kv-gib both set the KV allowance: give one of them")
+    for flag, v, hi in (("--context", ctx, MAX_CONTEXT_TOKENS), ("--users", users, MAX_USERS)):
+        if v is not None:
+            try:
+                safeio.whole_number(v, lo=1, hi=hi, what=flag)
+            except safeio.BadValue as exc:
+                raise TierPlanError(f"{flag} must be a whole number from 1 to {hi}") from exc
+    return ctx, 1 if users is None else users
+
+
 def main(argv=None, out=None, client=None) -> int:
     return run(parser().parse_args(argv), out, client)
 
@@ -585,6 +655,7 @@ def run(args, out=None, client=None) -> int:
         _positive("--kv-gib", args.kv_gib, zero_ok=True)
         _positive("--host-margin-gib", args.host_margin_gib, zero_ok=True)
         _positive("--host-free-gib", args.host_free_gib)
+        context, users = _context_and_users(args)
         skew = parse_skew(args.skew) if args.skew is not None else OLMOE_SKEW
         try:
             scores, rule = weights_plan.fidelity_inputs(args)
@@ -593,12 +664,16 @@ def run(args, out=None, client=None) -> int:
         flags = {n for n, v in (("chip_gib", args.chip_gib), ("reserve_gib", args.reserve_gib), ("kv_gib", args.kv_gib),
                                 ("host_margin_gib", args.host_margin_gib)) if v is not None}
         cfg, total, where = load(args.source, client=client, revision=args.revision)
+        est = kv_estimate(cfg, context, users) if context is not None else None
         res = plan(cfg, chips_list=chips, chip_gib=args.chip_gib or defaults.CHIP_DRAM_GIB,
                    reserve_gib=defaults.CHIP_RESERVE_GIB if args.reserve_gib is None else args.reserve_gib,
                    kv_gib=defaults.KV_BUDGET_GIB if args.kv_gib is None else args.kv_gib,
                    host_margin_gib=HOST_MARGIN_GIB if args.host_margin_gib is None else args.host_margin_gib, host_free_gib=args.host_free_gib,
                    skew=skew, skew_source=(args.skew_source or "the figures the caller gave with --skew") if args.skew is not None else None,
-                   scores=scores, rule=rule, flags=flags, index_total=total, where=where)
+                   scores=scores, rule=rule, flags=flags, index_total=total, where=where, kv_estimate=est)
+        if context is not None and est is None:
+            res["notes"].append("no model-aware KV estimate for this config (it has no multi-latent attention, or its layer layout cannot be read), so the flat "
+                                f"{defaults.KV_BUDGET_GIB} GiB allowance stays and --context changed nothing")
     except TierPlanError as exc:
         print(str(exc), file=sys.stderr)
         return 2

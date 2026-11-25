@@ -16,7 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
-    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
+    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--context TOKENS] [--users N] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
     tt-orchard speech-check URL --task speech-to-text|text-to-speech [--clip FILE --expect TEXT ...] [--text TEXT] [--voice NAME] [--stream] [--asr-url URL] [--max-wer F] [--json]
     tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]

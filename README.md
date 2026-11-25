@@ -1084,8 +1084,11 @@ host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change th
 quality, and the host path for experts is not written yet (issue 739, step 3). A dense model is refused with a pointer to `tt-orchard plan`, and a
 model whose layers the parameter count does not know is reported as an unknown family. When the config names hyper-connections, a sparse-attention indexer,
 a hashed n-gram embedding, a multi-token-prediction layer or a vision tower, the count leaves them out, the command says so, and the always-resident
-figure is printed as a lower bound.
-The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`.
+figure is printed as a lower bound. For a model with multi-latent attention (DeepSeek-style, Hy4-flash), `--context` (tokens held across all users) and `--users` (how many share them)
+replace the flat KV allowance with an estimate from the config: the latent rows of the full-attention layers plus a ring per user for each sliding-window
+layer, the same on every die and not divided by the chip count. `--context` and `--kv-gib` together are refused; any other model keeps the flat allowance
+and a note says so. A latent mixture of experts (`routed_expert_hidden_size` below the hidden size) is counted with its experts at the latent width.
+The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`, and the one with Hy4-flash is in `docs/run-logs/2026-11-25-tier-plan-vs-hy4-flash.md`.
 
 #### Speech models: `tt-orchard speech-check`
 
