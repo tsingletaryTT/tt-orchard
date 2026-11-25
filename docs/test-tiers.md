@@ -64,11 +64,14 @@ some other route, add its test to `WHOLE_REPO`.
 ## The selector
 
 ```
-python3 -m pytest $(python3 scripts/tests_for_diff.py)             # the tests this branch can affect
-python3 -m pytest $(python3 scripts/tests_for_diff.py --fast)      # the same, without the slow files
+python3 -m pytest $(python3 scripts/tests_for_diff.py)             # every test this branch can reach (the safe default)
+python3 -m pytest $(python3 scripts/tests_for_diff.py) -m "not slow"   # the same, without the slow files
+python3 -m pytest $(python3 scripts/tests_for_diff.py --eager)     # follow only the imports that run when a module loads
 python3 -m pytest $(python3 scripts/tests_for_diff.py --direct)    # only tests that import a changed file themselves
 python3 scripts/tests_for_diff.py --base HEAD~3                    # a different starting point (default origin/main)
 ```
+
+`--fast` adds `-m 'not slow'` to the printed arguments. The script works on the repository of the current directory (or `--root`).
 
 Standard output is one line of arguments. Standard error lists what changed, each selected test with the chain that led to it
 (`tests/test_c.py -> orchard/c.py -> orchard/b.py -> orchard/a.py`), and the reason for any fall back to the full suite.
@@ -78,9 +81,33 @@ imported, so a file with a syntax error does not stop the script.
 
 A file depends on another when it imports it (any form, at any depth inside a function or `try`), when a string in it names the other file
 (`"scripts/tool.py"`, `Path(...) / "tool.py"`), or when a string holds code that imports a module (`-m orchard.a`, `"from orchard import a"`).
-The program `bin/tt-orchard` is a file in the graph, and a test that names `tt-orchard` depends on it. A test is selected when a chain of
-these links reaches a changed file. `--direct` keeps only the tests with a link to the changed file themselves; it is faster, and it leaves
-out the tests that reach the change through other modules.
+Docstrings and comments are not strings that name a file. A test names the program `bin/tt-orchard` by its name, and that program is a file
+in the graph. Every test depends on `tests/conftest.py`; its autouse fixtures and hooks import modules, and a fixture a test has to ask for
+adds its imports only to the tests that name it (as a parameter, through another fixture, or in `usefixtures`). A module that conftest
+imports is followed one step: a change to `orchard/skillsfresh.py` reaches every test, and a change to a module that `skillsfresh` imports
+reaches only the tests that depend on it themselves. A test is selected when a chain of these links reaches a changed file.
+
+### How much it narrows
+
+The package is tightly linked: `orchard/stages.py`, `supervisor.py`, `ledger.py` and `safeio.py` are imported, directly or through a chain,
+by hundreds of test files. A change to a module that sits in one of those chains reaches most tests. Measured on the 15 most recent
+merged pull requests (see [the run log](run-logs/2026-11-24-test-tiers.md)):
+
+| Kind of change | Test files selected by the default |
+| --- | --- |
+| Only documents and change fragments (4 of 15 pull requests) | 10 of about 770: the guards |
+| One to a few source files and their tests (10 of 15) | 397 to 715 of about 770 (52 to 93 percent) |
+| A skill or package template (1 of 15) | the full suite, by rule |
+
+The default is the safe choice. Two flags narrow it, and each says what it leaves out:
+
+- `--eager` follows only imports that run when a module loads. Inside a function, `from orchard import speech_check` runs only when the
+  function is called, so a test that reaches `speech_check` through `cli.main(...)` is left out. Measured on the same 10 source pull
+  requests: 16 to 563 files.
+- `--direct` keeps the tests that import the changed file themselves (through a test helper at most). Measured: 16 to 418 files.
+
+When the default selects more than half of the test files, the explanation prints how many files `--eager` and `--direct` would select.
+Choose the narrow loop for quick feedback, and run the default (or the full suite) before you push.
 
 ### What it does not guess
 
@@ -93,7 +120,7 @@ The script selects the full suite, and names the file, for:
 - a data file that no test names (a fixture, a config file), a base ref that does not exist, a directory that is not a git repository
 - a `tests/tier_lists.py` that is missing or names a guard that does not exist
 
-It ignores `changes/` fragments (the guards read them). A document (`*.md`, `docs/`) selects the tests whose strings name it, plus the guards.
+It ignores `changes/` fragments (the guards read them). A document (`*.md`, `docs/`) selects the tests whose strings name its file name, plus the guards.
 A test file that computes an import (`importlib.import_module(name)`) or does not parse is selected for every change to Python source,
 because its dependencies cannot be read.
 
@@ -102,9 +129,14 @@ because its dependencies cannot be read.
 - A link made at run time by a computed path or a name built from pieces (`"orchard." + name`) is invisible. The computed-import rule covers
   `import_module(name)` in test files. A test that reaches a module only through an environment variable or a configuration file is not covered.
 - A change to behaviour that a test checks through a subprocess is found only when a string in the test names the file or module.
-- A change whose only effect is on a guard's rule (a new rule in a scanner) is caught when the scanner file is changed, not before.
+- `--eager` and `--direct` leave out tests that reach a change through a function call or through another module. They are for feedback, not
+  for a decision to merge.
+- The graph says which tests can load a changed file. It does not say which tests check its behaviour, so the default selects far more
+  tests than a change needs. Recording which files each test executes (coverage with one context per test file) from one full run would
+  give a map that narrows the selection; this page does not build it.
 
-The history check below shows where this happened in practice.
+The history check in the run log compares the selection with the tests each pull request changed itself. It found none missing in
+any mode.
 
 ## Adding a test, a slow file, a guard
 

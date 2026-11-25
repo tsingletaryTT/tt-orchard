@@ -103,6 +103,7 @@ two-process lock test.
   reading a mutation table.
 - Plain English in anything a person reads: state the finding, no "X, not Y" framing, no aphoristic closers, no metaphors. Sweep for
   `, not `, `rather than`, `instead of`, `reads as`, `honest`, `the one`, `which is why`, `This is what`.
+- Fast loop while developing (2026-11-25): `python3 -m pytest $(python3 scripts/tests_for_diff.py)` runs the tests a diff can reach plus the repository-wide guards (`docs/test-tiers.md`). It does not replace the gate: before any merge the full suite runs once on the integration state, one suite at a time, with `origin/main` proven an ancestor of `HEAD`.
 - Branch is `main`. Use a worktree for parallel work. Versions (2026-10-28): never edit a version field. Each branch adds `changes/<slug>.toml` with `python3 scripts/version.py new <slug>` (its own target, summary and PR number). The highest target in `changes/` is the version main reports; `RELEASE` in `orchard/__init__.py` is the last release. Cut a release with `scripts/version.py release` (see `docs/releases.md`). Run `scripts/version.py check` before you push.
   Never merge without the operator's instruction. Never publish to Hugging Face without an explicit go-ahead.
 - Hardware: take a lease through gozer (`gozer run`, or one `gozer acquire` and `gozer wait`, never a loop of `gozer run`). Never run
