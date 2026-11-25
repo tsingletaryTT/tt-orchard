@@ -1,0 +1,2 @@
+target = "0.9.202"
+summary = "The TT-Lang cheat sheet check judges chip claims by a recorded compile with the hardware package's own compiler, so a call that the compiler refuses can no longer pass because its name is in the package's files (issue 801, need 3)."

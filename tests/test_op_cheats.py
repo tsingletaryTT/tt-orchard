@@ -183,6 +183,17 @@ def lang_sheet(*entries, mistakes=()):
     return sheet_of(*entries, kind="ttlang", roots={"hardware": "h", "sim": "s"}, mistakes=mistakes)
 
 
+def verify_static(sheet, indexes):
+    """`verify` with the compile layer satisfied (a compiled record for every `compiles on hardware` claim), so a test of the static half (the
+    evidence field, `hardware_absent`, the names and arguments found in the tree) sees only its own problems. The compile layer is judged in
+    tests/test_cheat_compiles.py (issue 801)."""
+    from test_cheat_compiles import PAIR_ID, full_data, probe
+    data = full_data(sheet)
+    if not data["probes"]:                  # data needs a probe; one that covers the first entry changes no claim of a simulator-only sheet
+        data["probes"]["stand-in"] = probe("compiled", [next(oc.entries(sheet))["name"]], [(PAIR_ID, "compiled", "")])
+    return oc.verify(sheet, indexes, compiles=data, hardware_target=PAIR_ID)
+
+
 def lang_entry(name, signature, usage, status, roots, **kw):
     return entry(name, signature, usage, status=status, **{"in": roots}, **kw)
 
@@ -193,39 +204,39 @@ def test_the_simulator_inside_the_installed_package_is_not_part_of_the_hardware_
 
 def test_a_compiles_on_hardware_entry_needs_evidence_and_a_hardware_signature(lang):
     e = lang_entry("ttl.copy", "ttl.copy(src, dst)", "tx = ttl.copy(a, b)", "compiles on hardware", ["hardware"])
-    assert any("evidence" in p for p in oc.verify(lang_sheet(e), lang))
+    assert any("evidence" in p for p in verify_static(lang_sheet(e), lang))
     e["evidence"] = "ran on the chip"
-    assert oc.verify(lang_sheet(e), lang) == []
+    assert verify_static(lang_sheet(e), lang) == []
     e["signature"] = "ttl.copy(src, dst, shape)"
-    assert oc.verify(lang_sheet(e), lang)
+    assert verify_static(lang_sheet(e), lang)
 
 
 def test_a_simulator_only_entry_lists_what_the_hardware_package_lacks_and_the_claim_is_checked(lang):
     e = lang_entry("sim.reduce_sum", "ttl.math.reduce_sum(block, dims, shape)", "s = ttl.math.reduce_sum(x, dims=[-1], shape=(1, 1))", "simulator only", ["sim"],
                    hardware_absent=["shape"])
-    assert oc.verify(lang_sheet(e), lang) == []
+    assert verify_static(lang_sheet(e), lang) == []
     e["hardware_absent"] = ["dims"]                                   # the hardware package has dims
-    assert any("is there" in p for p in oc.verify(lang_sheet(e), lang))
+    assert any("is there" in p for p in verify_static(lang_sheet(e), lang))
     e["hardware_absent"] = []
-    assert any("hardware_absent" in p for p in oc.verify(lang_sheet(e), lang))
+    assert any("hardware_absent" in p for p in verify_static(lang_sheet(e), lang))
 
 
 def test_a_simulator_only_entry_that_claims_the_hardware_root_is_refused(lang):
     e = lang_entry("sim.reduce_sum", "ttl.math.reduce_sum(block, dims, shape)", "s = ttl.math.reduce_sum(x, dims=[1], shape=(1, 1))", "simulator only",
                    ["sim", "hardware"], hardware_absent=["shape"])
-    assert oc.verify(lang_sheet(e), lang)
+    assert verify_static(lang_sheet(e), lang)
 
 
 def test_a_hardware_absent_name_that_the_hardware_package_has_is_refused(lang):
     e = lang_entry("ttl.copy", "ttl.copy(src, dst)", "tx = ttl.copy(a, b)", "simulator only", ["sim"], hardware_absent=["copy"])
-    assert any("is listed as absent" in p for p in oc.verify(lang_sheet(e), lang))
+    assert any("is listed as absent" in p for p in verify_static(lang_sheet(e), lang))
 
 
 def test_a_whole_name_the_hardware_package_lacks_can_be_listed_and_is_checked(lang):
     e = lang_entry("ttl.sim_fill", "ttl.sim_fill(value, shape)", "x = ttl.sim_fill(1, (1, 1))", "simulator only", ["sim"], hardware_absent=["sim_fill"])
-    assert oc.verify(lang_sheet(e), lang) == []
+    assert verify_static(lang_sheet(e), lang) == []
     e["hardware_absent"] = ["reduce_sum"]                              # not this entry's name, so it is an argument claim and the name is absent
-    assert oc.verify(lang_sheet(e), lang)
+    assert verify_static(lang_sheet(e), lang)
 
 
 # ---- the shape of a sheet -------------------------------------------------------------------------------------------------------------

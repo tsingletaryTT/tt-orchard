@@ -95,7 +95,14 @@ def package_identity(python) -> dict:
     """What compiler `python` would use: {"package": "tt-lang", "version", "compiler_sha256", "files"}. Read from files; nothing is
     imported. `compiler_sha256` covers the files in IDENTITY_FILES that exist, each by name and sha256, so two installs with the same
     version and different compiler bytes get different identities. Raises HwCompileError."""
-    ttl = package_dir(python)
+    return identity_of(package_dir(python))
+
+
+def identity_of(ttl) -> dict:
+    """The identity (as `package_identity` returns it) of the tt-lang compiler package in the directory `ttl`, which holds `_src/` and
+    `operators.py`; its version comes from the distribution's METADATA next to it. For a caller that has the package's directory and no
+    interpreter (scripts/verify_cheat_sheet.py). Raises HwCompileError."""
+    ttl = Path(ttl)
     version = _metadata_version(ttl.parent)
     digest, seen = hashlib.sha256(), []
     for rel in IDENTITY_FILES:
