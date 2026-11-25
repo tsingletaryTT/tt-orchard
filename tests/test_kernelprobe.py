@@ -1853,8 +1853,14 @@ def test_an_interrupt_is_not_lost_when_the_second_scan_fails(tmp_path, monkeypat
     monkeypatch.setattr(kp, "scan_strays", scan)
     sent, violations = [], []
 
-    def interrupted(_s):
-        raise KeyboardInterrupt
+    slept = []
+
+    def interrupted(s):
+        # Ctrl-C lands in the grace (the first wait). The later waits (for the SIGSTOP to take effect, issue 476, and for the kill to show) sleep for real.
+        if not slept:
+            slept.append(s)
+            raise KeyboardInterrupt
+        _time.sleep(s)
     try:
         assert stubborn.stdout.readline().strip() == b"ready"
         kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
