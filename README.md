@@ -2627,7 +2627,7 @@ revision in the card matches the package record, `tt-model.yaml` and the launche
 commit (the weights and a code bundle) names each on one line with its repository, `owner/name @ <40-character commit>`, one line per repository (the older
 `owner/name (revision <commit>)` also works; the `@` needs a space before it, so a Git URL such as `git+https://host/org/lib.git@<commit>` is not a pin). A repository named on a different line is never attached to a commit. A commit without its repository on its line
 is a warning that names this form, and a card that pins the weights repository at two commits is a warning too. `--staged DIR` also compares
-the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
+the pulled files and hashes with a local staged directory. A `tt_kernel_manifest.json` whose `container.built` section records the tt-metal or the plugin commit with `"pushed": false` (a commit that exists only in one person's checkout) makes the manifests check a warning that names the commit, because nobody else can rebuild the image from public sources (Hy4-flash study, 2026-11-25). `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
 commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
 makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).
 
