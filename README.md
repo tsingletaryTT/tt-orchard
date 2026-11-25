@@ -1089,7 +1089,7 @@ The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-
 
 #### Speech models: `tt-orchard speech-check`
 
-A speech model takes speech in and gives text, or takes text and gives speech. The harness has no stage for either, so a preflight for one ends with a
+A speech model takes speech in and gives text, or takes text and gives speech. Without `--speech-clips` (next section) a preflight for one ends with a
 block (`speech-model`) that names the model's task, the published bundle that serves it (known for the two Voxtral bundles on 2026-11-23) and the
 command below. `tt-orchard speech-check URL --task speech-to-text --clip FILE --expect TEXT` transcribes each clip on a running server and passes it
 when the word error rate against the expected text is at most `--max-wer` (default 0.10); `--language` sends a language code with each clip (none is sent by default). `--task text-to-speech` requests speech and checks that
@@ -1100,6 +1100,18 @@ The server must be on this machine, the port is required (nothing is assumed), a
 device and takes no lease; start the bundle with `tt-model serve` under a gozer lease first. `--json` prints every check with its measured values and
 the rule it applied. The note on the two bundles is `docs/run-logs/2026-11-23-voxtral-speech-models.md`; the command has not yet been run against a
 real bundle on a chip.
+
+#### The speech route: `tt-orchard bringup MODEL --speech-clips DIR`
+
+For a speech model that a published bundle serves (`mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-4B-TTS-2603`), `--speech-clips DIR` turns the block into a
+run. `DIR` holds at most 8 audio clips (`.wav`, `.flac`, `.mp3`, `.ogg`), each with a `NAME.txt` that holds what it says (optional for speech to text, required for
+text to speech). `--speech-prompts` FILE gives a text-to-speech run its prompts, one per line (default: three short sentences), and `--speech-language` CODE
+sets the language the speech-to-text reference is asked for (default `en`). The run does not boot the coder. Stage 0 reads the bundle table, stage 1 records a CPU
+reference in the reference interpreter (the upstream model's transcripts of your clips, or for text to speech a check that a Whisper scorer hears your clips),
+stage 2 serves the bundle with `tt-model serve` on one board under a lease, runs the `speech-check` checks, saves every answer and stops the bundle, and stage 8
+builds the operator bundle. Stages 3 to 7 are skipped. The gate recomputes every number from the saved clips, audio and transcripts. The run never copies or
+republishes the model's weights, and its results and RISKS.md carry the bundle's licence as the card states it. The design is
+`docs/superpowers/specs/2026-11-23-speech-route-design.md`; no chip has run it yet.
 
 ### 4.1 Before you start
 
@@ -1468,7 +1480,7 @@ audio branch of the stage 0 template. Stage 0 records three facts in its ledger 
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
 a thin bundle. The class is `weights-only`, `full-port` or `unknown`: each difference in `model_config.json` is sorted by an allow-list table into serving settings (the longest audio asked for, the default sampler), structural keys or unknown keys, and only serving differences leave the path `weights-only` (with a hazard that names the keys and both values, because no stage yet checks that the serving configuration carries the model's own settings). `audio_strict` in `triage_config.json` keeps the stricter rule, and `audio.decision` in `delta.json` records the evidence for each difference and any override from a later inference step. An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
-A run for an audio model starts the coder before stage 0 as every run does, although the run stops after stage 0 (issue 143). `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
+A run for an audio model runs stage 0 as supervisor code and starts no coder for it (issue 143): when the preflight finds the model to be audio, the command records the run inputs `audio_model=1` and `audio_base=<the base model id>`, and the supervisor copies the shipped `delta_triage.py` into the stage, writes its configuration and runs it. The template still decides whether the model is audio, and a text model fails the stage. A run started before this change keeps the agent stage 0. `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
 [docs/run-logs/2026-10-28-stable-audio-3-facts.md](docs/run-logs/2026-10-28-stable-audio-3-facts.md).
 
