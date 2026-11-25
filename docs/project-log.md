@@ -6199,3 +6199,8 @@ An audio run no longer boots the local coder for stage 0. The command records th
 ## 2026-11-25: Voxtral under simultaneous requests and a singing probe (branch voxtral-load-run)
 
 Voxtral Mini and Voxtral TTS each ran on their own board with 1 to 32 simultaneous requests (TTS) and 1, 2 and 4 (Mini), five repeats each. TTS answered 32 requests (about 110 s of audio) in a median 3.2 s against 1.8 s for one, with 7 of 50 runs about 7 s slower for a cause not found. The Mini serves one request at a time and queues the others without failures; four 203 s clips took 19.6, 38.7, 57.8 and 77.0 s. The TTS container log has no per-stage lines. Twenty voices given four lyric lines spoke them; a pitch check found no held notes. Docs only; run log `docs/run-logs/2026-11-25-voxtral-load-run.md`.
+
+
+## 2026-11-25: the audio chip test no longer passes when it ran nothing (branch fct-chip-test-no-runs)
+
+`audio_chip_test.py` printed `{"ok": true, "runs": []}` and exited 0 for a config that listed no runs, because `all()` of an empty list is true. It now needs at least one run, prints `ok: false` with a `problem` line, and exits 1. A test of a process that left every manifest but exited nonzero was added; it showed that the check on the exit code was already held by no test. `tests/test_audio_chip_test.py` gained 3 tests and 4 mutations, all red. The rest of the audit of orchard's checks for a pass without evidence is in the issue linked from the pull request.
