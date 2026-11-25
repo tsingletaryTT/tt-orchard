@@ -158,6 +158,10 @@ class FakeProc:
         self.sent.append((pid, int(sig)))
         if self.on_signal is not None:
             self.on_signal(pid, sig)
+        if sig == signal.SIGSTOP and (self.root / str(pid) / "stat").exists():
+            # a real SIGSTOP changes the process state to T (issue 476: the sweep waits for it before it scans again)
+            stat = self.root / str(pid) / "stat"
+            stat.write_text(stat.read_text().replace(") S ", ") T ", 1))
         if sig == signal.SIGKILL:
             import shutil
             shutil.rmtree(self.root / str(pid), ignore_errors=True)
