@@ -1,0 +1,3 @@
+target = "0.9.205"
+summary = "The stage 2 edit tool turns a line break typed as backslash and n into a real one when that makes a Python file parse, and refuses an edit that would break the file."
+kind = "fix"
