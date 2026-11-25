@@ -95,6 +95,24 @@ def _speech_inputs(args, base_data) -> dict:
     return out
 
 
+def _audio_stage0_inputs(base_data, base_snapshot, *, recorded=None, resuming=False) -> dict:
+    """The run inputs that make stage 0 of an audio run supervisor code (issue 143, orchard/audio_stage0.py): `audio_model=1` and `audio_base=<the base
+    repository id>`. They are recorded when the preflight's base row says the model is audio, names its base, and the base's snapshot is known. A resumed run keeps
+    what it started with (`recorded`, from its run_start entry), so a preflight that now reads the model differently cannot change the stage 0 the run began
+    with; a run from before this change recorded nothing and keeps the agent stage 0."""
+    from orchard import audio_stage0
+    if resuming:
+        kept = recorded if isinstance(recorded, dict) else {}
+        if kept.get(audio_stage0.MODEL_INPUT) == "1" and isinstance(kept.get(audio_stage0.BASE_INPUT), str) and kept[audio_stage0.BASE_INPUT]:
+            return {audio_stage0.MODEL_INPUT: "1", audio_stage0.BASE_INPUT: kept[audio_stage0.BASE_INPUT]}
+        return {}
+    data = base_data if isinstance(base_data, dict) else {}
+    base = data.get("base")
+    if data.get("audio") is True and isinstance(base, str) and base.strip() and base_snapshot:
+        return {audio_stage0.MODEL_INPUT: "1", audio_stage0.BASE_INPUT: base}
+    return {}
+
+
 def _port_repair_rounds_arg(text: str) -> int:
     """argparse type of `--port-repair-rounds`: a whole number from 0 to port_repair.MAX_ROUNDS (the supervisor checks the same range)."""
     from orchard import port_repair
@@ -1553,6 +1571,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
               **_speech_inputs(args, base_data),
+              **_audio_stage0_inputs(base_data, base_snapshot, recorded=_run_start_inputs(run_dir) if run_started else None, resuming=bool(run_started and resuming)),
               **({"base_candidates": str(candidates_path)} if candidates_path else {}),
               **_pin_inputs(base_data.get("pin"))}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,

@@ -130,7 +130,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease, Refused
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import boundedwalk
-from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
+from orchard import audio_reference_env, audio_runtime, audio_stage0, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
@@ -164,7 +164,7 @@ from orchard import device_holders
 from orchard.server import (BootStalled, CoderExited, NotReady, ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec,
                             StopCheck)
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, MASK_INPUTS_DECISION, mask_input_entries, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
-                            reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, SPEECH_SPECS, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+                            reference_ids_record, AUDIO_STAGE_0, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, SPEECH_SPECS, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -1457,7 +1457,8 @@ class Supervisor:
                             run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
                             audio_runtime=audio_runtime.selected(entries) is not None,
                             text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries),
-                            kind=run_model_kind(entries), speech_route=speech_route.selected(entries) is not None)
+                            kind=run_model_kind(entries), speech_route=speech_route.selected(entries) is not None,
+                            audio_model=audio_stage0.selected(entries))
             if spec is FULL_PORT_STAGE_3 and self._stage_3_chips() is None:
                 spec = dataclasses.replace(spec, skip=SKIP_3_FULL_PORT)       # stage 2's board is the configured chip count: nothing new to show
             if spec is FULL_PORT_STAGE_4 and not self.required_chips:
@@ -2712,6 +2713,8 @@ class Supervisor:
         if spec in SPEECH_SPECS:
             return self._speech_body(spec, stage_dir, resumed)
         if spec.harness:
+            if spec is AUDIO_STAGE_0:
+                return self._audio_triage_body(spec, stage_dir)
             if spec.number == 0:
                 return self._stock_triage_body(spec, stage_dir)
             if spec.number == 8:
@@ -3267,6 +3270,35 @@ class Supervisor:
             package_finish(self.run_dir, stage_dir)
         except PackageError as exc:
             return "fail", [f"packaging: {exc}"], None
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _audio_triage_body(self, spec, stage_dir: Path):
+        """Stage 0 of a run whose model the preflight found to be audio (issue 143, orchard/audio_stage0.py), as supervisor code: copy the shipped delta_triage.py
+        into the stage, write its configuration from the run's inputs, run it with the agent's environment, and run the same gate the agent stage has. The
+        template is the judge of whether the model is audio: delta.json must say so (`facts.modality`), and a text model fails the stage. No model is asked
+        anything, so no coder boots for it."""
+        n = spec.number
+        problems = audio_stage0.input_problems(self.inputs)
+        if problems:
+            return "fail", problems, None
+        try:
+            script = audio_stage0.prepare(stage_dir, self.run_dir, model_id=self.model_id, inputs=self.inputs)
+        except (OSError, safeio.SafeReadError) as exc:
+            return "fail", [f"the stage 0 template could not be prepared: {type(exc).__name__}"], None
+        (stage_dir / "log").mkdir(exist_ok=True)
+        ok, why = audio_stage0.run_template(script, self.run_dir, env=agent_env(self.run_dir, extra=self.extra_env))
+        if not ok:
+            return "fail", [why], None
+        try:
+            delta = safeio.read_json(stage_dir / "delta.json", max_bytes=RUN_JSON_MAX, expect=dict)
+        except (OSError, ValueError, safeio.SafeReadError) as exc:
+            return "fail", [f"delta_triage.py wrote no readable delta.json ({type(exc).__name__})"], None
+        facts = delta.get("facts")
+        if not (isinstance(facts, dict) and facts.get("modality") == "audio"):
+            return "fail", ["the run was started as an audio run, but the stage 0 template reports a text model (its delta.json has no audio modality): "
+                            "check that the model is in the stable-audio-tools layout, or run it without the audio_model input"], None
+        self.ledger.append("evidence", n, what="audio triage", **evidence_record(self.run_dir, stage_dir / "delta.json"))
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
