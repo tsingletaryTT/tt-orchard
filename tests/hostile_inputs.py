@@ -985,6 +985,7 @@ from orchard.drop_check import Unreadable as _DropUnreadable  # noqa: E402
 from orchard.drop_watch import StateCorrupt as _DropStateCorrupt  # noqa: E402
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
+from orchard.tier_plan import TierPlanError as _TierPlanError  # noqa: E402
 from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
 from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
@@ -1019,6 +1020,11 @@ def _preflight_index_problem(base: Path):
 def _audio_decision_load_category_rules(base: Path):
     from orchard import audio_decision
     return audio_decision.load_category_rules(base / "input.json")
+
+
+def _tier_plan_load_skew_file(base: Path):
+    from orchard import tier_plan
+    return tier_plan.load_skew_file(base / "input.json", experts=8, top_k=2)
 
 
 def _cheat_compiles_load(base: Path):
@@ -1338,6 +1344,7 @@ READERS: list[Reader] = [
     Reader("updates_host.read_sysfs", _updates_host_read_sysfs),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
+    Reader("tier_plan.load_skew_file", _tier_plan_load_skew_file, documented=(_TierPlanError,)),
     Reader("ledger.read_entries",_ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
     Reader("telegraph_store.read_snapshot", _telegraph_store_read_snapshot, rel="project.db",
            documented=(_LedgerUnavailable, _LedgerRefused)),

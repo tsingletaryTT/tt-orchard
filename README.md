@@ -1077,7 +1077,10 @@ verdict: **fits on chips** (replicated, with the experts split over the chips, o
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
-with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. A second table gives the layout of
+with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. With `--skew-file` the figures come from a measurement file instead: the JSON that
+`scripts/expert_skew.py --json` or `scripts/expert_skew_stream.py` writes (the second runs the model one layer at a time, for a model too large for host
+memory). The file is refused unless it was measured on a model with the same expert count and top-k, and the plan names the model and text that were measured.
+A file with several texts needs `--skew-text`, which names one of them. A second table gives the layout of
 the published hybrid bundles, whole layers on the chips and only the other layers' experts in host memory. `--host-free-gib` marks a row that needs more
 host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change the chip memory, the per-chip reserve and the KV cache allowance, and
 `--json` prints every number with its source (config-derived, assumed constant, estimate or the caller's flag). The command measures neither speed nor
