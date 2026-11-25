@@ -87,8 +87,10 @@ def main(argv=None) -> int:
     for group in groups(cfg["runs"]):
         results += run_group(cfg, group, out_root, cfg_path.parent / "log", per_run * (len(group) + int(cfg.get("warmup", 0))))
     (cfg_path.parent / "chip_test.json").write_text(json.dumps({"runs": results}, indent=1) + "\n", encoding="utf-8")
-    ok = all(r["returncode"] == 0 and r["manifest"] for r in results)
-    print(json.dumps({"ok": ok, "runs": results}))
+    # A positive sign is needed: `all()` of no runs is true, so a config that lists no runs would report ok for a test that ran nothing.
+    problem = None if results else "the config lists no runs, so nothing was tested"
+    ok = bool(results) and all(r["returncode"] == 0 and r["manifest"] for r in results)
+    print(json.dumps({"ok": ok, "runs": results, **({"problem": problem} if problem else {})}))
     return 0 if ok else 1
 
 
