@@ -1,0 +1,3 @@
+target = "0.9.203"
+summary = "Run log: Voxtral Mini and TTS under simultaneous requests, plus a singing probe"
+kind = "docs"
