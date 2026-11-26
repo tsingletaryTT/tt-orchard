@@ -350,6 +350,23 @@ def _r_tier_plan_skew_file(env):
     return "other"
 
 
+def _r_first_start_card(env):
+    """The package card of `tt-orchard first-start`: read as text, 1 MiB cap, regular files only. The fixture bytes are text, so a plain read is `original`."""
+    from orchard import first_start
+    text, _ = first_start.read_package(env["file"], None)
+    return _label(text.encode("utf-8"))
+
+
+def _r_first_start_manifest(env):
+    import tempfile
+    from orchard import first_start
+    with tempfile.TemporaryDirectory() as d:
+        card = Path(d) / "README.md"
+        card.write_text("a card\n")
+        _, manifest = first_start.read_package(card, env["file"])
+    return _json_label(manifest)
+
+
 def _r_drop_check_dir_client(env):
     from orchard import drop_check
     return _label(drop_check.DirClient(env["file"].parent).get("Qwen/x", "0" * 40, env["file"].name, max_bytes=1 << 20))
@@ -489,6 +506,8 @@ PATH_READERS: list[PathReader] = [
     PathReader("safeio.read_json(path)", "path_read", _r_read_json_path, claims_pin=False),
     PathReader("drop_check.DirClient.get", "path_read", _r_drop_check_dir_client, claims_pin=False),
     PathReader("tier_plan.load_skew_file", "path_read", _r_tier_plan_skew_file, claims_pin=False),
+    PathReader("first_start.read_package(card)", "path_read", _r_first_start_card, claims_pin=False),
+    PathReader("first_start.read_package(manifest)", "path_read", _r_first_start_manifest, claims_pin=False),
     PathReader("safeio.atomic_write(path)", "path_write", _r_atomic_write_path, claims_pin=False),
     PathReader("ledger.Ledger lock file", "lock_open", _r_ledger_lock, claims_pin=False),
     PathReader("cache_lock.entry_lock", "lock_open", _r_cache_lock, claims_pin=False),
