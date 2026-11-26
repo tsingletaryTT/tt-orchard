@@ -1,0 +1,2 @@
+target = "0.9.205"
+summary = "tt-orchard profile-read: a bounded summary of a TT-NN report folder read through the report viewer's MCP server, with no board needed (issues 551 and 113)."

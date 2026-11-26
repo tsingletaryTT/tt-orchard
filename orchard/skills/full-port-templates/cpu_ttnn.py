@@ -36,6 +36,13 @@ class Tensor:
         self.shape = (1,) + tuple(t.shape[1:]) if chips else tuple(t.shape)
 
 
+# The port check's weight scan (port_check.weight_kind) calls an object a ttnn tensor only when the first part of its class's module name is `ttnn`
+# (it reads the type and its attributes and imports nothing). A class takes its module name from the name this file was loaded under, and the CPU
+# run loads it as `orchard_cpu_ttnn`, so without this line every stand-in tensor failed that test, the scan walked into it and counted its inner
+# torch tensor as a host weight: a port that held every weight as a stand-in device tensor showed 0 device elements. The real class reports `ttnn`.
+Tensor.__module__ = "ttnn"
+
+
 def _block_float(x: torch.Tensor, mant_bits: int) -> torch.Tensor:
     """Round to a shared power-of-two exponent per 16 values along the last dimension, each value keeping `mant_bits` mantissa bits and a sign (the block-float
     formats of the chip, approximately: this is the rounding of scripts/fidelity_score.py)."""
@@ -65,6 +72,40 @@ class MeshDevice:
 
     def get_num_devices(self):
         return self.n
+
+
+class FabricConfig:
+    """The fabric settings the board path names (`ttnn.FabricConfig.FABRIC_1D` to turn the 1-D fabric on, `DISABLED` to turn it off)."""
+    FABRIC_1D = "FABRIC_1D"
+    DISABLED = "DISABLED"
+
+
+class MeshShape:
+    """`ttnn.MeshShape(rows, columns)`: the chip grid of a mesh. Only the chip count matters here."""
+
+    def __init__(self, rows: int, columns: int):
+        self.rows, self.columns = int(rows), int(columns)
+
+    def mesh_size(self) -> int:
+        return self.rows * self.columns
+
+
+class MeshTraceId:
+    """A trace id as the runtime's `ttnn.MeshTraceId` is: it converts with int() and compares by value, and it has no hash and is not an int
+    (ttnn-nanobind/operations/trace.cpp, as port_check.trace_key reads it)."""
+    __hash__ = None
+
+    def __init__(self, n: int):
+        self.n = int(n)
+
+    def __int__(self) -> int:
+        return self.n
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, MeshTraceId) and other.n == self.n
+
+    def __repr__(self) -> str:
+        return f"MeshTraceId({self.n})"
 
 
 class ReplicateTensorToMesh:
@@ -141,6 +182,47 @@ def make() -> types.ModuleType:
     m.ReplicateTensorToMesh, m.ConcatMeshToTensor = ReplicateTensorToMesh, ConcatMeshToTensor
     m.ShardTensorToMesh, m.Topology = ShardTensorToMesh, Topology
     m.WormholeComputeKernelConfig, m.MathFidelity, m.UnaryOpType = WormholeComputeKernelConfig, MathFidelity, UnaryOpType
+    m.FabricConfig, m.MeshShape, m.MeshTraceId = FabricConfig, MeshShape, MeshTraceId
+
+    # The device calls of the board path (port_check.open_device, the trace calls, synchronize_device). The template's CPU path hands the port a ready
+    # device and never calls them; a rehearsal of the board path against this module does (Hy4-flash trial of stage 2, 2026-11-25). They open nothing
+    # and compute nothing: a device is a MeshDevice(n) that only counts chips, and a trace is a fresh id. COUNTS does not tally them, as they are not ops.
+    next_trace = [0]
+
+    def set_fabric_config(config, *args, **kwargs):
+        pass
+
+    def open_mesh_device(mesh_shape, **kwargs):
+        return MeshDevice(mesh_shape.mesh_size())
+
+    def close_mesh_device(mesh_device):
+        pass
+
+    def open_device(*, device_id=0, **kwargs):
+        return MeshDevice(1)
+
+    def close_device(device):
+        pass
+
+    def begin_trace_capture(mesh_device, *, cq_id=0):
+        next_trace[0] += 1
+        return MeshTraceId(next_trace[0])
+
+    def end_trace_capture(mesh_device, trace_id, *, cq_id=0):
+        pass
+
+    def execute_trace(mesh_device, trace_id, *, cq_id=0, blocking=True):
+        pass
+
+    def release_trace(mesh_device, trace_id):
+        pass
+
+    def synchronize_device(device, *, cq_id=None, sub_device_ids=None):
+        pass
+
+    for fn in (set_fabric_config, open_mesh_device, close_mesh_device, open_device, close_device, begin_trace_capture, end_trace_capture, execute_trace,
+               release_trace, synchronize_device):
+        setattr(m, fn.__name__, fn)
 
     def from_torch(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None):
         _count("from_torch")
@@ -152,8 +234,15 @@ def make() -> types.ModuleType:
             if not (tensor.dtype in (torch.int32, torch.int64) and layout == "ROW_MAJOR"):
                 raise TypeError("token ids must be an integer tensor in ROW_MAJOR layout")
             return Tensor(tensor.clone(), mesh_mapper is not None and not shard, "ROW_MAJOR", chips)
+        # The runtime's ttnn.from_torch (ttnn/operations/core.py in tt-metal) passes any torch tensor on to ttnn.Tensor(data_type=dtype), so a float32 or
+        # float16 host tensor with an explicit float dtype is an accepted call and the values are stored in that format. With no dtype the tensor keeps
+        # its own, which would put float32 on the device, so a host tensor that is not bfloat16 is refused then. The conversion itself is C++ and was not
+        # read: the rounding below is round to nearest even, as torch does it.
+        if dtype in ("bfloat16", "bfloat8_b", "bfloat4_b") and tensor.dtype in (torch.float32, torch.float16):
+            tensor = tensor.to(torch.bfloat16)
         if tensor.dtype != torch.bfloat16:
-            raise TypeError(f"a float tensor is uploaded as bfloat16 from a bfloat16 host tensor, got {tensor.dtype}")
+            raise TypeError(f"a float tensor is uploaded as bfloat16 from a bfloat16 host tensor, or from a float32 or float16 one with dtype=ttnn.bfloat16 "
+                            f"(or a block float) given; with no dtype the host dtype {tensor.dtype} is kept and a float32 tensor on the device is not what a port wants")
         if layout not in ("TILE", "ROW_MAJOR"):
             raise TypeError("a layout is required")
         values = tensor.float()

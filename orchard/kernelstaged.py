@@ -180,11 +180,62 @@ def _stage_record(index: int, stage: Stage, outcome, wall_s: float, check: dict)
             "kernel_sha256": check.get("kernel_sha256")}
 
 
-def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, http=post_json, clock=time.time,
-                watchdog=None, run_watched=kp.run_watched, tt_lang: dict | None = None, temperature: float = 0.0,
-                top_p: float | None = None, seed: int | None = None, references: list[dict] | None = None,
-                skills: dict | None = None, coder_speed: dict | None = None, stage_turns: int | None = None,
-                stage_wall_s: float | None = None, **ignored) -> dict:
+def _partial_attempt(box: dict, kw: dict, exc: BaseException) -> dict | None:
+    """The record of a staged attempt that an interrupt or a crash cut short (issue 478): the stages that finished, the helpers the sweeps
+    already removed (`swept`), and why it stopped. It is saved like any attempt, and a failure to save it does not hide the exception.
+    None only when the attempt did not get as far as naming its operation."""
+    op, n = kw.get("op"), kw.get("n")
+    if op not in STAGES or not isinstance(n, int):
+        return None
+    stages = STAGES[op]
+    records = [r for r in box.get("records", []) if isinstance(r, dict)]
+    swept = [r for r in box.get("swept", []) if isinstance(r, dict)]
+    sampling = {"temperature": kw.get("temperature", 0.0), "top_p": kw.get("top_p"), "seed": kw.get("seed")}
+    passed_n = sum(1 for r in records if r.get("passed"))
+    staged = {"stage_names": [s.name for s in stages], "stages": records, "stages_passed": passed_n, "reached": len(records),
+              "failed_stage": None,
+              "budgets": [{"name": s.name, "max_turns": kw.get("stage_turns") if kw.get("stage_turns") is not None else s.max_turns,
+                           "wall_s": kw.get("stage_wall_s") if kw.get("stage_wall_s") is not None else s.wall_s} for s in stages]}
+    attempt = {
+        "op": op, "attempt": n, "status": "interrupted",
+        "status_detail": f"{type(exc).__name__} before the attempt finished; what is known so far is kept (the stages that finished and the "
+                         "helpers the sweeps removed)",
+        "turns": sum(r.get("turns") or 0 for r in records), "agent_wall_s": round(sum(r.get("agent_wall_s") or 0 for r in records), 2),
+        "passed_sim": False, "category": None, "first_line": "", "pcc_min": None, "sets": [], "violations": [], "hw": None,
+        "agent_check_untrusted": False, "swept": swept, "sampling": sampling, "coder_speed": kw.get("coder_speed"),
+        "agent_hw": {"enabled": False}, "staged": staged,
+        "provenance": kp.provenance(kernel_sha256=None, tt_lang=box.get("facts"), coder_model=kw.get("coder_model"), probe_id=kw.get("probe_id"),
+                                    simulator_pcc_min=None, sampling=dict(sampling), skills=kw.get("skills")),
+    }
+    try:
+        kp._save_attempt(Path(kw["probe_dir"]).resolve() / op / f"attempt-{n}", attempt)
+    except Exception:
+        pass
+    return attempt
+
+
+def run_attempt(**kw) -> dict:
+    """One staged attempt (see `_run_attempt` for the arguments). When an interrupt or a crash ends it, the exception carries
+    `partial_attempt`, the saved record of what is known, so the caller can put it in the report (issue 478): the helpers that the
+    sweeps removed would otherwise be lost with the exception."""
+    box: dict = {}
+    try:
+        return _run_attempt(_box=box, **kw)
+    except BaseException as exc:
+        partial = _partial_attempt(box, kw, exc)
+        if partial is not None:
+            try:
+                exc.partial_attempt = partial
+            except Exception:
+                pass
+        raise
+
+
+def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, http=post_json, clock=time.time,
+                 watchdog=None, run_watched=kp.run_watched, tt_lang: dict | None = None, temperature: float = 0.0,
+                 top_p: float | None = None, seed: int | None = None, references: list[dict] | None = None,
+                 skills: dict | None = None, coder_speed: dict | None = None, stage_turns: int | None = None,
+                 stage_wall_s: float | None = None, _box: dict | None = None, **ignored) -> dict:
     """One staged attempt (see the module docstring). Returns the attempt record, saved as attempt.json, with the fields
     kernelprobe.run_attempt writes and one more, `staged`.
 
@@ -207,6 +258,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
     last_outcome, last_check, last_sim_check, last_detail = None, {}, {}, ""
     verified: bytes | None = None
     swept_all: list = []
+    if _box is not None:                       # an interrupted attempt keeps what is known so far (_partial_attempt)
+        _box.update(records=records, swept=swept_all, facts=facts)
     try:
         for index, stage in enumerate(stages, start=1):
             final = index == len(stages)

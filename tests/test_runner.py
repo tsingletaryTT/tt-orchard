@@ -128,6 +128,21 @@ ALLOW = [
 ]
 
 DENY = {
+    # Issue 864; the full list of spellings and the ways round them is in tests/test_runner_tree_reads.py.
+    "tree-read-outside-run-dir": [
+        "grep -R x /home/someone",
+        "grep -rn 'embedding wants ROW_MAJOR ids' /home/someone/.cache",
+        "rg x /home/someone",
+        "find /home/someone -name x",
+        "ls -R /home/someone",
+        "tree /home/someone",
+        "du -a /home/someone",
+        "cd /; grep -R x",
+        "bash -c 'grep -R x /home/someone'",
+        "grep -R x {run}/..",
+        "grep -R x ~",
+        "echo /home/someone | xargs find",
+    ],
     "package-install": [
         "pip install transformers",
         "pip3 install --upgrade transformers",

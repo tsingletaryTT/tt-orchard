@@ -528,3 +528,106 @@ def test_a_fixture_kernel_passes_its_stage_on_the_real_simulator(tmp_path, kenv,
     (adir / "kernel.py").write_bytes((STAGED_FIXTURES / fixture).read_bytes())
     got = kp.authoritative_check(adir, op=op, env=kenv, tt_lang=kp.tt_lang_facts(kenv), templates=tdir)
     assert got["passed"] is True, got.get("first_line")
+
+
+# ---- issue 478: a partial staged attempt is saved and attached to the exception on every exceptional exit -----------------------------------
+
+class _InterruptedStep:
+    """Stands in for AgentStep. Stage 1 writes a kernel and ends; the step of `fail_stage` raises `exc` instead."""
+    fail_stage = 2
+    exc: BaseException = KeyboardInterrupt()
+
+    def __init__(self, **kw):
+        self.stage, self.run_dir = kw["stage"], Path(kw["run_dir"])
+
+    def run(self, system, user):
+        if self.stage == type(self).fail_stage:
+            raise type(self).exc
+        (self.run_dir / "kernel.py").write_text(f"# kernel written in stage {self.stage}\n")
+        from orchard.agent import Outcome
+        return Outcome("done", 1, "done")
+
+
+def _sweep_found(*pids):
+    def sweep(run_dir, **kw):
+        recs = [{"pid": pid, "cmdline": "helper", "stopped": True} for pid in pids]
+        if kw.get("into") is not None:
+            kw["into"].extend(recs)
+        return recs
+    return sweep
+
+
+def _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, exc, fail_stage=2, sweep=None):
+    _InterruptedStep.fail_stage, _InterruptedStep.exc = fail_stage, exc
+    monkeypatch.setattr(ks, "AgentStep", _InterruptedStep)
+    monkeypatch.setattr(kp, "sweep_strays", sweep or _sweep_found(7001))
+    with pytest.raises(type(exc)) as raised:
+        ks.run_attempt(op="center", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1", model="m", coder_model="m",
+                       probe_id="t", tt_lang=FACTS, temperature=0.7, seed=1, run_watched=table_watcher({}))
+    return raised.value
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), RuntimeError("the agent step crashed")])
+def test_an_exceptional_exit_carries_a_saved_partial_attempt(tmp_path, fake_kenv, monkeypatch, exc):
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, exc)
+    partial = getattr(err, "partial_attempt", None)
+    assert isinstance(partial, dict)
+    assert partial["op"] == "center" and partial["attempt"] == 1 and partial["status"] == "interrupted" and partial["passed_sim"] is False
+    assert type(exc).__name__ in partial["status_detail"]
+    on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "center", 1) / "attempt.json").read_text())
+    assert on_disk == json.loads(json.dumps(partial))
+
+
+def test_the_partial_attempt_keeps_the_helpers_the_sweeps_already_removed(tmp_path, fake_kenv, monkeypatch):
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, KeyboardInterrupt())
+    assert [r["pid"] for r in err.partial_attempt["swept"]] == [7001, 7001, 7001]       # stage 1's two sweeps and the interrupted stage's
+
+
+def test_the_partial_attempt_names_the_stages_that_finished(tmp_path, fake_kenv, monkeypatch):
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, KeyboardInterrupt(), fail_stage=2)
+    st = err.partial_attempt["staged"]
+    assert st["reached"] == 1 and st["stages_passed"] == 1 and [s["name"] for s in st["stages"]] == ["copy"]
+    assert st["failed_stage"] is None
+
+
+def test_an_interrupt_in_the_first_stage_still_carries_a_partial_attempt(tmp_path, fake_kenv, monkeypatch):
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, KeyboardInterrupt(), fail_stage=1)
+    assert err.partial_attempt["staged"]["reached"] == 0 and [r["pid"] for r in err.partial_attempt["swept"]] == [7001]
+
+
+def test_the_report_takes_a_partial_staged_attempt_without_a_stage_record_problem(tmp_path, fake_kenv, monkeypatch):
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, KeyboardInterrupt(), fail_stage=1)
+    md = ks.write_staged_report(tmp_path / "probe", [err.partial_attempt], "center")
+    assert md is not None
+
+
+def test_a_failure_to_save_the_partial_attempt_does_not_hide_the_exception(tmp_path, fake_kenv, monkeypatch):
+    def broken(adir, attempt):
+        raise OSError("disk full")
+    monkeypatch.setattr(kp, "_save_attempt", broken)
+    err = _interrupted_attempt(tmp_path, fake_kenv, monkeypatch, KeyboardInterrupt())
+    assert isinstance(err, KeyboardInterrupt)
+
+
+def test_main_puts_the_partial_staged_attempt_in_the_report_when_an_interrupt_ends_the_run(tmp_path, fake_kenv, env_ready, monkeypatch):
+    def run_attempt(**kw):
+        err = KeyboardInterrupt()
+        err.partial_attempt = {"op": "center", "attempt": 1, "status": "interrupted", "status_detail": "KeyboardInterrupt", "passed_sim": False,
+                               "category": None, "first_line": "", "pcc_min": None, "sets": [], "violations": [], "hw": None,
+                               "swept": [{"pid": 7001, "cmdline": "helper", "stopped": True}], "turns": None, "agent_wall_s": None,
+                               "agent_check_untrusted": False, "provenance": {}, "staged": {"stage_names": ["copy"], "stages": [], "reached": 0,
+                                                                                   "stages_passed": 0, "failed_stage": None, "budgets": []}}
+        raise err
+    monkeypatch.setattr(ks, "run_attempt", run_attempt)
+    import io
+    code = kp.main(probe_args(tmp_path, op="center", staged=True, no_agent_hw=True, attempts=1, temperature="0.7", seed="2026110300",
+                                  stage_turns=None, stage_wall_s=None), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert code == kp.EXIT_ABORTED and [a["attempt"] for a in data["attempts"]] == [1]
+
+
+def test_an_unknown_op_raises_its_own_error_and_carries_no_partial_attempt(tmp_path, fake_kenv):
+    with pytest.raises(ValueError) as raised:
+        ks.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1", model="m", coder_model="m",
+                       probe_id="t", tt_lang=FACTS)
+    assert not hasattr(raised.value, "partial_attempt")

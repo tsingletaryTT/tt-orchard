@@ -526,7 +526,8 @@ class NoFileWritten:
                        {"turns": count},
                        nudge=(f"{count} model turns have passed and no file was written. "
                               "Stop investigating: write the files the skill names now, or say "
-                              "what blocks you from writing them. For the stage 2 port, if "
+                              "what blocks you from writing them. A write is a `write_file` call, or a shell command that changes a port "
+                              "file (for example `stage_tools.py edit`). For the stage 2 port, if "
                               "`stages/2/reference_excerpts.md` exists it holds the reference "
                               "classes your model uses: write a first `stages/2/port/port_model.py` "
                               "from it now, even if it is incomplete, and refine it afterwards."))
