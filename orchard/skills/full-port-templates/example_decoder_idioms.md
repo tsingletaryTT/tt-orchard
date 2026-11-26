@@ -25,6 +25,7 @@ for name, t in read_tensors(model_dir).items():             # read the checkpoin
 ```
 - Select by tensor shape. A list of layer names misses any projection that is not on the list.
 - Keep each tensor in one dict only. Do not keep the `read_tensors` result in the model object.
+- A tensor from `safe_open(...).get_tensor(name)` lies in the memory-mapped file, and the PyPI ttnn 0.80.0 wheel never returns from `ttnn.from_torch` on it (issue 813). `read_tensors` already copies each tensor; a reader you write yourself needs `.clone()`.
 - `ttnn.linear` computes `x @ w`. A torch Linear weight is `[out, in]`.
 
 ## 2. One upload helper and one download helper

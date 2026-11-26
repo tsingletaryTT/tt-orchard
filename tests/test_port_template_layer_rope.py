@@ -269,9 +269,10 @@ def test_a_flat_rope_model_is_generated_byte_for_byte_as_before():
     `TOKEN_CHOICE = "host-row"` (tests/test_port_template_token_choice.py holds the hashes from before that line and checks the text is the
     same without it). The standard small decoder's hash moved a second time when the generator began to write the cached decode of a standard decoder
     (issue 759: `_attention_step`, `_rope_row`, `_rotate_row`, the cache lines of `_attention` and `close`, the cached `prefill` and `decode_step`); the tiny
-    Qwen4 hash did not move, so the composed layers' text is byte for byte as before."""
-    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "bec9114c87f3d22141e3527b5d1315526f7b42bc0c2d46ee8cd4c79fb872f6bf"
-    assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "aa1dceb6c5204afce761ecba00ec2b0816d14736062f1baae86164738cf2c02d"
+    Qwen4 hash did not move, so the composed layers' text is byte for byte as before. Both hashes moved a third time for issue 813, when the loader's `_Tensors.__getitem__` began to
+    copy each tensor out of the memory-mapped file (`.clone()`, plus two comment lines): the only lines that differ from the text before are those three."""
+    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "ab2a1028bc6aed19c4289fb55d3e600201ec132bff6ec0c502a387779a30ac87"
+    assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "ba5779aca579d20e071ea0de3bc476be7aa12cd1db11c269bdc7001fdf72b856"
 
 
 # ---- the generated port against a torch forward at a length above the YaRN original length -----------------------------------------------------

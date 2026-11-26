@@ -23,9 +23,10 @@ from test_port_template_layer_rope import aion_rope_config, run_port
 
 # The pins of tests/test_port_template_layer_rope.py before this change: the generated text of the standard small decoder and of the tiny Qwen4
 # model, byte for byte as PR 791 left them.
-# OLD_STD moved once, when the generator began to write the cached decode of a standard decoder (issue 759); the tiny Qwen4 pin did not move.
-OLD_STD = "b359b54b78c1b68861a9cf13580ee9176a478c0df9a693f1b7d115225d0ad7c3"
-OLD_QWEN4 = "21ff801d7aab080c0ef26c99f5481878d561ce0cc95acfb17c9760d5cdff36a0"
+# OLD_STD moved once, when the generator began to write the cached decode of a standard decoder (issue 759); the tiny Qwen4 pin did not move. Both moved again
+# for issue 813 (the loader copies each tensor out of the memory-mapped file: `.clone()` and two comment lines in `_Tensors.__getitem__`).
+OLD_STD = "9495397816a7100674d292f274d3e95c51ce9d02fe60e508fd016ea668671b15"
+OLD_QWEN4 = "e6e54b1a733f29bccf588b24d73089a77bd5d2b1da5b6007e77eb8f82c46fa50"
 
 
 def without_marker(text: str) -> str:
