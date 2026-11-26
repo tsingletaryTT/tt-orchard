@@ -86,7 +86,7 @@ def test_the_coders_repair_prompt_carries_the_numbers_the_supervisor_computed(ri
     assert "top1_agreement 0.5312: 17 of 32 ids match" in first and "position | reference id | port id" in first
     assert "first mismatch is at position 2" in first.replace("position 0 (the prefill token) matches and the ", "")
     assert "top1_agreement 0.7500: 24 of 32 ids match" in second and "The previous round's agreement was 0.5312; this round's is up" in second
-    assert len(first) < 12_000                        # the table of mismatches and the tail are bounded, not the whole record
+    assert len(first) < 12_000                        # the table of mismatches and the tail are bounded; the whole record is not sent
 
 
 def test_the_ledger_failure_line_names_the_numbers_and_not_the_ports_words(rig):
