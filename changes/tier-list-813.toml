@@ -1,0 +1,3 @@
+target = "0.9.210"
+summary = "The test-tier lists name the loader-copy test file from PR 874, so the tier check passes on main."
+pr = 877
