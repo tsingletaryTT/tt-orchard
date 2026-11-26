@@ -192,3 +192,24 @@ showed. The same four mistakes can recur, so a reviewer asks them of each row. N
 | Does the agreement row carry the conditions of the section it sits in? | Agreement rows sat under a "trace on" heading, but the command behind them (`run_chip.py agree`) never enables a trace. The served bundle does trace. Label an untraced result as untraced. |
 | Is a time to first token the time to the first token? | The prefill rows recorded the whole request time. Leave out TTFT until the server's `first_token_s` is captured. |
 | Does an explanation match the records it cites? | The near-tie explanation on the Olmo card is written only when the records show the same two tokens in the same order and the reference's own generation taking the second one. Otherwise the card says the difference is not explained. |
+
+## Statements the Lottolabs cards make, added to the package card (2026-11-24)
+
+The Lottolabs Blackhole cards state four things that the stage 7 package card (`orchard/package_card.py`) did not. They are now in `render_card`:
+
+- **Where each measured row came from.** Under `## Expected performance` the card says which stage's result file each measured row was read from: a row under `stages/7/`
+  was measured on this package, and a row under `stages/2/` or `stages/4/` was measured earlier in the run on the model's staged configuration, before the package was
+  built. It also says that no row is copied from another package or from the model's authors. The sentence is worked out from the first evidence file of each row and
+  is left out when no measured row has a stage path. (`numbers_source_sentence`)
+- **What the numbers do not show.** `PROOF_SCOPE`: the rows show that the package serves and how far its greedy tokens agree with the CPU reference on the prompts the run
+  used. They do not show agreement on other prompts, equality with the original model's output on a GPU, quality on any benchmark, or that speculative decoding keeps the
+  output distribution. The sentence holds no number, so the check that refuses a number with a unit outside the table accepts it.
+- **The firmware and tt-kmd the package was tested with.** `CardFacts.firmware` and `CardFacts.kmd` print one Limitations bullet when set ("Tested with firmware 19.17.1 and
+  tt-kmd 2.12.0; other versions are not claimed by this bundle."). A value that is not a version (digits first, then letters, digits and `._+-`, at most 40 characters) is
+  refused. Nothing sets them yet: a run records neither version, so the caller that builds the facts needs a host-stack snapshot at stage 0 or stage 7 first.
+- **The licence's restriction in one sentence.** For each known licence other than Apache 2.0 (`LICENSE_RESTRICTIONS`: MIT, CC BY 4.0 and the three non-commercial CC
+  licences) the License section adds one sentence and says it is a summary and that the licence text at the link governs. A licence the module does not know, and
+  `other`, keep the non-commercial treatment and get no summary, because a model whose licence is `other` quotes the agreement word for word (see above).
+
+Not added: a reproduce block. A package card's numbers come from a supervised run whose commands are in the run's ledger and not in the bundle, and a block that names `tt-model serve`
+only repeats the How to serve section. A Lottolabs card gives the commands that produced its tables because its author ran them by hand.

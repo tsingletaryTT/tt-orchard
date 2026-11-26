@@ -2570,6 +2570,18 @@ Exit codes: 0 every question answered; 1 some could not be answered; 2 refused (
 - `--accept-untested-version`: run a version or files that were not tested.
 - `--call-timeout`: seconds one server call may take (default 60). `--total-timeout`: seconds the whole session may take (default 300).
 
+### 5.9ec Check a package's first start before it begins (no board, no download)
+
+```bash
+tt-orchard first-start ~/.cache/tt-model/pulled/raahemnabeel__hy4-flash --link-mbps 68       # the card and the manifest of a pulled package
+tt-orchard first-start --card README.md --manifest tt_kernel_manifest.json --ready-timeout-s 7200
+```
+
+A package with a long first start states most of what it needs in its card and manifest: the disk (the checkpoint and the caches a first start builds), the host RAM to start and for full speed, a pinned-memory option and the ready timeout. `first-start` reads them and prints five rows: `first-start disk`, `host ram`, `memlock`, `download` and `ready timeout`. Each row names the card line a figure came from, or says `not stated`. It blocks (exit code 5) only when a stated figure is violated: the disk needed for the checkpoint, the caches and the margin (reason `disk-full`), the host RAM the server needs to start (`model-does-not-fit`), or a ready timeout shorter than a first-start time the card states (`blocked`). It warns when RAM is below the full-speed figure, when the card advises `--ulimit memlock=-1:-1`, and when MemAvailable cannot be read. A card or manifest that cannot be read safely (a pipe, a link, a file over the size cap, a manifest that is not JSON) is a refusal (exit code 2). The card is free text, and only a few fixed wordings are read; a figure in another wording is `not stated`.
+
+- `--card`, `--manifest`: the files (default `PACKAGE/README.md` and `PACKAGE/tt_kernel_manifest.json`; a missing manifest is not an error). `--hf-home`: where the checkpoint is stored (default `$HF_HOME` or `~/.cache/huggingface`); a snapshot of the manifest's pinned revision already there is not counted again. `--cache-root`: where the first start builds its caches (default `~/.cache/tt-model`).
+- `--link-mbps`: the download rate in MB/s that you measured; without it no download time is estimated. `--ready-timeout-s`: the timeout the serve step will use (default: the manifest's `VLLM_ENGINE_READY_TIMEOUT_S`). `--min-free-gb`: the margin kept free after the first start (default 40).
+
 ### 5.9fa The audio reference environment and the CPU reference
 
 ```bash
