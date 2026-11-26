@@ -652,3 +652,88 @@ def test_a_git_dependency_url_with_an_at_sign_is_not_a_hub_pin(tmp_path):
     hub, rev_line = _card_run(tmp_path, readme)
     assert rev_line.strip().startswith("ok"), rev_line
     assert not [c for c in hub.calls if c[0] == "exists" and c[2] != REV], hub.calls
+
+
+# ---- a build whose tt-metal commit is not on its remote (Hy4-flash study, 2026-11-25, learning 11) ----
+# Raahem's bundle records `container.built.tt_metal` with `"pushed": false` (a commit that exists only in one person's checkout), and the card says the
+# commit is "not published". Nobody else can rebuild the image from public sources. The check warns; it does not fail the package.
+
+def _built(**over):
+    doc = json.loads(_manifest())
+    doc["container"] = {"built": {"tt_metal": {"sha": "454a55fe316ff50922052f63e33d29ecee7fd843", "remote": "https://example.invalid/tt-metal.git",
+                                              "pushed": False}, "plugin": {"sha": "d815250d957cc81eaebc9b67885f661bb8943b19"}}}
+    for path, value in over.items():
+        node = doc["container"]["built"]
+        keys = path.split(".")
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+    return json.dumps(doc).encode()
+
+
+_RUNS = iter(range(10_000))
+
+
+def _verify_manifest(tmp_path, manifest):
+    """One verify-package run in its own scratch directory (a test may call this in a loop)."""
+    files = good_files()
+    files["tt_kernel_manifest.json"] = manifest
+    files.pop("package-record.json")
+    code, text = run(FakeHub(files), tmp_path / f"run{next(_RUNS)}")
+    return code, text, line(text, "manifests")
+
+
+def test_a_tt_metal_commit_that_was_not_pushed_is_a_warning_that_names_the_commit(tmp_path):
+    code, text, row = _verify_manifest(tmp_path, _built())
+    assert row.strip().startswith("warn"), text
+    assert "tt-metal" in row and "454a55fe316f" in row and "pushed" in row and "public" in row
+    assert code == 0 and "FAIL" not in text
+
+
+def test_a_pushed_commit_is_not_flagged(tmp_path):
+    _, text, row = _verify_manifest(tmp_path, _built(**{"tt_metal.pushed": True}))
+    assert row.strip().startswith("ok"), text
+
+
+def test_a_manifest_without_a_built_section_is_unchanged(tmp_path):
+    _, text, row = _verify_manifest(tmp_path, _manifest())
+    assert row.strip().startswith("ok"), text
+
+
+def test_a_pushed_value_that_is_not_a_boolean_is_not_read_as_false(tmp_path):
+    for value in ("false", 0, None, "no"):
+        _, text, row = _verify_manifest(tmp_path, _built(**{"tt_metal.pushed": value}))
+        assert row.strip().startswith("ok"), (value, text)
+
+
+def test_an_unpushed_plugin_commit_is_flagged_too(tmp_path):
+    _, text, row = _verify_manifest(tmp_path, _built(**{"tt_metal.pushed": True, "plugin.pushed": False}))
+    assert row.strip().startswith("warn") and "plugin" in row, text
+
+
+def test_both_unpushed_commits_are_named(tmp_path):
+    _, text, row = _verify_manifest(tmp_path, _built(**{"plugin.pushed": False}))
+    assert "tt-metal" in row and "plugin" in row
+
+
+def test_a_real_manifest_problem_still_fails_and_is_not_softened_by_the_warning(tmp_path):
+    bad = json.loads(_built())
+    bad["weights"]["revision"] = "main"
+    _, text, row = _verify_manifest(tmp_path, json.dumps(bad).encode())
+    assert row.strip().startswith("FAIL") and "40-character" in row
+
+
+def test_only_the_kernel_manifest_is_read_for_the_build_record(tmp_path):
+    files = good_files()
+    files["other_manifest.json"] = _built()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok"), text
+
+
+def test_a_build_section_of_the_wrong_shape_is_ignored(tmp_path):
+    for built in ([], "x", {"tt_metal": "pushed"}, {"tt_metal": []}):
+        doc = json.loads(_manifest())
+        doc["container"] = {"built": built}
+        _, text, row = _verify_manifest(tmp_path, json.dumps(doc).encode())
+        assert row.strip().startswith("ok"), (built, text)

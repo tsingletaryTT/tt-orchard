@@ -309,8 +309,27 @@ def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None, p
     return out
 
 
+def _unpushed_builds(doc) -> list[str]:
+    """The built-from commits that tt_kernel_manifest.json records with `"pushed": false`, one sentence each. The manifest's `container.built` section
+    (tt-model-manager schema 5.1) names the tt-metal checkout and the vLLM plugin checkout an image was built from; `pushed` says whether that commit is
+    on its remote. Only the boolean false counts: a missing key, a string or anything else is not read as a statement about the commit."""
+    container = doc.get("container") if isinstance(doc, dict) else None
+    built = container.get("built") if isinstance(container, dict) else None
+    if not isinstance(built, dict):
+        return []
+    out = []
+    for key, label in (("tt_metal", "tt-metal"), ("plugin", "plugin")):
+        part = built.get(key)
+        if isinstance(part, dict) and part.get("pushed") is False:
+            sha = part.get("sha")
+            named = f" {sha[:12]}" if isinstance(sha, str) and sha else ""
+            out.append(f"the {label} commit{named} the image was built from is recorded as not pushed to its remote, so nobody else can rebuild the image "
+                       "from public sources")
+    return out
+
+
 def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
-    problems, seen = [], []
+    problems, seen, unpushed = [], [], []
     model = _model_of(root, card)
     primary = primary_revisions(root, card, model)
     for p in sorted(root.rglob("*.json")):
@@ -325,6 +344,7 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
             continue
         if p.name == "tt_kernel_manifest.json":
             problems += _manifest_pin_problems(doc, rel, card, model, primary)
+            unpushed += [f"{rel}: {t}" for t in _unpushed_builds(doc)]
     y = root / "tt-model.yaml"
     if y.is_file():
         seen.append("tt-model.yaml")
@@ -348,6 +368,8 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
                             f"({', '.join(sorted(primary))})")
     if problems:
         return Finding("manifests", FAIL, "; ".join(problems))
+    if unpushed:
+        return Finding("manifests", WARN, ("checked " + ", ".join(seen) + ". ") + "; ".join(unpushed))
     return Finding("manifests", OK, ("checked " + ", ".join(seen)) if seen else "the package ships no manifest to check")
 
 
