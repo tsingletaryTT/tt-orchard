@@ -6226,3 +6226,21 @@ In the Hy4-flash trial of stage 2 the third repair round gave `stage_tools.py ed
 
 In a stage 2 trial an agent ran `grep -R "<error text>" -n` over the operator's home directory. The runner allowed it, the search ran until the 1,800 second tool timeout, and the round lost 31.5 minutes. A recursive search reads every file under its start points, and a home directory holds credential files. `orchard/runner.py` has a rule, `tree-read-outside-run-dir`, that refuses a recursive `grep` (`-r`, `-R`, `--recursive`, `-d recurse`, `rgrep`), `rg`, `ag`, `ack`, `fd`, `find`, `ls -R`, `tree` and `du` when a start point, or the directory the search starts in when none is named, is outside the run directory and the read-only places the run names. Start points are resolved first (`..`, links, a sibling directory named like the run directory), a `$` word and a `~` are refused, a glob is expanded only after its fixed prefix is inside, a tool that follows links gets its tree walked first for a link that leads out (bounded: depth, entries, no link followed, no file opened), start points that come from a pipe are refused, and so are the options that read start points from a file or run a program on each match. The refusal names the path and says where to search. The agent's shell gets the read-only places from the run (the checkout, the Hugging Face `hub` directory and not the token that sits in the Hugging Face home, the tt-model root, the tensor-cache root, the named input directories, `ORCHARD_AGENT_READ_ROOTS`), and a command that holds a search ends after `SEARCH_TIMEOUT_S` (120 s, or `ORCHARD_SEARCH_TIMEOUT_S`) with the elapsed time in the step's ledger record. A single named file is still readable by its path, as the runner's docstring and README 5.7 say. `tests/test_runner_tree_reads.py` has the cases, including a hostile-input child process (deep and wide trees, link loops, a FIFO); a table of 67 mutations each turned a test red.
 
+
+## 2026-11-25: a port file changed by a shell command counts as a write for the watchdog (branch fix-867-shell-edit-counts-as-write, issue 867)
+
+In a stage 2 trial an agent made 34 `stage_tools.py edit` calls and 35 `py_compile` calls in 60 turns and was escalated by `no_file_written`. The
+watchdog counted a write only for the `write_file` tool. A shell command arrives as a tool result with no `wrote` value, so an agent that followed
+the task text (change the port with `edit` after the first write) looked like one that had written nothing. The first-write hint and the nudge
+fired on an agent that was making progress.
+
+The port guard already reads the port directory before and after each shell command. It now records the files whose accepted content differs from
+what they held before the command (`PortGuard.written`). `Tools` turns that into the call's answer (`last_shell_wrote`): True when a port file
+changed, False when the command ran the `edit` tool and nothing changed (the tool refused), None otherwise. The agent loop puts it in the
+`tool_result` event, and `NoFileWritten` and `FirstWriteDeadline` read it through their existing rule. The evidence is the files. The text of the
+output is not evidence: a command that only prints an `EDIT_RECORD` line does not count. A rewrite with the same bytes, a cache directory and a
+file the guard put back do not count. The nudge and both hint texts now say what counts as a write.
+
+`tests/test_shell_writes_count.py` has 27 tests. 13 mutations, each removing one guard, turned a test red and were restored. Choice: the changed
+content between the guard's two looks is the evidence for every shell command, so `sed -i`, `tee`, a redirect and `edit` are treated alike, and
+the `EDIT_RECORD` line that `edit` already printed is not used.
