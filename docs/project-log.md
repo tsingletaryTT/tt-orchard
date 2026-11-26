@@ -6120,6 +6120,29 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-25 Test tiers and a diff selector
+
+Prompt (operator): is every test required every time, or could they be classified? Then: build it.
+
+Measured first: a full run of 31,826 tests takes 19 minutes with six workers; 51 files above 30 s hold 69 percent of the test time. Markers `slow`
+(those files), `whole_repo` (guards that scan the repository) and `hardware` (none today) are registered with strict checking and applied from
+`tests/tier_lists.py` by a hook in `tests/conftest.py`. The guards were found with a fault run (ten failures from eight kinds of fault) and a
+scanner check. `scripts/tests_for_diff.py` prints the pytest arguments for a diff from the import graph (syntax trees, string references,
+conftest fixtures) and always includes the guards; anything it cannot map selects the full suite and says why. Documentation: `docs/test-tiers.md`,
+measurements: `docs/run-logs/2026-11-24-test-tiers.md`. 114 new tests; 58 mutations each turned a test red. History check over 15 merged pull
+requests: the tests each pull request changed were always selected. The default selection is wide for core modules (52 to 93 percent of files), so
+`--eager` and `--direct` exist for feedback loops. The full suite on the integration state remains the merge gate. Not built: a per-test coverage
+map, which would narrow the selection further.
+
+
+
+
+## 2026-11-24: statements for the package card (Lottolabs study, learnings 25 and 32; branch lotto-card-statements)
+
+The Lottolabs cards say where each number came from and whether it was measured on the package, what their proofs do not show, the firmware and tt-kmd they were tested with, and the licence's limit near the top. `render_card`
+now says, under Expected performance, which stage each measured row came from (stage 7 rows were measured on this package; stage 2 and 4 rows on the staged configuration before it was built) and that no row is copied; adds `PROOF_SCOPE` (what the rows do not show); prints
+`CardFacts.firmware` and `kmd` in Limitations when set (nothing sets them yet: a run records neither); and adds one summary sentence for MIT, CC BY 4.0 and the three non-commercial CC licences. A reproduce block was not added (see `docs/can-cards.md`).
+44 new tests in `tests/test_card_statements.py`; 33 mutations each turn a test red; the existing card tests pass unchanged.
 ## 2026-11-24: a staged kernel attempt that is cut short keeps its record (issue 478, branch staged-partial-attempt-478)
 
 `kernelstaged.run_attempt` collects the records of the shell-command sweeps in `swept_all` and the stage records as the stages finish. When `step.run()` was interrupted, or any stage crashed, the exception left the runner before an attempt was saved or `partial_attempt` was set, so the command-line run lost the structured record of the helpers the sweeps had already removed. `run_attempt` is now a wrapper around `_run_attempt`, as in `kernelprobe` (PR 431, round 4): on any exceptional exit (an interrupt or an error) `_partial_attempt` builds a record from what the inner function published in a box (the stage records so far, `swept_all`, the tt-lang facts), saves it like any attempt (`status` `interrupted`, the exception's type in `status_detail`, `passed_sim` False, a `staged` block that names the finished stages) and attaches it to the exception as `partial_attempt`. A failure to save does not hide the exception, and an unknown op keeps its own `ValueError` without a partial record. `main` already put `partial_attempt` in the report for both kinds of exit. Eight new tests in `tests/test_kernelstaged.py`; twelve mutations each turn a test red. The staged runner's own authoritative check does not yet skip when a helper may still run (issue 477 changed `kernelprobe._run_attempt` only); that is not part of this change. Nothing ran on a chip.
@@ -6269,3 +6292,19 @@ exist; the rerun counts only a test failure (exit code 1) and caught a missing `
 
 Not done here: the check is not a step of `tt-orchard bringup` (a run's preflight covers the model it brings up and does not cover the package a coder or helper serves), it does not measure the link
 (the rate is an argument), and it reads no card wording outside the patterns. Related: issue 702 (disk for the Qwen4 release run) and 739 (host-resident experts).
+## 2026-11-25: the Engram tables count as host memory in the residency estimate (branch fix-844-engram-host-resident, issue 844)
+
+Prompt (operator, 2026-11-25): "work through more issues". The Hy4-flash study found that `orchard/residency.py` filed the Engram tables of `tencent/Hy4-flash`
+under `norms_other`. The default policy keeps that category on the chips in bf16, so a plan built from tensor names counted about 60 GiB of host memory
+as device memory. The published bundle keeps the tables in host RAM as FP8 rows and sends the looked-up rows to the chips each step.
+
+`_is_table` now treats a tensor as a table when it sits inside an Engram module (a name part that starts with `engram`) and a part has `embed` or `table`
+in it: `engram_layer.multi_head_embedding.embedding.weight` and `engram_layer.lookup_table`, the two tensors per layer that the bundle's host half reads.
+The projections, norms and gate scales of the Engram layer keep their old category, because they run on the mesh. `_table_key` accepts any config key whose
+word starts with `engram`, so `engram_layer_ids` and `engram_layer_head_vocab_sizes` name a table as `engram_n_embed_per_ngram` already did through its
+word `ngram`. The existing printed plan and the record already show the host-resident category and the host GiB, so no new output was needed.
+
+`tests/test_residency_engram.py` uses the real tensor names of the model (`tests/fixtures/hy4-flash-tensor-names.json`, 260 names and no weights: all 164 Engram
+names and one name of every other pattern). 191 tests in the file's run. Seven mutations, each removing or loosening one guard, turned a test red and were
+restored. The branch `hy4-plan-families` (the Engram caveat in the tier plan and the hazard scan) has not landed on `main`, so this change is the residency
+classifier alone; `orchard/hazards.py` still recognises only `ngram_size` and `ngram_vocab_size_base`, and `orchard/tier_plan.py` still names `ngram_` keys in its caveat.

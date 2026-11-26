@@ -18,3 +18,11 @@ include = ["orchard*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Strict markers: a misspelt marker fails collection. The tiers are applied by tests/conftest.py from tests/tier_lists.py (docs/test-tiers.md).
+addopts = "--strict-markers"
+markers = [
+    "slow: a test file measured above 30 seconds of test time; leave it out with -m 'not slow' (docs/test-tiers.md)",
+    "whole_repo: a guard that scans the whole repository; it runs on every change, so a new module, flag or file cannot break it unseen",
+    "hardware: needs a Tenstorrent chip; skipped unless ORCHARD_RUN_HARDWARE=1, and the test takes its own gozer lease",
+    "real_bundle: run the real stage 8 bundle builder in a supervisor test that fakes it by default",
+]
