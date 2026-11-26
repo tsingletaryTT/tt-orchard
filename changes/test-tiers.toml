@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "Test tiers: slow, whole_repo and hardware markers with strict marker checking, and scripts/tests_for_diff.py, which picks the tests a diff needs for a fast loop while the full suite stays the merge gate."
+kind = "chore"

@@ -1,0 +1,4 @@
+target = "0.9.209"
+summary = "tt-orchard first-start reads a package's card and manifest and checks the first start before it begins: disk for the checkpoint, the caches and a margin, host RAM, pinned memory, download time and the ready timeout (issue 843)."
+pr = 870
+kind = "feature"

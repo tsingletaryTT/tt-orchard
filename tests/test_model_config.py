@@ -126,7 +126,9 @@ def test_mla_head_dim_falls_back_to_the_query_key_width():
                 qk_rope_head_dim=64, v_head_dim=128)
     del cfg["head_dim"]
     assert mc.dims(cfg).head_dim == 192                     # 128 + 64, and 7168 / 128 would give 56
-    assert mc.dims(dict(cfg, head_dim=64)).head_dim == 64   # an explicit head_dim still wins
+    # a head_dim key does not change an MLA model's width: Hy4-flash's config says head_dim 64, which is its rope part, and qk_head_dim 256
+    # (tests/test_hy4_flash_plan.py). This line used to say an explicit head_dim wins.
+    assert mc.dims(dict(cfg, head_dim=64)).head_dim == 192
 
 
 def test_a_mistral_sliding_window_makes_every_layer_a_sliding_layer():

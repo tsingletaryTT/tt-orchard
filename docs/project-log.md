@@ -6120,6 +6120,28 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-24: concurrency and isolation probes (Lottolabs study, learnings 20 and 21; branch lotto-served-probes)
+
+The Lottolabs cards check that each of 16 concurrent requests equals the same request alone, that a request between other streams stays exact, that a cut stream leaves the next request exact, that speculation on equals off, that a streamed tool call never has
+`{}` arguments, and that vLLM answers 400 to min_p, logit_bias and min_tokens under speculation. `served_probes.py` sent concurrent requests only for a rate. It now has six advisory probes, each with a control (a server that does not repeat itself alone gets no verdict); `can boot` runs three of them when the can declares `max_num_seqs` above 1,
+and lists them without letting them fail the boot. The other three are library functions for a caller that knows the speculation switch or the tool schema. Run log: `docs/run-logs/2026-11-24-concurrency-isolation-probes.md`; `docs/canning.md` describes the rows. 99 new tests in `tests/test_served_probes_isolation.py`; 72 mutations each turn a test red (two more are equivalent: urllib raises for a 4xx or 5xx health answer, and the stream reader's line limit keeps a line under the JSON size bound) against a local streaming fake, 3 in `tests/test_can_served_probes_boot.py`. The first chip run is owed.
+## 2026-11-25 Test tiers and a diff selector
+
+Prompt (operator): is every test required every time, or could they be classified? Then: build it.
+
+Measured first: a full run of 31,826 tests takes 19 minutes with six workers; 51 files above 30 s hold 69 percent of the test time. Markers `slow`
+(those files), `whole_repo` (guards that scan the repository) and `hardware` (none today) are registered with strict checking and applied from
+`tests/tier_lists.py` by a hook in `tests/conftest.py`. The guards were found with a fault run (ten failures from eight kinds of fault) and a
+scanner check. `scripts/tests_for_diff.py` prints the pytest arguments for a diff from the import graph (syntax trees, string references,
+conftest fixtures) and always includes the guards; anything it cannot map selects the full suite and says why. Documentation: `docs/test-tiers.md`,
+measurements: `docs/run-logs/2026-11-24-test-tiers.md`. 114 new tests; 58 mutations each turned a test red. History check over 15 merged pull
+requests: the tests each pull request changed were always selected. The default selection is wide for core modules (52 to 93 percent of files), so
+`--eager` and `--direct` exist for feedback loops. The full suite on the integration state remains the merge gate. Not built: a per-test coverage
+map, which would narrow the selection further.
+
+
+
+
 ## 2026-11-24: statements for the package card (Lottolabs study, learnings 25 and 32; branch lotto-card-statements)
 
 The Lottolabs cards say where each number came from and whether it was measured on the package, what their proofs do not show, the firmware and tt-kmd they were tested with, and the licence's limit near the top. `render_card`
@@ -6185,6 +6207,11 @@ The study of Raahem's Inkling-2-Mini bundle found that `tt-orchard tier-plan` pu
 
 The cached decode of PR 806 ran on a two-chip mesh for the first time, on a port regenerated from main for Aion-1.0-Instruct-2.3B, against the published bundle's whole-sequence port. The 24 greedy tokens were identical on a 10-token and a 238-token prompt. On the 238-token prompt decode went from 0.77 to 6.40 tok/s; on the 10-token prompt it measured 4.75 and 3.15 tok/s, probably because the cached port's first step compiled inside the timed window. One run per cell. The first cached run hung in the loader for 32 minutes (issue 813): the generator's loader still writes `get_tensor(name)` without `.clone()`. Run log: `docs/run-logs/2026-11-24-aion-cached-decode-chip-run.md`.
 
+## 2026-11-24: generated-port loaders copy checkpoint tensors out of the memory map (issue 813)
+
+A generated port read each checkpoint tensor with `safe_open(...).get_tensor(name)`, which returns a view of the memory-mapped file. On the PyPI ttnn 0.80.0 wheel, `ttnn.from_torch` of such a view never returns: the server sits at 100 percent CPU with no log line. The Aion package hit it on 2026-11-22, and a chip run on 2026-11-24 hit it again in the cached port and cleared it with `.clone()`. The generator's `_Tensors.__getitem__` (`orchard/port_template.py`) and the stage 2 skeleton's `read_tensors` (`orchard/skills/full-port-templates/port_model_skeleton.py`) now copy each tensor when it is asked for. The skeleton's `read_tensors` is a lazy mapping that reads one tensor per request, so the copy does not hold the whole checkpoint in host memory (a plain dict of copies would have). The stage 2 skill and the idioms note say that a reader a port writes itself needs the copy. `orchard/skills/sidecar-parity-templates/hidden_parity.py` still returns an uncopied tensor from `load_tensor`: its result feeds host-side arithmetic only, and a test lists it with that reason.
+
+The tests write a real safetensors file, read a tensor back through the generator's loader text and through the skeleton, and ask `/proc/self/maps` whether the tensor's storage still lies inside the mapping. A stand-in for `from_torch` raises on such a tensor. A scan fails on any new `.get_tensor(` call under `orchard/` that neither copies nor appears in the host-only list. Four pinned hashes moved (the generated text of the standard decoder and the tiny Qwen4 model, in `tests/test_port_template_layer_rope.py` and `tests/test_port_template_token_choice.py`); the generated text differs from the text before only by the `.clone()` and two comment lines. Nothing ran on a chip in this change.
 ## 2026-11-24: the drafter decision from a measurement record (issue 182, branch spec-decision-182)
 
 The part of issue 182 that needs no board. `orchard/spec_decision.py` reads a measurement record from stage 2's directory (`evidence/spec-measure.json`: plain step time, verify pass time, accepted tokens per pass by prompt kind on real text, the sampling, the prompt source), decides with `spec_break_even` (lowest kind, only a gain turns the drafter on, random-token prompts refused, a temperature of 0 marked as greedy only), writes `evidence/spec-decision.json`, a ledger decision and an evidence entry when stage 2 passes (`Supervisor._spec_decision_record`), and gives the package card a sentence in its limits. A refused record is a ledger decision and never fails the stage. 74 tests; 25 mutations, 24 red and one equivalent (the calculator refuses an empty acceptance list itself). Not built: the board run that measures the three numbers, and `run.sh` enabling the drafter only on a gain; the issue stays open (`docs/run-logs/2026-11-24-spec-decision-from-measurements.md`).
@@ -6205,6 +6232,12 @@ Issue 801's first two needs were on main from PRs 803 and 812: the sheet names t
 An audio run no longer boots the local coder for stage 0. The command records the run inputs `audio_model=1` and `audio_base=<base id>` when the preflight's base row says the model is audio and the base snapshot is known; `stages.AUDIO_STAGE_0` (`harness=True`, `needs_coder=False`, the agent stage's gate) then runs the shipped `delta_triage.py` as supervisor code (`orchard/audio_stage0.py`, `Supervisor._audio_triage_body`). The template stays the judge: a delta.json without `facts.modality` of audio fails the stage. A resume keeps the run's recorded choice, so runs from before the change keep the agent stage 0. Run by hand on the cached Stable Audio 3 small-music pair, the template took 0.2 s and the gate passed. `tests/test_audio_stage0_harness.py` has 44 tests and 23 mutations, all red after one test was added for a recorded `audio_model` that is not the string "1". The strict xfail of `tests/test_audio_stage0_coder.py` is removed. The stock-runtime stage 0 still boots the coder (left open in the run log, `docs/run-logs/2026-11-24-audio-stage0-harness.md`).
 
 
+## 2026-11-25: verify-package warns about an unpushed build commit (branch hy4-unpushed-commit)
+
+The study of Raahem's `hy4-flash` bundle found that its `tt_kernel_manifest.json` records the tt-metal commit the image was built from (`container.built.tt_metal`) with `"pushed": false`, and the card says the commit is "not published": nobody else can rebuild the image from public sources. `tt-orchard verify-package` now reads that section of the kernel manifest and turns the manifests check into a warning that names the commit when the tt-metal or the plugin checkout is recorded as not pushed. A real manifest problem still fails and outranks the warning; only the boolean false counts (a string, a number or a missing key says nothing); only `tt_kernel_manifest.json` is read for it. The exit status is unchanged (a warning never fails the package). Tests: 9 in `tests/test_verify_package.py`, written first; 12 mutations, each turned a test red. Not run against the Hub: the tests use the fake Hub. A second real example came later the same day: the newer Hy4-flash revision pulled here records a tt-metal commit that is on no remote (branch `raahem/hy4-flash-poolfix`, reported by the coordinator; not re-checked against the Hub here).
+## 2026-11-25: Hy4-flash in the plan and the hazard scan (branch hy4-plan-families)
+
+The study of Raahem's `hy4-flash` bundle found that `tt-orchard tier-plan tencent/Hy4-flash` refused the model ("unknown family: the layer type 'deepseek_sparse_attention' ...") and, once past that, counted the experts at twice their size. The change counts `deepseek_sparse_attention` and sliding-window layers as multi-latent attention with their own head counts (32 and 64), reads the experts' working width from `routed_expert_hidden_size` (1,536 against a 3,072 hidden size: 148.6B expert parameters, where the old count gave 297B) and counts the latent projections around them with the router, takes an MLA model's head width from `qk_nope_head_dim + qk_rope_head_dim` (the config's `head_dim` key is 64, the rope part), sizes the Engram memory from the config (63.36B parameters, 60.24 GiB) and names it in the plan's caveats, makes the hazard scan see `engram_*` keys as an n-gram embedding, and adds a note that a published bundle claims to serve the two stock-op hazard rows' model. One existing test changed on purpose: `test_mla_head_dim_falls_back_to_the_query_key_width` said an explicit `head_dim` wins. Recomputed totals: 217.0B parameters against the card's 220B; 9.32B per token against 11.3B, with the gap unexplained. For a latent-attention model `tier-plan --context TOKENS [--users N]` replaces the flat 4 GiB KV allowance with an estimate from the config (Hy4-flash: 2.63 GiB a die for one user at 202,752 tokens, the study's code reading gave about 2.9 GiB; the indexer's keys are not counted), taken whole from every chip because the latent row is the same on every die. Tests: `tests/test_hy4_flash_plan.py` (52, written first); 44 mutations, each turned a test red. Not run on a chip. Run log: `docs/run-logs/2026-11-25-tier-plan-vs-hy4-flash.md`.
 ## 2026-11-25: Voxtral under simultaneous requests and a singing probe (branch voxtral-load-run)
 
 Voxtral Mini and Voxtral TTS each ran on their own board with 1 to 32 simultaneous requests (TTS) and 1, 2 and 4 (Mini), five repeats each. TTS answered 32 requests (about 110 s of audio) in a median 3.2 s against 1.8 s for one, with 7 of 50 runs about 7 s slower for a cause not found. The Mini serves one request at a time and queues the others without failures; four 203 s clips took 19.6, 38.7, 57.8 and 77.0 s. The TTS container log has no per-stage lines. Twenty voices given four lyric lines spoke them; a pitch check found no held notes. Docs only; run log `docs/run-logs/2026-11-25-voxtral-load-run.md`.
@@ -6273,3 +6306,43 @@ the same failure). The round limit is unchanged.
 
 Not done: the first-write deadline (12 turns), the turn limit (60) and the request timeout (900 s) are still constants, and the trial's extra numbers
 (logit gap, which functions compute only in torch) are not in the task text; the report holds what the check's record holds.
+## 2026-11-25: a first-start check for a package, from its card and manifest (branch preflight-first-start-843, issue 843)
+
+Prompt (operator, 2026-11-25): "work through more issues". The first start of `raahemnabeel/hy4-flash` took a 107 min 43 s download (440 GB), 24 min 41 s to ready, built
+about 165 GB of caches, needed 17 GB of host RAM to start and 116 GB for full speed, failed to pin its 60 GiB table at the container's 8 MiB memlock limit, and
+ran with a ready timeout of 21600 s. The card and the manifest stated most of this before the download. `check_disk` counts the download and a margin and knows nothing of the
+caches a first start builds, and no preflight row covers host RAM, pinned memory, the download time or the timeout.
+
+`orchard/first_start.py` and `tt-orchard first-start PACKAGE_DIR` (or `--card` and `--manifest`) read the card text and the manifest and print five rows in the preflight style:
+disk (the checkpoint when it is not on disk, the card's cache figure, one margin on one disk or one margin per disk, and what is left after the first start), host RAM, pinned
+memory, download time (needs `--link-mbps`) and the ready timeout (the manifest's `VLLM_ENGINE_READY_TIMEOUT_S` or `--ready-timeout-s`). It blocks only when a stated figure is
+violated, with the block reasons the blocked end state already has (`disk-full`, `model-does-not-fit`, `blocked`), and a figure the card does not state is a row that says `not stated`.
+Each figure names the card line it came from. The card is free text: a few fixed wordings are read (about N GB of disk, the N GB checkpoint plus about N GB of caches, about
+N GB of free host RAM with N GB minimum, a `--ulimit memlock=` advice, a stated first-start time) and any other wording is `not stated`. The card and the manifest are read with `safeio`
+(regular files, size caps, no links), lines and figures are bounded, and the command uses no network, no board and no lease.
+
+On the figures of Hy4-flash: 658 GB free on one disk leaves 53 GB after the first start (605 GB taken, 40 GB margin: ok); 152 GB free blocks as `disk-full` (needs 645 GB); 90 GB of RAM
+warns, 10 GB blocks (needs 17 GB to start); the card's `--ulimit memlock=-1:-1` is a warning; 440 GB at 68 MB/s is about 108 minutes; the manifest's 21600 s timeout is ok because the card states no
+first-start time (a timeout below a stated time blocks). `tests/test_first_start.py` has 70 tests against excerpts of the real card and manifest (`tests/fixtures/first-start`), and the card and the manifest readers are registered in
+`tests/hostile_fs.py` (a pipe, a link, a directory, a sparse 1 GiB file). 31 mutations, each removing or loosening one guard, were run: 30 turned a test red and were restored; the mutation that
+stayed green is equivalent (a boolean in the manifest timeout already fails the number parse). A first table counted every non-zero exit as red, and one of its runs named a test file that does not
+exist; the rerun counts only a test failure (exit code 1) and caught a missing `expect=dict` guard on the manifest, which has a test now.
+
+Not done here: the check is not a step of `tt-orchard bringup` (a run's preflight covers the model it brings up and does not cover the package a coder or helper serves), it does not measure the link
+(the rate is an argument), and it reads no card wording outside the patterns. Related: issue 702 (disk for the Qwen4 release run) and 739 (host-resident experts).
+## 2026-11-25: the Engram tables count as host memory in the residency estimate (branch fix-844-engram-host-resident, issue 844)
+
+Prompt (operator, 2026-11-25): "work through more issues". The Hy4-flash study found that `orchard/residency.py` filed the Engram tables of `tencent/Hy4-flash`
+under `norms_other`. The default policy keeps that category on the chips in bf16, so a plan built from tensor names counted about 60 GiB of host memory
+as device memory. The published bundle keeps the tables in host RAM as FP8 rows and sends the looked-up rows to the chips each step.
+
+`_is_table` now treats a tensor as a table when it sits inside an Engram module (a name part that starts with `engram`) and a part has `embed` or `table`
+in it: `engram_layer.multi_head_embedding.embedding.weight` and `engram_layer.lookup_table`, the two tensors per layer that the bundle's host half reads.
+The projections, norms and gate scales of the Engram layer keep their old category, because they run on the mesh. `_table_key` accepts any config key whose
+word starts with `engram`, so `engram_layer_ids` and `engram_layer_head_vocab_sizes` name a table as `engram_n_embed_per_ngram` already did through its
+word `ngram`. The existing printed plan and the record already show the host-resident category and the host GiB, so no new output was needed.
+
+`tests/test_residency_engram.py` uses the real tensor names of the model (`tests/fixtures/hy4-flash-tensor-names.json`, 260 names and no weights: all 164 Engram
+names and one name of every other pattern). 191 tests in the file's run. Seven mutations, each removing or loosening one guard, turned a test red and were
+restored. The branch `hy4-plan-families` (the Engram caveat in the tier plan and the hazard scan) has not landed on `main`, so this change is the residency
+classifier alone; `orchard/hazards.py` still recognises only `ngram_size` and `ngram_vocab_size_base`, and `orchard/tier_plan.py` still names `ngram_` keys in its caveat.

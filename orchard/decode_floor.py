@@ -108,14 +108,27 @@ def _attention_params(d: mc.ModelDims) -> int:
     return q + kv + d.heads * d.head_dim * d.hidden
 
 
-def _mla_params(d: mc.ModelDims) -> int:
-    """Multi-latent attention: a low-rank query (or a full one), the compressed key-value down projection, its up projection, output."""
+def _mla_params(d: mc.ModelDims, heads: int | None = None) -> int:
+    """Multi-latent attention: a low-rank query (or a full one), the compressed key-value down projection, its up projection, output.
+    `heads` is the query head count of this kind of layer (default `d.heads`): the sliding-window layers of Hy4-flash have twice as many."""
     m = d.mla
+    h = d.heads if heads is None else heads
     qk = m["qk_nope_head_dim"] + m["qk_rope_head_dim"]
-    q = d.hidden * m["q_lora_rank"] + m["q_lora_rank"] * d.heads * qk if m["q_lora_rank"] else d.hidden * d.heads * qk
+    q = d.hidden * m["q_lora_rank"] + m["q_lora_rank"] * h * qk if m["q_lora_rank"] else d.hidden * h * qk
     kv_a = d.hidden * (m["kv_lora_rank"] + m["qk_rope_head_dim"])
-    kv_b = m["kv_lora_rank"] * d.heads * (m["qk_nope_head_dim"] + m["v_head_dim"])
-    return q + kv_a + kv_b + d.heads * m["v_head_dim"] * d.hidden
+    kv_b = m["kv_lora_rank"] * h * (m["qk_nope_head_dim"] + m["v_head_dim"])
+    return q + kv_a + kv_b + h * m["v_head_dim"] * d.hidden
+
+
+def _expert_params(d: mc.ModelDims) -> int:
+    """One routed expert: its matrices run between the width the experts work in and the expert intermediate width. That width is the hidden size,
+    except in a latent MoE (Hy4-flash: 1,536 against a 3,072 hidden size), where a down projection feeds the experts and an up projection follows."""
+    return d.mlp_projections * (d.expert_hidden or d.hidden) * d.moe_intermediate
+
+
+def _latent_params(d: mc.ModelDims) -> int:
+    """The two projections around the experts of a latent MoE layer (hidden to latent, latent to hidden); 0 for any other model."""
+    return 2 * d.hidden * d.expert_hidden if d.expert_hidden else 0
 
 
 def _linear_params(d: mc.ModelDims) -> int:
@@ -133,6 +146,9 @@ def _mlp_params(d: mc.ModelDims, width: int) -> int:
 
 
 PLAIN_MIXERS = ("full_attention", "sliding_attention", "attention")
+# DeepSeek-style sparse attention (Hy4-flash `deepseek_sparse_attention`): the mixer is multi-latent attention with an indexer beside it that picks which
+# cached rows a query reads. The projections are counted as MLA. The indexer's own weights are not counted (the plan's caveats name them).
+SPARSE_MLA_MIXERS = ("deepseek_sparse_attention",)
 
 
 def _mamba_params(d: mc.ModelDims) -> int:
@@ -150,9 +166,15 @@ def _mixer_params(d: mc.ModelDims, kind: str) -> int:
         return _linear_params(d)
     if kind == "mamba":
         return _mamba_params(d)
+    if kind in SPARSE_MLA_MIXERS:
+        if not d.mla:
+            raise FloorInputError(f"the layer type {kind!r} needs the multi-latent attention shapes (kv_lora_rank and the head dimensions), which the config does not give")
+        return _mla_params(d)
     if kind in PLAIN_MIXERS:
-        return _mla_params(d) if d.mla else _attention_params(d)
-    raise FloorInputError(f"the layer type {kind!r} is not one the floor can count (known: linear_attention, mamba, {', '.join(PLAIN_MIXERS)})")
+        if d.mla:
+            return _mla_params(d, d.swa_heads) if kind == "sliding_attention" and d.swa_heads else _mla_params(d)
+        return _attention_params(d)
+    raise FloorInputError(f"the layer type {kind!r} is not one the floor can count (known: linear_attention, mamba, {', '.join(PLAIN_MIXERS + SPARSE_MLA_MIXERS)})")
 
 
 @dataclass(frozen=True)
@@ -209,8 +231,8 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
         active["attention"] += attn * n
         stored += attn
         if d.moe_layers[i]:
-            router = d.hidden * d.routed_experts
-            expert = _mlp_params(d, d.moe_intermediate)
+            router = d.hidden * d.routed_experts + _latent_params(d)      # the latent projections are read for every token, like the router
+            expert = _expert_params(d)
             shared = _mlp_params(d, d.shared_intermediate) if d.shared_intermediate else 0
             active["router"] += router * n
             active["routed_experts"] += d.top_k * expert * n

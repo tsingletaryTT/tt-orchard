@@ -77,3 +77,26 @@ def test_a_reasoning_can_runs_the_reasoning_probes_and_the_stand_in_without_a_re
     assert not ev["passed"]
 
 
+
+
+# ---- the concurrency and isolation probes (Lottolabs study, 2026-11-24) ---------------------------------------------
+
+ISOLATION = {"concurrent_equals_alone", "aba_isolation", "cancel_mid_decode"}
+
+
+def _listed(ev):
+    return {a["name"] for a in ev.get("advisory", [])} | {n["name"] for n in ev["not_checked"]}
+
+
+def test_a_can_that_declares_batching_gets_the_three_isolation_probes_listed_and_they_never_fail_the_boot(tmp_path):
+    ev = run(tmp_path, max_num_seqs=4)
+    assert ev["passed"], ev["checks"]
+    assert ISOLATION <= _listed(ev), _listed(ev)
+    assert not ISOLATION & set(ev["checks"]), "an advisory probe became a named check, so it could fail the boot"
+
+
+@pytest.mark.parametrize("seqs", [None, 1])
+def test_a_can_that_does_not_declare_batching_gets_no_isolation_probe(tmp_path, seqs):
+    more = {} if seqs is None else {"max_num_seqs": seqs}
+    ev = run(tmp_path, **more)
+    assert not ISOLATION & _listed(ev), _listed(ev)

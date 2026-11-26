@@ -16,7 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
-    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
+    tt-orchard tier-plan SOURCE [--chips 1,2,4] [--chip-gib GIB] [--reserve-gib GIB] [--kv-gib GIB] [--host-margin-gib GIB] [--host-free-gib GIB] [--context TOKENS] [--users N] [--skew FRACTION:SHARE,...] [--revision REV] [--json]
     tt-orchard speech-check URL --task speech-to-text|text-to-speech [--clip FILE --expect TEXT ...] [--text TEXT] [--voice NAME] [--stream] [--asr-url URL] [--max-wer F] [--json]
     tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--reference-python PYTHON] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
@@ -29,6 +29,7 @@
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--stub-data-dependent] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
+    tt-orchard first-start [PACKAGE_DIR] [--card FILE] [--manifest FILE] [--hf-home DIR] [--cache-root DIR] [--link-mbps MB_S] [--ready-timeout-s S] [--min-free-gb GB]
     tt-orchard profile [--out DIR] [--top N] [--chips N] [--timeout S] [--exclude BOARD] [--wait-s S] [--gozer PATH] [--perf-report PATH] -- PYTHON [-m MODULE | SCRIPT] [ARGS...]
     tt-orchard profile --from DIR [--out DIR] [--top N] [--perf-report PATH]
     tt-orchard kernel-probe (--op NAME | --ladder [--rungs A,B] [--rung-wall OP=S] [--max-hours H]) [--wall-s S] [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
@@ -631,6 +632,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("profile", parents=[common, _profile.parser(add_help=False)],
                    help="run a command under the tt-metal profiler on a leased board and write a bounded profile-summary.json "
                         "(or summarise an existing profile with --from; no board needed)")
+    from orchard import first_start as _first_start
+    sub.add_parser("first-start", parents=[common, _first_start.parser(add_help=False)],
+                   help="check a package's first start against its card and manifest: disk (checkpoint, caches, margin), host RAM, pinned memory, "
+                        "download time and the ready timeout; nothing is downloaded and no board or lease is used")
     from orchard import profile_read as _profile_read
     sub.add_parser("profile-read", parents=[common, _profile_read.parser(add_help=False)],
                    help="summarise a TT-NN report folder through the report viewer's MCP server: a bounded profile-read.json "
@@ -1336,6 +1341,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "profile":
         from orchard import profile_summary
         return profile_summary.main(args, out=out)
+    if args.cmd == "first-start":
+        from orchard import first_start
+        return first_start.main(args, out=out)
     if args.cmd == "profile-read":
         from orchard import profile_read
         return profile_read.main(args, out=out)

@@ -16,7 +16,7 @@ Two kinds of figure, kept apart in the record:
     allocator reading. `not_measured` says what a real reading would replace.
 
 Categories (`CATEGORIES`, decided by `categorize`): embedding (input table and LM head), attention (full attention and its indexer), gdn
-(gated delta net and other linear or state-space mixers), dense_mlp, routed_experts, shared_experts, ngram_ple (the n-gram or
+(gated delta net and other linear or state-space mixers), dense_mlp, routed_experts, shared_experts, ngram_ple (the n-gram, Engram or
 per-layer embedding table), vision, mtp (everything under the multi-token-prediction layer, its own experts included), norms_other
 (norms, one-dimensional tensors, routers and the small gated-residual modules).
 
@@ -126,23 +126,24 @@ BOUND_POLICY_TEXT = ("if every weight were stored at bfp4, a lower bound: tensor
 BOUND_NOT_MEASURED = (
     "tensor names and shapes: the Hub's counts are totals by dtype, so no category, expert count or one-dimensional tensor (a norm or a bias, "
     "which no block format shrinks) is known; every figure is therefore a lower bound on the bytes a real checkpoint holds, and on the "
-    "device bytes only when no n-gram or per-layer table is among them: the default policy keeps such a table in host memory, which would "
+    "device bytes only when no n-gram, Engram or per-layer table is among them: the default policy keeps such a table in host memory, which would "
     "lower the device figure")
-BOUND_HOST_NOTE = ("the counts include every parameter, so a table that the default policy keeps on the host (an n-gram or per-layer "
+BOUND_HOST_NOTE = ("the counts include every parameter, so a table that the default policy keeps on the host (an n-gram, Engram or per-layer "
                    "embedding) is counted as if it sat on the chips; the device figure of a model with such a table is lower")
 MAX_CONFIG_KEYS, MAX_CONFIG_DEPTH = 5000, 6        # a config.json is a few dozen keys; these bounds keep a hostile one from costing time
 
 
 def _table_key(key: str) -> bool:
-    """Whether a config key names the n-gram or per-layer table that `categorize` puts in `ngram_ple`: a word that starts with `ngram`, the word
-    `ple`, or `per_layer`. A word is a part between underscores, so `multiple_of` and `sample_rate` do not match."""
+    """Whether a config key names the n-gram, Engram or per-layer table that `categorize` puts in `ngram_ple`: a word that starts with `ngram` or
+    `engram`, the word `ple`, or `per_layer`. A word is a part between underscores, so `multiple_of` and `sample_rate` do not match. Any
+    `engram_` key counts (`engram_layer_ids`, `engram_vocab_size`, ...): a model that sets one has the tables."""
     low = key.lower()
     parts = low.split("_")
-    return "per_layer" in low or "ple" in parts or any(p.startswith("ngram") for p in parts)
+    return "per_layer" in low or "ple" in parts or any(p.startswith(("ngram", "engram")) for p in parts)
 
 
 def config_has_host_table(config) -> bool | None:
-    """Whether a model's config.json names a table that the default policy keeps on the host (an n-gram or per-layer embedding), looking at
+    """Whether a model's config.json names a table that the default policy keeps on the host (an n-gram, Engram or per-layer embedding), looking at
     every key down to MAX_CONFIG_DEPTH levels, through lists too. None when the config is not an object, or is too large or too deep to read to
     the end without finding one: no claim either way, and the row that asks cannot block on it."""
     if not isinstance(config, dict):
@@ -450,12 +451,17 @@ def _block_key(name: str, repeated) -> str | None:
 
 
 def _is_table(parts: list, name: str) -> bool:
-    """Whether a tensor belongs to the n-gram or per-layer embedding table: a part that starts with `ngram` or has `embed` or `table` in it,
-    inside a PLE module or anywhere, or a per-layer embedding (`..._per_layer`). The PLE module's own compute weights (projection, gate,
-    convolution) are not table tensors: they run on the mesh, and they fall through to the later rules (norms_other)."""
+    """Whether a tensor belongs to the n-gram, Engram or per-layer embedding table: a part that starts with `ngram` or has `embed` or `table`
+    in it, inside a PLE module or an Engram module (a part that starts with `engram`), or a per-layer embedding (`..._per_layer`). The PLE
+    module's own compute weights (projection, gate, convolution) and the Engram layer's projections, norms and gate scales are not table
+    tensors: they run on the mesh, and they fall through to the later rules (norms_other). In Hy4-flash the Engram tables are
+    `engram_layer.multi_head_embedding.embedding.weight` (about 15 GiB per layer, FP8 in the bundle) and `engram_layer.lookup_table` (the hash
+    compression map the host reads); the bundle keeps both in host RAM (issue 844)."""
     if "per_layer" in name or any(p.startswith("ngram") for p in parts):
         return True
-    return "ple" in parts and any("embed" in p or "table" in p for p in parts)
+    if "ple" in parts or any(p.startswith("engram") for p in parts):
+        return any("embed" in p or "table" in p for p in parts)
+    return False
 
 
 def categorize(name: str, shape) -> str:

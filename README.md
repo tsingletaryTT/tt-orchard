@@ -1087,8 +1087,11 @@ host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change th
 quality, and the host path for experts is not written yet (issue 739, step 3). A dense model is refused with a pointer to `tt-orchard plan`, and a
 model whose layers the parameter count does not know is reported as an unknown family. When the config names hyper-connections, a sparse-attention indexer,
 a hashed n-gram embedding, a multi-token-prediction layer or a vision tower, the count leaves them out, the command says so, and the always-resident
-figure is printed as a lower bound.
-The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`.
+figure is printed as a lower bound. For a model with multi-latent attention (DeepSeek-style, Hy4-flash), `--context` (tokens held across all users) and `--users` (how many share them)
+replace the flat KV allowance with an estimate from the config: the latent rows of the full-attention layers plus a ring per user for each sliding-window
+layer, the same on every die and not divided by the chip count. `--context` and `--kv-gib` together are refused; any other model keeps the flat allowance
+and a note says so. A latent mixture of experts (`routed_expert_hidden_size` below the hidden size) is counted with its experts at the latent width.
+The comparison with three published hybrid bundles is in `docs/run-logs/2026-11-23-tier-plan-vs-published-cards.md`, and the one with Hy4-flash is in `docs/run-logs/2026-11-25-tier-plan-vs-hy4-flash.md`.
 
 #### Speech models: `tt-orchard speech-check`
 
@@ -2571,6 +2574,18 @@ Exit codes: 0 every question answered; 1 some could not be answered; 2 refused (
 - `--accept-untested-version`: run a version or files that were not tested.
 - `--call-timeout`: seconds one server call may take (default 60). `--total-timeout`: seconds the whole session may take (default 300).
 
+### 5.9ec Check a package's first start before it begins (no board, no download)
+
+```bash
+tt-orchard first-start ~/.cache/tt-model/pulled/raahemnabeel__hy4-flash --link-mbps 68       # the card and the manifest of a pulled package
+tt-orchard first-start --card README.md --manifest tt_kernel_manifest.json --ready-timeout-s 7200
+```
+
+A package with a long first start states most of what it needs in its card and manifest: the disk (the checkpoint and the caches a first start builds), the host RAM to start and for full speed, a pinned-memory option and the ready timeout. `first-start` reads them and prints five rows: `first-start disk`, `host ram`, `memlock`, `download` and `ready timeout`. Each row names the card line a figure came from, or says `not stated`. It blocks (exit code 5) only when a stated figure is violated: the disk needed for the checkpoint, the caches and the margin (reason `disk-full`), the host RAM the server needs to start (`model-does-not-fit`), or a ready timeout shorter than a first-start time the card states (`blocked`). It warns when RAM is below the full-speed figure, when the card advises `--ulimit memlock=-1:-1`, and when MemAvailable cannot be read. A card or manifest that cannot be read safely (a pipe, a link, a file over the size cap, a manifest that is not JSON) is a refusal (exit code 2). The card is free text, and only a few fixed wordings are read; a figure in another wording is `not stated`.
+
+- `--card`, `--manifest`: the files (default `PACKAGE/README.md` and `PACKAGE/tt_kernel_manifest.json`; a missing manifest is not an error). `--hf-home`: where the checkpoint is stored (default `$HF_HOME` or `~/.cache/huggingface`); a snapshot of the manifest's pinned revision already there is not counted again. `--cache-root`: where the first start builds its caches (default `~/.cache/tt-model`).
+- `--link-mbps`: the download rate in MB/s that you measured; without it no download time is estimated. `--ready-timeout-s`: the timeout the serve step will use (default: the manifest's `VLLM_ENGINE_READY_TIMEOUT_S`). `--min-free-gb`: the margin kept free after the first start (default 40).
+
 ### 5.9fa The audio reference environment and the CPU reference
 
 ```bash
@@ -2670,7 +2685,7 @@ revision in the card matches the package record, `tt-model.yaml` and the launche
 commit (the weights and a code bundle) names each on one line with its repository, `owner/name @ <40-character commit>`, one line per repository (the older
 `owner/name (revision <commit>)` also works; the `@` needs a space before it, so a Git URL such as `git+https://host/org/lib.git@<commit>` is not a pin). A repository named on a different line is never attached to a commit. A commit without its repository on its line
 is a warning that names this form, and a card that pins the weights repository at two commits is a warning too. `--staged DIR` also compares
-the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
+the pulled files and hashes with a local staged directory. A `tt_kernel_manifest.json` whose `container.built` section records the tt-metal or the plugin commit with `"pushed": false` (a commit that exists only in one person's checkout) makes the manifests check a warning that names the commit, because nobody else can rebuild the image from public sources (Hy4-flash study, 2026-11-25). `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
 commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
 makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).
 
