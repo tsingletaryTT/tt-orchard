@@ -257,8 +257,8 @@ def _parser() -> argparse.ArgumentParser:
                         "short note naming the turn that holds the text; docs/tool-result-dedupe.md). The run records the choice when it is off; a "
                         "resume keeps it and refuses to turn it off for a run that started with it on")
     b.add_argument("--no-measured-miss-repair", action="store_true",
-                   help="end a full-port stage 2 attempt at a check that ran to the end below the agreement bar, as before issue 865 (by default the "
-                        "coder gets repair rounds for such a miss, with the numbers in its task, the rounds stop when three in a row leave the agreement "
+                   help="end a full-port stage 2 attempt at a check that ran to the end below the agreement bar, as before issue 865 (by default a run "
+                        "with no helper gives the coder repair rounds for such a miss, with the numbers in its task, the rounds stop when three in a row leave the agreement "
                         "where it was, and the furthest port is kept so the next attempt starts from it). The run records the choice when it is off; a "
                         "resume keeps it and refuses to turn it off for a run that started with it on")
     b.add_argument("--prune-caches", action="store_true",

@@ -666,7 +666,7 @@ def test_a_snapshot_the_facts_cannot_read_leaves_no_facts_file_and_the_task_stil
 def _stub(tmp_path, snapshot):
     from types import SimpleNamespace
     entries = []
-    stub = SimpleNamespace(inputs={"model": str(snapshot)}, run_dir=tmp_path, _best_port_on=lambda: False,      # no helper, and the best port is not kept
+    stub = SimpleNamespace(inputs={"model": str(snapshot)}, run_dir=tmp_path,
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     return stub, entries, supervisor.Supervisor
 

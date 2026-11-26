@@ -4302,7 +4302,7 @@ class Supervisor:
                                            cheat=getattr(self, "_cheat_ok", True) and (stage_dir / full_port.CHEAT_MD_NAME).is_file(),
                                            construction=bool(seed.get("construction")),
                                            idioms=idioms_advertised(getattr(self, "_idioms_ok", True), stage_dir))
-            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or self._best_port_on()):
+            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or getattr(self, "measured_miss_repair", False)):
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
                 self._best_restore = (None, None)
@@ -4580,7 +4580,7 @@ class Supervisor:
         """Keep a port whose check ran to the end, which ranks above every failure. The stage's gate may still refuse it (the check's agreement
         with the reference can be below the gate's minimum), and the next attempt should start from this port and not from an earlier failure
         (review of PR 497). Only a test record the supervisor itself wrote and the ledger holds counts."""
-        if n != 2 or not self._best_port_on():
+        if n != 2 or not (self._helper_drive_on() or (self._best_port_on() and getattr(self, "telegraph", None) is None)):
             return
         try:
             passed, _op, readable, numbers = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
@@ -4655,12 +4655,13 @@ class Supervisor:
         that got further than the port it replaced is worth keeping when the coder's step then stalls. A coder-driven stage 2 keeps it too
         unless `--no-measured-miss-repair` (issue 865): the next attempt then starts from the furthest port and not from the skeleton."""
         return (self._helper_drive_on() or (getattr(self, "telegraph", None) is not None and bool(self.repair_help))
-                or bool(self.measured_miss_repair and self.port_repair_rounds))
+                or bool(getattr(self, "measured_miss_repair", False) and getattr(self, "port_repair_rounds", 0) and getattr(self, "telegraph", None) is None))
 
     def _numerics_repair_on(self) -> bool:
         """Whether a check that ran to the end below the bar is read as a failure that earns a repair round: when the helper drives, and for a
-        coder-driven stage 2 unless `--no-measured-miss-repair` (issue 865)."""
-        return self._helper_drive_on() or bool(self.measured_miss_repair)
+        stage 2 with no helper at all (no `telegraph`) unless `--no-measured-miss-repair` (issue 865). A run with a helper that only helps keeps
+        its earlier behaviour: its attempt-start asks and its draft tests were written for it."""
+        return self._helper_drive_on() or bool(getattr(self, "measured_miss_repair", False) and getattr(self, "telegraph", None) is None)
 
     def _helper_drive_on(self) -> bool:
         """Whether stage 2's repair rounds are driven by the helper: the helper and the round asks are on, and the operator said so
@@ -5081,7 +5082,7 @@ class Supervisor:
             # else). The standing draft is used only when no best port was restored: placed first, it would turn the skeleton into an older
             # draft and the restoration would then be refused (review of PR 497, round 3). `_prepare_in_code` reads the answer from here.
             self._best_restore = (str(stage_dir), None)
-            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or self._best_port_on()):
+            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or getattr(self, "measured_miss_repair", False)):
                 restored = self._restore_best_port(spec, stage_dir)
                 self._best_restore = (str(stage_dir), restored)
                 if restored:
@@ -6948,8 +6949,8 @@ def parse(argv=None):
                         "that holds the text (docs/tool-result-dedupe.md). The ledger records the choice when it is off; a resume keeps the recorded "
                         "choice, and a resume that turns it off for a run that started with it on is refused")
     r.add_argument("--no-measured-miss-repair", dest="no_measured_miss_repair", action="store_true",
-                   help="end a full-port stage 2 attempt at a check that ran to the end below the agreement bar, as before issue 865. By default the "
-                        "coder gets repair rounds for such a miss, with the numbers in its task, the rounds stop when three in a row leave the "
+                   help="end a full-port stage 2 attempt at a check that ran to the end below the agreement bar, as before issue 865. By default a run with no helper "
+                        "gives the coder repair rounds for such a miss, with the numbers in its task, the rounds stop when three in a row leave the "
                         "agreement where it was, and the furthest port is kept so the next attempt starts from it and not from the skeleton. The "
                         "ledger records the choice when it is off; a resume keeps the recorded choice, and a resume that turns it off for a run that "
                         "started with it on is refused")

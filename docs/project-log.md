@@ -6258,7 +6258,7 @@ wrote `top1_agreement 0.25`, below the 0.85 bar. The check exits 0 for that, so 
 ten rounds still allowed, and the next attempt started from the skeleton and discarded that port. The helper-driven loop already read such a miss
 (`port_repair.read_numerics`) and kept the furthest port (`repair_help.save_best`, `_restore_best_port`); both were tied to the helper.
 
-Both now run for a coder-driven stage 2 as well, unless the operator passes `--no-measured-miss-repair` (recorded in `run_start` only when off, kept by a
+Both now run for a stage 2 with no helper at all (no enabled `[telegraph]` table; a run with a helper that only helps keeps its earlier behaviour, because its attempt-start asks and draft tests were written for it, and the first full suite of this change failed 30 of those tests before the scope was narrowed), unless the operator passes `--no-measured-miss-repair` (recorded in `run_start` only when off, kept by a
 resume, refused when a resume turns it off for a run that started with it on; a run that began before the option has it on). The coder's repair task
 for a measured miss was already written (`_repair_text`, numerics branch); it now also carries the agreement the last round started from, so the
 report says whether the edit moved the number. `_repair_pending` reads a measured miss too, so a resume with rounds left continues them. The best
