@@ -1,0 +1,2946 @@
+{
+ "schema": "orchard-cheat-compiles/1",
+ "date": "2026-11-24",
+ "note": "Each probe kernel compiled with each chip package's own compiler, no device (orchard/ttlang_hwcompile.py). A `compile` record means the compiler accepted the kernel and wrote kernel source; it does not show that tt-metal builds it, that the buffers fit, or that the numbers are right on a chip. Written by scripts/verify_cheat_compiles.py.",
+ "targets": [
+  {
+   "package": "tt-lang",
+   "version": "1.1.10.dev20261026+light",
+   "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  },
+  {
+   "package": "tt-lang",
+   "version": "1.1.6",
+   "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+   "files": [
+    "_src/ttl_ast.py",
+    "operators.py",
+    "ttl_api.py",
+    "_mlir_libs/libTTLangPythonCAPI.so"
+   ]
+  }
+ ],
+ "probes": {
+  "elementwise": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.operation",
+    "ttl.compute",
+    "ttl.datamovement",
+    "ttl.make_dataflow_buffer_like",
+    "DataflowBuffer.wait",
+    "DataflowBuffer.reserve",
+    "TensorBlock.store",
+    "ttl.copy"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "ada7d31c1a60921fe8a6c4d12cb14fb9d38474e946f1bb76753e6fb0765c7ae0",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "ada7d31c1a60921fe8a6c4d12cb14fb9d38474e946f1bb76753e6fb0765c7ae0",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "ada7d31c1a60921fe8a6c4d12cb14fb9d38474e946f1bb76753e6fb0765c7ae0",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "make-dfb": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.make_dfb"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dfb('bf16', shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "f61da527bc75aa5ea362ec2f01ef67776f6ba855bc27542b7c3457095c9aa374",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "f61da527bc75aa5ea362ec2f01ef67776f6ba855bc27542b7c3457095c9aa374",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "f61da527bc75aa5ea362ec2f01ef67776f6ba855bc27542b7c3457095c9aa374",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "AttributeError: module 'ttl' has no attribute 'make_dfb'",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "grid-size": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.grid_size"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    cols, rows = ttl.grid_size(dims=2)",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "0ab07135cbd23f0f3a83afdedd7b6686959d022ba7db3d74fb4077779edf5b02",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "0ab07135cbd23f0f3a83afdedd7b6686959d022ba7db3d74fb4077779edf5b02",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "0ab07135cbd23f0f3a83afdedd7b6686959d022ba7db3d74fb4077779edf5b02",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "node-in-compute": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.node"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        node_col, node_row = ttl.node(dims=2)",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "b7b5cb1014dd84965f49aaa8063caa64bb4df291196665d395ac738cc4527a13",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "b7b5cb1014dd84965f49aaa8063caa64bb4df291196665d395ac738cc4527a13",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "b7b5cb1014dd84965f49aaa8063caa64bb4df291196665d395ac738cc4527a13",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_eef21027.cpp",
+        "bytes": 1385,
+        "sha256": "0b432ade83d07237dd141d6286dd6d393e114d5c0e4f75703920c7f1367872d5"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "reduce-sum-broadcast-fill": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.reduce_sum",
+    "ttl.block.broadcast",
+    "ttl.block.fill"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as o_blk:",
+    "                half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+    "                s = ttl.math.reduce_sum(x_blk * x_blk * half, dims=[-1], shape=(1, 1))",
+    "                r = ttl.block.broadcast(s, dims=[-1], shape=(1, col_tiles))",
+    "                o_blk.store(x_blk * r)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as o_blk:",
+    "                tx = ttl.copy(o_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "kernel_sha256": "49f7f1a38af7d448343d157c0686f9907e2f6c620bb749025ccf3c339991cd66",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "49f7f1a38af7d448343d157c0686f9907e2f6c620bb749025ccf3c339991cd66",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_f427bfe7.cpp",
+        "bytes": 5521,
+        "sha256": "1e64eecc5f9603d277c113bde390395151ea625df49608277d6ea01bf540fa30"
+       },
+       {
+        "name": "ttlang_kernel_read_662ba1b5.cpp",
+        "bytes": 1518,
+        "sha256": "b37d503347d786ed38d2468c5fa2ec0dac85ccb9bb318a8ce7cb2af7cc72406f"
+       },
+       {
+        "name": "ttlang_kernel_write_20b3d44b.cpp",
+        "bytes": 1518,
+        "sha256": "bed37576805bfa228a93f9c762c70b1383d0a210a7f78a7506068d73bc6a9299"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "49f7f1a38af7d448343d157c0686f9907e2f6c620bb749025ccf3c339991cd66",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_sum() got an unexpected keyword argument 'shape'",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "reduce-max": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.reduce_max"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as o_blk:",
+    "                half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+    "                s = ttl.math.reduce_max(x_blk * x_blk * half, dims=[-1], shape=(1, 1))",
+    "                r = ttl.block.broadcast(s, dims=[-1], shape=(1, col_tiles))",
+    "                o_blk.store(x_blk * r)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as o_blk:",
+    "                tx = ttl.copy(o_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "kernel_sha256": "b3dd9e01bf0eea0ca0fd154de0aa230147e446e2587ba93bcab107843135ef05",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "b3dd9e01bf0eea0ca0fd154de0aa230147e446e2587ba93bcab107843135ef05",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_340f50d2.cpp",
+        "bytes": 5521,
+        "sha256": "8be77fcc5a06af21175332e2f54d4a23909e2cdd4b37825787641cc951026aaf"
+       },
+       {
+        "name": "ttlang_kernel_read_662ba1b5.cpp",
+        "bytes": 1518,
+        "sha256": "b37d503347d786ed38d2468c5fa2ec0dac85ccb9bb318a8ce7cb2af7cc72406f"
+       },
+       {
+        "name": "ttlang_kernel_write_20b3d44b.cpp",
+        "bytes": 1518,
+        "sha256": "bed37576805bfa228a93f9c762c70b1383d0a210a7f78a7506068d73bc6a9299"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "b3dd9e01bf0eea0ca0fd154de0aa230147e446e2587ba93bcab107843135ef05",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: reduce_max() got an unexpected keyword argument 'shape'",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "exp": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.exp"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.math.exp(x_blk))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "d00185d6a2bfe6194f75b34f553e6b39b49607ac8bd81fb09d3df4df8b43f981",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "d00185d6a2bfe6194f75b34f553e6b39b49607ac8bd81fb09d3df4df8b43f981",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_719ac428.cpp",
+        "bytes": 1417,
+        "sha256": "320110d654493004b193431c9bcdde24c020fb28c1759ee480d767f3c2e8904e"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "d00185d6a2bfe6194f75b34f553e6b39b49607ac8bd81fb09d3df4df8b43f981",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_719ac428.cpp",
+        "bytes": 1417,
+        "sha256": "320110d654493004b193431c9bcdde24c020fb28c1759ee480d767f3c2e8904e"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "rsqrt": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.rsqrt"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.math.rsqrt(x_blk * x_blk + y_blk))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "f6cbc31862beff08eae5484035682fa796f9454d3ab67fb0eedbae40ef18cda8",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "f6cbc31862beff08eae5484035682fa796f9454d3ab67fb0eedbae40ef18cda8",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_9802de08.cpp",
+        "bytes": 1720,
+        "sha256": "d93917de138f55115391dcc1bf8fa31d29ae3a67796924cbd72637358d13cf5d"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "f6cbc31862beff08eae5484035682fa796f9454d3ab67fb0eedbae40ef18cda8",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_9802de08.cpp",
+        "bytes": 1720,
+        "sha256": "d93917de138f55115391dcc1bf8fa31d29ae3a67796924cbd72637358d13cf5d"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "silu": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.silu"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.math.silu(x_blk) * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "2b87e0b40aa9373a04f9742b7731c6b884a9f8a4b4af3c51785ac7cb41783065",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "2b87e0b40aa9373a04f9742b7731c6b884a9f8a4b4af3c51785ac7cb41783065",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_f6e3275d.cpp",
+        "bytes": 1627,
+        "sha256": "692cabbe37d931e5559cee78c1630bb92aa4026155faefc751483ab7c666a294"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "2b87e0b40aa9373a04f9742b7731c6b884a9f8a4b4af3c51785ac7cb41783065",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_f6e3275d.cpp",
+        "bytes": 1627,
+        "sha256": "692cabbe37d931e5559cee78c1630bb92aa4026155faefc751483ab7c666a294"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "transpose": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.transpose"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.math.transpose(x_blk))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "a2f710d656c930a68c0afb4ec1eaa436db5371ad931551f244a658cdb0ff1eba",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "a2f710d656c930a68c0afb4ec1eaa436db5371ad931551f244a658cdb0ff1eba",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_82a6dff4.cpp",
+        "bytes": 1373,
+        "sha256": "ee9388871fcbee09679080c2c1cf6ca022dfc290324a136a3b9c2765a0e5bb89"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "a2f710d656c930a68c0afb4ec1eaa436db5371ad931551f244a658cdb0ff1eba",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_82a6dff4.cpp",
+        "bytes": 1373,
+        "sha256": "ee9388871fcbee09679080c2c1cf6ca022dfc290324a136a3b9c2765a0e5bb89"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "matmul": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.matmul"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.matmul(x_blk, y_blk))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "71ec8a90edec9ae8d01826b5f8a0b7491a82fe6d1b67d4664587a37fcf71c107",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "71ec8a90edec9ae8d01826b5f8a0b7491a82fe6d1b67d4664587a37fcf71c107",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_5b40b6b3.cpp",
+        "bytes": 1604,
+        "sha256": "432a38c170a24e129f03798b0b1cdfc53b5f05cd54110e19aa189171b046b4c5"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "71ec8a90edec9ae8d01826b5f8a0b7491a82fe6d1b67d4664587a37fcf71c107",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_5b40b6b3.cpp",
+        "bytes": 1604,
+        "sha256": "432a38c170a24e129f03798b0b1cdfc53b5f05cd54110e19aa189171b046b4c5"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "signpost": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.signpost"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        ttl.signpost('probe')",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * y_blk)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "d83a4eede67b442496cdc16166ec0c9bb5e7c850cbb7e0847c0b416e824941b2",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "d83a4eede67b442496cdc16166ec0c9bb5e7c850cbb7e0847c0b416e824941b2",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_3b654dc1.cpp",
+        "bytes": 1419,
+        "sha256": "49fd01cb371296d7878127ede6492034c4e36d0509a44b9edc87150aa4c00afb"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "d83a4eede67b442496cdc16166ec0c9bb5e7c850cbb7e0847c0b416e824941b2",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_3b654dc1.cpp",
+        "bytes": 1419,
+        "sha256": "49fd01cb371296d7878127ede6492034c4e36d0509a44b9edc87150aa4c00afb"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "typecast-torch-dtype": {
+   "expect": "compiled",
+   "covers": [
+    "ttl.math.typecast"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import torch",
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(ttl.math.typecast(x_blk, torch.bfloat16))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "edc1a5abb8ec255e22b1b39672744f61b7076c7cba0a6037eb8e3af92491d237",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "edc1a5abb8ec255e22b1b39672744f61b7076c7cba0a6037eb8e3af92491d237",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_d858022c.cpp",
+        "bytes": 1335,
+        "sha256": "31b96c98e3ca413e488443190749e21bcecffe92be6bad305473496d857ed6b6"
+       },
+       {
+        "name": "ttlang_kernel_read_de728c0a.cpp",
+        "bytes": 1829,
+        "sha256": "144f7debbaaaaf7fefe585815e71dc41a6d036c23aeb9589fb1f5ea070f11b1c"
+       },
+       {
+        "name": "ttlang_kernel_write_3c470b9c.cpp",
+        "bytes": 1301,
+        "sha256": "5d1621214216414114047f24f2d87f440d8e8b2c769849f61c105eb5b557199d"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compiled",
+      "compiled": true,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "edc1a5abb8ec255e22b1b39672744f61b7076c7cba0a6037eb8e3af92491d237",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "",
+      "kernel_sources": [
+       {
+        "name": "ttlang_kernel_compute_d858022c.cpp",
+        "bytes": 1335,
+        "sha256": "31b96c98e3ca413e488443190749e21bcecffe92be6bad305473496d857ed6b6"
+       },
+       {
+        "name": "ttlang_kernel_read_5491ac4d.cpp",
+        "bytes": 1853,
+        "sha256": "add64d4d72bfe2837e163c1169f1afff6e43595c87542a843a5d06204c47206e"
+       },
+       {
+        "name": "ttlang_kernel_write_d0de6126.cpp",
+        "bytes": 1313,
+        "sha256": "caa2a536a663895d2c839c9567c3981b1a8306c70ddc7f18adefaf812e40b9ff"
+       }
+      ],
+      "stand_in_used": [
+       "ttnn.ComputeConfigDescriptor",
+       "ttnn.CoreCoord",
+       "ttnn.CoreRange",
+       "ttnn.CoreRangeSet",
+       "ttnn.ReaderConfigDescriptor",
+       "ttnn.WriterConfigDescriptor"
+      ],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "math-fill": {
+   "expect": "refused",
+   "refuses": [
+    "ttl.math.fill"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, y, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, 1), block_count=2)",
+    "    y_dfb = ttl.make_dataflow_buffer_like(y, shape=(1, 1), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, 1), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with x_dfb.reserve() as x_blk, y_dfb.reserve() as y_blk:",
+    "                    tx = ttl.copy(x[row : row + 1, col : col + 1], x_blk)",
+    "                    ty = ttl.copy(y[row : row + 1, col : col + 1], y_blk)",
+    "                    tx.wait()",
+    "                    ty.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles * col_tiles):",
+    "            with x_dfb.wait() as x_blk, y_dfb.wait() as y_blk, out_dfb.reserve() as out_blk:",
+    "                out_blk.store(x_blk * ttl.math.fill(0.5, shape=(1, 1)))",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            for col in range(col_tiles):",
+    "                with out_dfb.wait() as out_blk:",
+    "                    tx = ttl.copy(out_blk, out[row : row + 1, col : col + 1])",
+    "                    tx.wait()"
+   ],
+   "kernel_sha256": "da45d37c4a49e1cdae70697cb4d619c5a83bb3595ce9e214f3b1b07590a42585",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "da45d37c4a49e1cdae70697cb4d619c5a83bb3595ce9e214f3b1b07590a42585",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "da45d37c4a49e1cdae70697cb4d619c5a83bb3595ce9e214f3b1b07590a42585",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.fill is not available; use ttl.block.fill",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "math-broadcast": {
+   "expect": "refused",
+   "refuses": [
+    "ttl.math.broadcast"
+   ],
+   "shapes": [
+    [
+     64,
+     256
+    ],
+    [
+     64,
+     256
+    ]
+   ],
+   "kernel": [
+    "import ttl",
+    "import ttnn",
+    "",
+    "TILE_SIZE = 32",
+    "",
+    "",
+    "@ttl.operation(grid=(1, 1))",
+    "def probe(x, out):",
+    "    row_tiles = x.shape[0] // TILE_SIZE",
+    "    col_tiles = x.shape[1] // TILE_SIZE",
+    "",
+    "    x_dfb = ttl.make_dataflow_buffer_like(x, shape=(1, col_tiles), block_count=2)",
+    "    out_dfb = ttl.make_dataflow_buffer_like(out, shape=(1, col_tiles), block_count=2)",
+    "",
+    "    @ttl.datamovement()",
+    "    def read():",
+    "        for row in range(row_tiles):",
+    "            with x_dfb.reserve() as x_blk:",
+    "                tx = ttl.copy(x[row : row + 1, 0:col_tiles], x_blk)",
+    "                tx.wait()",
+    "",
+    "    @ttl.compute()",
+    "    def compute():",
+    "        for _ in range(row_tiles):",
+    "            with x_dfb.wait() as x_blk, out_dfb.reserve() as o_blk:",
+    "                half = ttl.block.fill(0.5, shape=(1, col_tiles))",
+    "                s = ttl.math.reduce_sum(x_blk * x_blk * half, dims=[-1])",
+    "                r = ttl.math.broadcast(s, dims=[-1], shape=(1, col_tiles))",
+    "                o_blk.store(x_blk * r)",
+    "",
+    "    @ttl.datamovement()",
+    "    def write():",
+    "        for row in range(row_tiles):",
+    "            with out_dfb.wait() as o_blk:",
+    "                tx = ttl.copy(o_blk, out[row : row + 1, 0:col_tiles])",
+    "                tx.wait()"
+   ],
+   "kernel_sha256": "8b80c8fd5790143af45d1a9a137059b92bef4c95e9d9800d0867ccd03105a5c3",
+   "compile": [
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.10.dev20261026+light",
+       "compiler_sha256": "bded4def446bf806ba27c9b8c2d0ce110fffe7e53df592825e12b6e744b631db",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "8b80c8fd5790143af45d1a9a137059b92bef4c95e9d9800d0867ccd03105a5c3",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    },
+    {
+     "date": "2026-11-24",
+     "record": {
+      "schema": "orchard-hwcompile/1",
+      "category": "compile_error",
+      "compiled": false,
+      "target": {
+       "package": "tt-lang",
+       "version": "1.1.6",
+       "compiler_sha256": "9133555d373ec45d2ea13e8b26d9abeceb45e8a237bae18efa20b9ae41cbf6f6",
+       "files": [
+        "_src/ttl_ast.py",
+        "operators.py",
+        "ttl_api.py",
+        "_mlir_libs/libTTLangPythonCAPI.so"
+       ]
+      },
+      "kernel_sha256": "8b80c8fd5790143af45d1a9a137059b92bef4c95e9d9800d0867ccd03105a5c3",
+      "operation": "probe",
+      "shapes": [
+       [
+        64,
+        256
+       ],
+       [
+        64,
+        256
+       ]
+      ],
+      "first_line": "ttl.diagnostics.TTLangCompileError: error: ttl.math.broadcast is not available; use ttl.block.broadcast",
+      "kernel_sources": [],
+      "stand_in_used": [],
+      "grid": [
+       13,
+       10
+      ],
+      "arch": "blackhole",
+      "guard": [
+       {
+        "path": "/dev/tenstorrent",
+        "state": "refused"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+}

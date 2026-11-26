@@ -339,6 +339,17 @@ def _r_read_json_path(env):
     return _json_label(safeio.read_json(env["file"], max_bytes=1 << 20))
 
 
+def _r_tier_plan_skew_file(env):
+    """The fixture file holds `{"ok": 1}`, which is JSON but not a skew result. A file the reader opened and parsed is refused for its content (the message
+    says it is neither one result nor a map of results), which counts as "original" here; a file it would not open at all is refused earlier, with another message."""
+    from orchard import tier_plan
+    try:
+        tier_plan.load_skew_file(env["file"], experts=8, top_k=2)
+    except tier_plan.TierPlanError as exc:
+        return "original" if "neither one result nor a map" in str(exc) else "refused"
+    return "other"
+
+
 def _r_drop_check_dir_client(env):
     from orchard import drop_check
     return _label(drop_check.DirClient(env["file"].parent).get("Qwen/x", "0" * 40, env["file"].name, max_bytes=1 << 20))
@@ -477,6 +488,7 @@ PATH_READERS: list[PathReader] = [
     PathReader("safeio.read_bytes(path)", "path_read", _r_read_bytes_path, claims_pin=False),
     PathReader("safeio.read_json(path)", "path_read", _r_read_json_path, claims_pin=False),
     PathReader("drop_check.DirClient.get", "path_read", _r_drop_check_dir_client, claims_pin=False),
+    PathReader("tier_plan.load_skew_file", "path_read", _r_tier_plan_skew_file, claims_pin=False),
     PathReader("safeio.atomic_write(path)", "path_write", _r_atomic_write_path, claims_pin=False),
     PathReader("ledger.Ledger lock file", "lock_open", _r_ledger_lock, claims_pin=False),
     PathReader("cache_lock.entry_lock", "lock_open", _r_cache_lock, claims_pin=False),

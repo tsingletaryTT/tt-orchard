@@ -1,0 +1,2 @@
+target = "0.9.203"
+summary = "The drafter decision from measured numbers: stage 2 reads a measurement record (plain step, verify pass, accepted tokens per pass by prompt kind on real text), writes the break-even verdict to the ledger, and the package card states it (issue 182, the part that needs no board)."

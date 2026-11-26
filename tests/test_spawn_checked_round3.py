@@ -158,6 +158,10 @@ class FakeProc:
         self.sent.append((pid, int(sig)))
         if self.on_signal is not None:
             self.on_signal(pid, sig)
+        if sig == signal.SIGSTOP and (self.root / str(pid) / "stat").exists():
+            # a real SIGSTOP changes the process state to T (issue 476: the sweep waits for it before it scans again)
+            stat = self.root / str(pid) / "stat"
+            stat.write_text(stat.read_text().replace(") S ", ") T ", 1))
         if sig == signal.SIGKILL:
             import shutil
             shutil.rmtree(self.root / str(pid), ignore_errors=True)
@@ -347,7 +351,7 @@ def test_a_sweep_that_returns_its_records_without_filling_into_still_reaches_the
 def test_the_tools_keep_the_records_when_spawn_checked_is_interrupted(monkeypatch, tmp_path):
     """The records were lost: `self.swept.extend(swept)` ran after the call and an interrupt skipped it, so an interrupted kernel-probe attempt
     omitted exactly the helpers that its own cleanup had just stopped."""
-    def interrupted(command, run_dir, env, timeout, out):
+    def interrupted(command, run_dir, env, timeout, out, **limits):          # the tool passes the read roots and the search limit too
         sink = agent._SURVIVORS.get()
         sink.append({"pid": 77, "cmdline": "srv", "stopped": True, "boot_id": "b", "start": 3})
         sink.problems.append("a scan that never settled")

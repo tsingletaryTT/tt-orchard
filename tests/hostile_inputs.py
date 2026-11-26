@@ -980,10 +980,12 @@ def _types():
 (_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
  _MigrationRefused) = _types()
 from orchard.audio_package import AudioPackageError as _AudioPackageError  # noqa: E402
+from orchard.cheat_compiles import CheatCompilesError as _CheatCompilesError  # noqa: E402
 from orchard.drop_check import Unreadable as _DropUnreadable  # noqa: E402
 from orchard.drop_watch import StateCorrupt as _DropStateCorrupt  # noqa: E402
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
+from orchard.tier_plan import TierPlanError as _TierPlanError  # noqa: E402
 from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
 from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
@@ -1018,6 +1020,16 @@ def _preflight_index_problem(base: Path):
 def _audio_decision_load_category_rules(base: Path):
     from orchard import audio_decision
     return audio_decision.load_category_rules(base / "input.json")
+
+
+def _tier_plan_load_skew_file(base: Path):
+    from orchard import tier_plan
+    return tier_plan.load_skew_file(base / "input.json", experts=8, top_k=2)
+
+
+def _cheat_compiles_load(base: Path):
+    from orchard import cheat_compiles
+    return cheat_compiles.load(base / "input.json")
 
 
 def _weights_source_load_records(base: Path):
@@ -1332,6 +1344,7 @@ READERS: list[Reader] = [
     Reader("updates_host.read_sysfs", _updates_host_read_sysfs),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
+    Reader("tier_plan.load_skew_file", _tier_plan_load_skew_file, documented=(_TierPlanError,)),
     Reader("ledger.read_entries",_ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
     Reader("telegraph_store.read_snapshot", _telegraph_store_read_snapshot, rel="project.db",
            documented=(_LedgerUnavailable, _LedgerRefused)),
@@ -1432,6 +1445,7 @@ READERS: list[Reader] = [
     Reader("research.headers.shard_header", _headers_shard_header, feed="bytes", documented=(_FetchError, ValueError)),
     Reader("research.http.Fetcher.json", _http_fetcher_json, feed="bytes", documented=(_FetchError,)),
     Reader("weights_source.load_records", _weights_source_load_records, documented=(ValueError,)),
+    Reader("cheat_compiles.load", _cheat_compiles_load, documented=(_CheatCompilesError,)),
     Reader("weights_source._read_run_sh", _weights_source_read_run_sh, rel="run.sh"),
     Reader("drop_check.HubClient.info", _drop_check_hub_info, feed="bytes", documented=(_DropUnreadable,),
            check=lambda r: None if r is None or isinstance(r, dict) else f"returned {type(r).__name__}"),

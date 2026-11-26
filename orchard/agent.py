@@ -50,7 +50,9 @@ This module owns three things.
 What it does not do: streaming; a proxy in front of agents the supervisor did not launch (the
 watchdog only reads their transcripts); read-only mounts. The same user account runs the agent,
 so a file outside the run directory that holds a token can still be read by absolute path, and a
-shell redirect can still write outside the run directory. The real limits there are a separate
+shell redirect can still write outside the run directory. A search of a whole tree that starts
+outside the run directory and the read-only places the run names is refused (orchard/runner.py,
+issue 864); a single named file is not. The real limits there are a separate
 user account or a mount namespace, which plan 4 does not set up.
 """
 from __future__ import annotations
@@ -77,8 +79,8 @@ from orchard.port_facts import is_write_deadline_hint
 from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
                               AGENT_THINKING, AGENT_TOOL_DEDUPE, DEDUPE_HINT_PREFIX, DEDUPE_LISTED_CALLS, DEDUPE_MAX_RECORDS,
-                              TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
-from orchard.runner import Denied, check_string
+                              SEARCH_TIMEOUT_S, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
+from orchard.runner import Denied, check_string, check_string_info  # noqa: F401  (check_string stays importable from here)
 from orchard.stages import evidence_record
 from orchard.watchdog import Event, RetryGuard, command_shape
 
@@ -135,10 +137,53 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
 
 # ---- running a checked command ------------------------------------------------------------------
 
+READ_ROOTS_VAR = "ORCHARD_AGENT_READ_ROOTS"       # extra read-only places for searches, absolute directories joined with os.pathsep
+SEARCH_TIMEOUT_VAR = "ORCHARD_SEARCH_TIMEOUT_S"   # the operator's limit for a shell command that searches a whole tree, in seconds
+
+
+def agent_read_roots(paths, inputs, environ=None) -> tuple:
+    """The read-only places a stage agent's searches may start in besides the run directory (issue 864): the tt-orchard checkout, the Hugging
+    Face model cache (`<hf_home>/hub`, and not the Hugging Face home itself, which holds the token), the tt-model install root, the tensor-cache
+    root, every directory the run names as an input (the model snapshot, a nearest bundle), and the directories in ORCHARD_AGENT_READ_ROOTS.
+    A path that is not an existing absolute directory is left out. Links are resolved, and a duplicate is dropped."""
+    env = os.environ if environ is None else environ
+    found: list[str] = []
+
+    def add(path):
+        if isinstance(path, (str, os.PathLike)) and os.path.isabs(os.fspath(path)) and os.path.isdir(path):
+            real = os.path.realpath(path)
+            if real not in found:
+                found.append(real)
+
+    add(paths.orchard_dir)
+    add(os.path.join(os.fspath(paths.hf_home), "hub"))
+    add(paths.tt_model_root)
+    add(paths.cache_root)
+    for value in (inputs or {}).values():
+        add(value)
+    for entry in str(env.get(READ_ROOTS_VAR) or "").split(os.pathsep):
+        if entry:
+            add(entry)
+    return tuple(found)
+
+
+def search_timeout_from_env(environ=None) -> float:
+    """The limit for a shell command that searches a whole tree: ORCHARD_SEARCH_TIMEOUT_S when it is a plain positive number of seconds
+    (digits with an optional fraction), else the default. A value that is not one is ignored, so a typo cannot remove the limit."""
+    env = os.environ if environ is None else environ
+    text = str(env.get(SEARCH_TIMEOUT_VAR) or "").strip()
+    if re.fullmatch(r"\d{1,9}(\.\d{1,6})?", text):
+        value = float(text)     # finite: ok at most nine digits and six decimals, matched by the pattern above
+        if value > 0:
+            return value
+    return SEARCH_TIMEOUT_S
+
+
 SPAWN_TAG_VAR = "ORCHARD_SPAWN_TAG"       # in every spawned command's environment: a value of its own, so a sweep finds what the command started
 
 
-def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> tuple[int | None, bool]:
+def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout, *, read_roots=(), search_timeout: float | None = None,
+                  note: dict | None = None) -> tuple[int | None, bool]:
     """Run one shell string after the runner's checks. Returns (exit code or None, timed out).
 
     Denied propagates: a refused string never starts. The command runs in its own session, so a
@@ -151,15 +196,25 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
     with `setsid`) is not in the command's group, so the group kill misses it (issue 390). Every
     command carries ORCHARD_SPAWN_TAG with a value of its own, and after a kill the processes that
     carry it are stopped and named in `stdout`. A process that replaced its environment is not found.
+
+    `read_roots` are the places besides the run directory where a command that reads a whole tree may start (orchard.runner). A string that
+    holds such a command runs under `search_timeout` when that is shorter than `timeout` (issue 864: a search that goes wrong should end in
+    minutes and does not wait for the limit that a build gets). When that limit ends the command, `note` (a dict the caller gave) is filled with
+    {"search": True, "limit": seconds, "seconds": elapsed}.
     """
-    check_string(command, run_dir)
+    info = check_string_info(command, run_dir, read_roots)
+    searching = bool(info.tree_reads) and search_timeout is not None and search_timeout < timeout
+    limit = search_timeout if searching else timeout
     tag = str(Path(run_dir).resolve() / f".spawn-{uuid.uuid4().hex}")       # a value to match, never created as a path
     proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env={**env, SPAWN_TAG_VAR: tag}, stdin=subprocess.DEVNULL,
                             stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True)
+    started = time.monotonic()
     try:
-        proc.wait(timeout=timeout)
+        proc.wait(timeout=limit)
         return proc.returncode, False
     except subprocess.TimeoutExpired:
+        if note is not None and searching:
+            note.update(search=True, limit=limit, seconds=round(time.monotonic() - started, 3))
         late = _cleanup(proc, tag, stdout)
         if late is not None:
             raise late                       # a stop signal arrived during the cleanup; nothing else is on its way, so it goes on now
@@ -521,8 +576,15 @@ EDIT_TOOL_COMMAND = re.compile(r"^\s*(?:python3?\s+)?\S*stage_tools\.py\s+edit\b
 
 class Tools:
     def __init__(self, run_dir, stage_dir, env: dict, *, timeout: float = TOOL_TIMEOUT_S,
-                 limit: int = TOOL_OUTPUT_CHARS, scratch=None, dedupe: bool = AGENT_TOOL_DEDUPE):
+                 limit: int = TOOL_OUTPUT_CHARS, scratch=None, dedupe: bool = AGENT_TOOL_DEDUPE, read_roots=(),
+                 search_timeout: float = SEARCH_TIMEOUT_S):
         self.run_dir, self.stage_dir = Path(run_dir), Path(stage_dir)
+        # Where a search of a whole tree may start besides the run directory (orchard.runner, issue 864), and how long one may run. A shell
+        # command that holds a search and runs past `search_timeout` is killed; each one is listed (at most DEDUPE_LISTED_CALLS) for the
+        # step's ledger record as {"turn", "command", "limit", "seconds"}.
+        self.read_roots = tuple(os.fspath(r) for r in (read_roots or ()))
+        self.search_timeout = search_timeout
+        self.search_timeouts: list[dict] = []
         # Tool-result dedupe (docs/tool-result-dedupe.md). One Tools object serves one agent step (the supervisor makes a new one per step), so
         # what it remembers is what that step's conversation holds. `begin_turn` says which model turn the next calls belong to.
         self.dedupe = bool(dedupe)
@@ -535,6 +597,10 @@ class Tools:
         self.rewrite_count = 0                                                # whole-file rewrites by write_file (issue 562)
         self.rewrite_calls: list[list] = []                                   # [path, turn, lines of the old file, characters written], bounded
         self.edit_calls = 0                                                   # shell commands that ran the `edit` stage tool (issue 562)
+        # Whether the last shell call wrote a port file (issue 867): True when the port guard saw a file with new accepted content after the
+        # command, False when the command ran the `edit` stage tool and changed nothing (the tool refused), None otherwise. The text of the
+        # output is not evidence; the files are. The agent loop puts it in the call's tool_result event, which the watchdog reads.
+        self.last_shell_wrote: bool | None = None
         # <run>/tt-metal-scratch, offered only to stages 2 to 4 of a stock-runtime run (orchard.stages.scratch_stage): a copy of the
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
@@ -577,9 +643,12 @@ class Tools:
             return "error: the arguments must be a JSON object"
         if name == "shell":
             command = args.get("command")
-            if isinstance(command, str) and EDIT_TOOL_COMMAND.match(command):
+            is_edit = isinstance(command, str) and EDIT_TOOL_COMMAND.match(command) is not None
+            if is_edit:
                 self.edit_calls += 1
-            return self._deduped_shell(command, self.shell(command))
+            result = self._deduped_shell(command, self.shell(command))
+            self.last_shell_wrote = True if self._guard.written else (False if is_edit else None)
+            return result
         if name == "read_file":
             unknown = self.unknown_read_args(args, ("path", "offset"),
                                              "read_file takes path and offset (offset counts characters)")
@@ -628,15 +697,18 @@ class Tools:
         return f"error: {accepts}; it has no argument named {names}"
 
     def shell(self, command) -> str:
+        self._guard.written = []                  # a call that returns before it runs anything wrote nothing (issue 867)
         if not isinstance(command, str) or not command.strip():
             return "error: command must be a non-empty string"
         out_path = self.stage_dir / "log" / "last-shell-output.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         self._guard.remember()
+        note: dict = {}
         try:
             with open(out_path, "wb") as out, collect_survivors() as swept:
                 try:
-                    code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
+                    code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out, read_roots=self.read_roots,
+                                                    search_timeout=self.search_timeout, note=note)
                 finally:                       # an interrupt that cut the wait short still leaves what its sweep stopped
                     self.swept.extend(swept)
                     self.sweep_problems.extend(swept.problems)
@@ -644,6 +716,11 @@ class Tools:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")
         head = f"killed after {self.timeout} s" if timed_out else f"exit {code}"
+        if timed_out and note.get("search"):
+            head = (f"killed after {note['limit']} s (the limit for a command that searches a whole tree; the search is over a tree that is "
+                    "too large or too slow: search a narrower path, or stop early with grep -m or head)")
+            if len(self.search_timeouts) < DEDUPE_LISTED_CALLS:
+                self.search_timeouts.append({"turn": self._turn, "command": command[:200], "limit": note["limit"], "seconds": note["seconds"]})
         notes = self._guard.judge()
         return f"{head}\n{clip(text, self.limit)}" + ("\n" + "\n".join(notes) if notes else "")
 
@@ -986,6 +1063,8 @@ class AgentStep:
                 writes["whole_file_rewrite_calls"] = [list(c) for c in self.tools.rewrite_calls]
             if getattr(self.tools, "edit_calls", 0):
                 writes["edit_calls"] = self.tools.edit_calls
+            if getattr(self.tools, "search_timeouts", None):
+                writes["search_timeouts"] = [dict(r) for r in self.tools.search_timeouts]
             self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec, **deduped, **writes)
         return Outcome(status, turns, final_text, detail)
 
@@ -1305,9 +1384,12 @@ class AgentStep:
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
                 # deduped: the answer was the "unchanged since turn N" note (Tools dedupe); the event then names what it was about.
                 note = getattr(self.tools, "last_dedupe", None)
-                # wrote: did this write_file call write its file? None for other tools.
+                # wrote: did this write_file call write its file? For a shell call, did it change a port file (Tools.last_shell_wrote, issue
+                # 867)? None for other tools, and for a shell call that changed none.
+                wrote = (result.startswith("wrote ") if name == "write_file"
+                         else getattr(self.tools, "last_shell_wrote", None) if name == "shell" else None)
                 self._event("tool_result", tool=name, output_hash=sha(result),
-                            wrote=result.startswith("wrote ") if name == "write_file" else None,
+                            wrote=wrote,
                             **({"deduped": True, "name": str(note.get("target"))[:200]} if note else {}))
                 self._record_new_evidence()
                 repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))

@@ -840,6 +840,7 @@ SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the 
 SWEEP_POLL_S = 0.05
 CLEANUP_TRIES_SWEEP = 3        # a sweep step that an interrupt cut short is run again, this many times in all
 SWEEP_FREEZE_ROUNDS = 8       # scans (each after a SIGSTOP of what is known) before the SIGKILL goes out even if new processes keep appearing
+SWEEP_STOP_WAIT_S = 1.0       # how long a freeze waits for each SIGSTOP to take effect (state T, a zombie or gone) before it scans (issue 476)
 
 
 RUN_DIR_VAR = "ORCHARD_RUN_DIR"
@@ -929,6 +930,19 @@ def _proc_state(proc_root: str, pid: int) -> tuple[str, int] | None:
 
 
 _UNOBSERVABLE = "unobservable"
+_STOPPED_STATES = ("T", "t", "Z", "X")      # stopped, tracing stop, zombie, dead: the process cannot run or fork any more
+
+
+def _still_running(proc_root: str, pid: int) -> bool:
+    """True when /proc shows the process, or cannot be read, and it is not in a stopped, zombie or dead state."""
+    observed = _observe(proc_root, pid)
+    return observed is not None and not _stopped_state(observed)
+
+
+def _stopped_state(observed) -> bool:
+    """True when `_observe`'s answer is a process that can no longer run: a stop, a zombie or a dead entry. None (gone) is handled by the caller;
+    _UNOBSERVABLE is not a stop, because the process may still run."""
+    return isinstance(observed, tuple) and observed[0] in _STOPPED_STATES
 
 
 def _observe(proc_root: str, pid: int):
@@ -962,7 +976,7 @@ def _gone(proc_root: str, pid: int, start: int | None) -> bool:
 
 def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
                  clock=time.monotonic, sleep=time.sleep, var: str = RUN_DIR_VAR, identity: bool = False,
-                 into: list | None = None, status: dict | None = None) -> list[dict]:
+                 into: list | None = None, status: dict | None = None, stop_wait_s: float | None = None) -> list[dict]:
     """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then a
     second scan and SIGKILL for everything it finds, so a process a stray started during the grace is caught too.
     Returns [{"pid", "cmdline", "stopped"}]. `var` names the environment variable to look for (ORCHARD_RUN_DIR for an agent's
@@ -978,6 +992,11 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     nothing it was after is left: a process list that could not be read, freeze scans that never settled, an interrupt that
     cut a scan short, an error) and `complete` (True when there are none), so a failed or unstable sweep is not mistaken for
     an empty one.
+
+    A SIGSTOP sent is not a process stopped: a helper can fork between the signal and its stop, and the child is not in the scan that
+    follows. After each SIGSTOP pass the freeze therefore waits, for at most `stop_wait_s` (default SWEEP_STOP_WAIT_S), until every
+    process it signalled shows state T, is a zombie or is gone, and only then scans. When the bound passes, the sweep adds a problem
+    that names the pids, so a caller treats the sweep as incomplete (the SIGKILLs go out either way).
 
     Our own pid and our ancestors are never signalled. Each signal goes to the pid itself (os.kill), except for a
     process that leads its own group, whose group is signalled so its children go too; a group is never signalled when
@@ -1029,6 +1048,23 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             for r in list(records):
                 send(r["pid"], signal.SIGSTOP)
 
+        def confirm_stopped(pids) -> None:
+            """Wait, at most `stop_wait_s`, until each pid shows state T or t, is a zombie or is gone. A pid that is still running, or whose
+            /proc entry cannot be read, when the bound passes is named in a problem (once per pid): the scan that follows cannot vouch for
+            a child that process forked in between."""
+            bound = SWEEP_STOP_WAIT_S if stop_wait_s is None else stop_wait_s
+            deadline = clock() + bound
+            waiting = list(pids)
+            while True:
+                waiting = [pid for pid in waiting if _still_running(proc_root, pid)]
+                if not waiting or clock() >= deadline:
+                    break
+                sleep(SWEEP_POLL_S)
+            for pid in waiting:
+                msg = f"helper {pid} was sent SIGSTOP and did not show as stopped within {bound:g} s, so a child it forked may be missing from the scan"
+                if msg not in problems:
+                    problems.append(msg)
+
         def freeze() -> None:
             """Stop every process found so far (SIGSTOP) and scan again, until a scan finds no process that is new: a helper that keeps forking
             cannot start a child after the last scan, because it cannot run once it is stopped. A stopped process still dies of SIGKILL.
@@ -1038,10 +1074,12 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             for _ in range(SWEEP_FREEZE_ROUNDS):
                 before = len(records)
                 stop_all()
+                confirm_stopped([r["pid"] for r in records])
                 note(found())
                 if len(records) == before:
                     return
             stop_all()                                   # the process the last scan found has not been stopped yet
+            confirm_stopped([r["pid"] for r in records])
             problems.append(f"new helpers were still appearing after {SWEEP_FREEZE_ROUNDS} scans, so the set of helpers never settled")
 
         def kill_pass() -> BaseException | None:
@@ -1115,6 +1153,25 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     if late is not None:
         raise late                                       # the first interrupt, after every SIGKILL and the records are done
     return records
+
+
+BLOCKED_HELPER = "blocked-helper"      # an attempt's status when its authoritative check did not run because a helper may still run (issue 477)
+
+
+def helper_block_reason(swept, problems) -> str | None:
+    """Why the authoritative check must not run, or None. `swept` are the sweep's records and `problems` the reasons a sweep could not vouch
+    for its result. A record whose `stopped` is False is a helper that may still run; a problem is a sweep that cannot say what is left.
+    Either one blocks: a surviving helper can change the attempt's files while the check reads them."""
+    live = [r.get("pid") for r in swept or [] if isinstance(r, dict) and r.get("stopped") is False]
+    notes = [p for p in problems or [] if isinstance(p, str) and p]
+    if not live and not notes:
+        return None
+    parts = []
+    if live:
+        parts.append("a helper from the earlier sweep may still run (pid" + ("s " if len(live) != 1 else " ") + ", ".join(str(p) for p in live) + ")")
+    if notes:
+        parts.append("the sweep could not vouch that nothing was left: " + "; ".join(notes[:3]))
+    return "the check did not run because " + " and ".join(parts)
 
 
 def _sweep_noting(adir, problems: list, into: list) -> None:
@@ -1249,8 +1306,14 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         # command's own sweep stopped (agent.spawn_checked) are no longer there to find, so the tools' records come first.
         _sweep_noting(adir, tools.sweep_problems, tools.swept)
     agent_wall_s = round(time.monotonic() - started, 2)
+    # A helper the sweep could not confirm stopped, or a sweep that cannot vouch for what is left, may still change the attempt's files while
+    # the check reads them, and the attempt could then report a pass (issue 477). The check does not run; the attempt says why.
+    blocked = helper_block_reason(tools.swept, tools.sweep_problems)
     try:
-        check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+        if blocked:
+            check = {"passed": False, "category": "helper_may_run", "first_line": blocked, "sets": [], "violations": [], "kernel_sha256": None}
+        else:
+            check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     finally:
         # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
         # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
@@ -1260,7 +1323,8 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
     measures = set_measures(sets)
     passed = check.get("passed") is True
     attempt = {
-        "op": op, "attempt": n, "status": outcome.status, "status_detail": outcome.detail or control.detail,
+        "op": op, "attempt": n, "status": BLOCKED_HELPER if blocked else outcome.status,
+        "status_detail": blocked or outcome.detail or control.detail, "check_skipped": blocked,
         "turns": outcome.turns, "agent_wall_s": agent_wall_s, "passed_sim": passed,
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
@@ -2727,6 +2791,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     held = (record.get("agent_hw") or {}).get("stopped")
                     if held:
                         stopped, code = f"an agent's hardware call left a chip held: {held}", EXIT_BLOCKED
+                        break
+                    # A helper that may still run could change the next attempt's files (issue 477): end the run here, so no later attempt
+                    # and no hardware phase starts beside it.
+                    skipped = record.get("check_skipped")
+                    if isinstance(skipped, str) and skipped:
+                        stopped, code = f"attempt {n}: {skipped}", EXIT_BLOCKED
                         break
                 if getattr(args, "phase", "sim") == "hw" and not stopped:
                     where, hw_started = "the hardware phase", True
