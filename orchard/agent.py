@@ -597,6 +597,10 @@ class Tools:
         self.rewrite_count = 0                                                # whole-file rewrites by write_file (issue 562)
         self.rewrite_calls: list[list] = []                                   # [path, turn, lines of the old file, characters written], bounded
         self.edit_calls = 0                                                   # shell commands that ran the `edit` stage tool (issue 562)
+        # Whether the last shell call wrote a port file (issue 867): True when the port guard saw a file with new accepted content after the
+        # command, False when the command ran the `edit` stage tool and changed nothing (the tool refused), None otherwise. The text of the
+        # output is not evidence; the files are. The agent loop puts it in the call's tool_result event, which the watchdog reads.
+        self.last_shell_wrote: bool | None = None
         # <run>/tt-metal-scratch, offered only to stages 2 to 4 of a stock-runtime run (orchard.stages.scratch_stage): a copy of the
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
@@ -639,9 +643,12 @@ class Tools:
             return "error: the arguments must be a JSON object"
         if name == "shell":
             command = args.get("command")
-            if isinstance(command, str) and EDIT_TOOL_COMMAND.match(command):
+            is_edit = isinstance(command, str) and EDIT_TOOL_COMMAND.match(command) is not None
+            if is_edit:
                 self.edit_calls += 1
-            return self._deduped_shell(command, self.shell(command))
+            result = self._deduped_shell(command, self.shell(command))
+            self.last_shell_wrote = True if self._guard.written else (False if is_edit else None)
+            return result
         if name == "read_file":
             unknown = self.unknown_read_args(args, ("path", "offset"),
                                              "read_file takes path and offset (offset counts characters)")
@@ -690,6 +697,7 @@ class Tools:
         return f"error: {accepts}; it has no argument named {names}"
 
     def shell(self, command) -> str:
+        self._guard.written = []                  # a call that returns before it runs anything wrote nothing (issue 867)
         if not isinstance(command, str) or not command.strip():
             return "error: command must be a non-empty string"
         out_path = self.stage_dir / "log" / "last-shell-output.txt"
@@ -1376,9 +1384,12 @@ class AgentStep:
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
                 # deduped: the answer was the "unchanged since turn N" note (Tools dedupe); the event then names what it was about.
                 note = getattr(self.tools, "last_dedupe", None)
-                # wrote: did this write_file call write its file? None for other tools.
+                # wrote: did this write_file call write its file? For a shell call, did it change a port file (Tools.last_shell_wrote, issue
+                # 867)? None for other tools, and for a shell call that changed none.
+                wrote = (result.startswith("wrote ") if name == "write_file"
+                         else getattr(self.tools, "last_shell_wrote", None) if name == "shell" else None)
                 self._event("tool_result", tool=name, output_hash=sha(result),
-                            wrote=result.startswith("wrote ") if name == "write_file" else None,
+                            wrote=wrote,
                             **({"deduped": True, "name": str(note.get("target"))[:200]} if note else {}))
                 self._record_new_evidence()
                 repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))
