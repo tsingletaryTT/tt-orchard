@@ -76,6 +76,28 @@ guards that exist there. The check compared the selection with the test files th
 What this does not show: that the tests a pull request did not change would still pass. Showing that needs the full suite on the reverted
 change, which this check did not run. The narrow modes leave out tests on purpose.
 
+### The check repeated on 2026-11-25 over the 10 newest merged pull requests (868 to 852)
+
+After 15 more pull requests merged, with the final selector (the registry holds the guards that exist at each merge):
+
+| Pull request | Source files | Own tests | Default | `--eager` | `--direct` | Own tests left out |
+| --- | --- | --- | --- | --- | --- | --- |
+| #868 | 4 | 1 | 598 of 798 | 533 | 72 | none |
+| #866 | 4 | 3 | 738 of 797 | 644 | 428 | none |
+| #863 | 2 | 1 | 737 of 796 | 583 | 428 | none |
+| #857 | 2 | 2 | full suite (`tests/hostile_fs.py` is a shared helper) | - | - | none |
+| #851 | 4 | 1 | 589 of 793 | 523 | 207 | none |
+| #861 | 1 | 1 | full suite (template under `orchard/skills/`) | - | - | none |
+| #862 | 1 | 1 | full suite (template) | - | - | none |
+| #860 | 1 | 2 | full suite (template) | - | - | none |
+| #853 | 1 | 1 | 13 of 790 | 13 | 13 | none |
+| #852 | 7 | 2 | full suite (template) | - | - | none |
+
+Five of the ten fall back to the full suite, four because a skill or package template changed and one because a shared test helper changed.
+Of the other five, the default selected 74 to 93 percent of the files for four and 13 files for one. In every row the tests the pull request
+wrote were selected. The check does not know which of the other tests each pull request made fail, because failing-test sets of those pull
+requests were not recorded; the guards were in every selection.
+
 ## 4. The #818 failures and the faults
 
 The three repository checks that failed on #818 (`test_finite_ratchet`, `test_hostile_readers` registry, `test_readme` flag list) were
