@@ -1858,10 +1858,20 @@ yourself.
 Every agent command goes through `orchard/runner.py`. It reads a small subset of shell and refuses
 the rest. It refuses publish, push and upload commands, chip resets, gozer commands that take or
 release leases, docker and tt-model commands that start or stop servers, `kill`, `ssh`, curl and
-wget requests that send data, changes to the device mask, and deletion outside the run directory.
+wget requests that send data, changes to the device mask, deletion outside the run directory, and a
+search of a whole tree (a recursive `grep`, `rg`, `ag`, `ack`, `fd`, `find`, `ls -R`, `tree`, `du`)
+that starts outside the run directory and the read-only places the run names. Those places are the
+tt-orchard checkout, the Hugging Face model cache (`<hf home>/hub`, which leaves out the token that
+sits in the Hugging Face home), the tt-model install root, the tensor-cache root, each directory the
+run names as an input, and the directories listed in `ORCHARD_AGENT_READ_ROOTS` (absolute paths
+joined with `:`). The refusal names the path and says where to search. A shell command that holds such a
+search ends after 120 seconds, or after `ORCHARD_SEARCH_TIMEOUT_S` seconds when the operator sets it
+to a positive number; the step's ledger record lists each search that was ended, with its elapsed time.
 
 It is a best-effort guard. It does **not** stop:
 
+- a single named file outside the run directory (`cat`, `head`, `grep x file`), so a credential file can
+  still be read by its path;
 - `python3 -c`, `perl -e`, or any script, which can delete files, open a device, upload or signal a
   process;
 - `mv`, `cp`, `tee`, `truncate` or `rsync --delete`, which can overwrite any file your user can

@@ -128,7 +128,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease, Refused
-from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
+from orchard.agent import (AgentStep, Tools, agent_env, agent_read_roots, collect_survivors, probe_model, search_timeout_from_env,
+                           spawn_checked)
 from orchard import boundedwalk
 from orchard import audio_reference_env, audio_runtime, audio_stage0, quantized_copy, spec_decision, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
@@ -4917,11 +4918,7 @@ class Supervisor:
                          top_p=tcfg.get("top_p"), top_k=tcfg.get("top_k"),
                          unstick=unstick, restart_on_caps=AGENT_RESTARTS_ON_CAPS,
                          stage_restart_after=AGENT_STAGE_CAPS_RESTART, stage_block_after=AGENT_STAGE_CAPS_BLOCK,
-                         tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
-                             **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
-                             scratch=(self.run_dir / "tt-metal-scratch"
-                                      if scratch_stage(n, run_path(entries, self.run_dir)) else None),
-                             dedupe=self.tool_dedupe),
+                         tools=self._agent_tools(n, stage_dir, entries),
                          ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
@@ -4935,6 +4932,17 @@ class Supervisor:
             # The coder's replies ran away across the stage (issue 458, item 4): the block names the replies as the cause.
             self._block(n, out.detail)
         return out, step
+
+    def _agent_tools(self, n, stage_dir: Path, entries) -> Tools:
+        """The tools of one agent step. Its shell may search a whole tree only in the run directory and the read-only places the run names
+        (the model's snapshot and caches, see orchard.agent.agent_read_roots), and a search that runs long is ended sooner than a build
+        (issue 864)."""
+        return Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
+                         **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
+                     scratch=(self.run_dir / "tt-metal-scratch"
+                              if scratch_stage(n, run_path(entries, self.run_dir)) else None),
+                     dedupe=self.tool_dedupe,
+                     read_roots=agent_read_roots(self.paths, self.inputs), search_timeout=search_timeout_from_env())
 
     def _thin_port_prepare(self, spec, stage_dir: Path, escalated: bool):
         """Stage 2 of a full port run with `--thin-port` (issue 677, arm E): the prepare step as one chat request per stub of a generated port
