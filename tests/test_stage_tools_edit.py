@@ -340,7 +340,7 @@ def test_an_edit_that_makes_the_file_a_loop_is_put_back_by_the_shell_guard_after
     run = stage.parent.parent
     shutil.copy2(TOOL, stage / "stage_tools.py")
     t = Tools(run, stage, agent_env(run))
-    loop = "x = 1\\n" * 9000
+    loop = "x = 1; " * 9000          # a loop of statements on one line: no backslash-n pairs, which `edit` now treats on their own (test_stage_tools_edit_newline.py)
     out = t.shell(f"python3 stages/2/stage_tools.py edit stages/2/port/port_model.py --old 'def f1(x):' --new '{loop}'")
     assert "refused and restored" in out and "degenerate repetition" in out
     assert port(stage) == BODY

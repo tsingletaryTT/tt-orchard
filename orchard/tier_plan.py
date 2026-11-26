@@ -213,6 +213,65 @@ def parse_skew(text: str) -> tuple:
     return tuple(pts)
 
 
+MAX_SKEW_FILE_BYTES = 8 << 20     # a result with per-expert counts for 48 layers of 512 experts is about a megabyte; several texts fit
+SKEW_POINTS = (("top_10pct_share", 0.10), ("top_25pct_share", 0.25), ("top_50pct_share", 0.50))
+_LABEL_TEXT = re.compile(r"[^A-Za-z0-9._ /+(),:-]")
+
+
+def _skew_text(value, fallback: str) -> str:
+    """A short printable label from a string in a skew file: other characters become `?`, and the length is cut."""
+    return _LABEL_TEXT.sub("?", value)[:80] if isinstance(value, str) and value else fallback
+
+
+def _whole_number(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def load_skew_file(path, *, experts: int, top_k: int, text: str | None = None) -> tuple:
+    """The skew points and a source sentence from a measurement file written by scripts/expert_skew.py or scripts/expert_skew_stream.py.
+
+    The file holds one result (it has a `mean`) or a map from a text name to a result. The mean shares of the busiest 10, 25 and 50 percent of
+    the experts become the points. The result must have been measured on a model with the same expert count and top-k as the model being planned, so a
+    file for another shape is refused. A model of the same shape but another make passes that check; the source sentence names the model that
+    was measured, so the plan shows whose figures it used. Every refusal starts with `skew file` and holds none of the file's content."""
+    try:
+        data = safeio.read_json(path, max_bytes=MAX_SKEW_FILE_BYTES, expect=dict)
+    except safeio.SafeReadError as exc:
+        raise TierPlanError(f"skew file: {exc}") from exc
+    if "mean" in data:
+        if text is not None:
+            raise TierPlanError("skew file: the file holds one text, so --skew-text has nothing to choose")
+        name, res = None, data
+    else:
+        if not data or not all(isinstance(v, dict) for v in data.values()):
+            raise TierPlanError("skew file: it is neither one result nor a map from a text name to a result")
+        names = ", ".join(sorted(_skew_text(k, "?") for k in data))
+        if text is None:
+            raise TierPlanError(f"skew file: it holds several texts ({names}); pick one with --skew-text")
+        if text not in data:
+            raise TierPlanError(f"skew file: no text named {_skew_text(text, '?')!r} (the file has {names})")
+        name, res = text, data[text]
+    if not (_whole_number(res.get("experts")) and _whole_number(res.get("top_k"))):
+        raise TierPlanError("skew file: the result must say its expert count and its top-k as whole numbers")
+    if (res["experts"], res["top_k"]) != (experts, top_k):
+        raise TierPlanError(f"skew file: it was measured on a model with {res['experts']} experts and top {res['top_k']}; "
+                            f"this model has {experts} experts and top {top_k}")
+    if not _whole_number(res.get("tokens")):
+        raise TierPlanError("skew file: the result must say how many tokens it counted, as a whole number above zero")
+    mean = res.get("mean")
+    if not isinstance(mean, dict) or not all(safeio.fits_float(mean.get(k)) for k, _ in SKEW_POINTS):
+        raise TierPlanError("skew file: the mean must hold the shares " + ", ".join(k for k, _ in SKEW_POINTS) + " as finite numbers")
+    try:
+        points = parse_skew(",".join(f"{frac}:{safeio.as_float(mean[k], what=k)!r}" for k, frac in SKEW_POINTS))
+    except TierPlanError as exc:
+        raise TierPlanError(f"skew file: {exc}") from exc
+    note = _skew_text(res.get("text_note"), _skew_text(name, "an unnamed text")) if name is None else \
+        f"{_skew_text(name, 'an unnamed text')} ({_skew_text(res.get('text_note'), 'no description')})"
+    source = (f"measured on {_skew_text(res.get('model'), 'an unnamed model')} ({experts} experts, top {top_k}) "
+              f"over {res['tokens']} tokens of {note}")
+    return points, source
+
+
 def hit_share(fraction: float, points) -> float:
     """The share of expert picks that land on the busiest `fraction` of the experts, by straight lines through the points, (0, 0) and (1, 1).
     With no points the router is uniform and the share equals the fraction."""
@@ -553,6 +612,10 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
                    help="expert-use skew measured on this model: the busiest FRACTION of the experts take SHARE of the picks, for example 0.10:0.41,0.25:0.61 "
                         "(default: the OLMoE-1B-7B figures, an estimate that is not measured for the model being planned)")
     p.add_argument("--skew-source", help="where the --skew figures came from, printed beside the hit share")
+    p.add_argument("--skew-file", metavar="FILE",
+                   help="a measurement file written by scripts/expert_skew.py --json or scripts/expert_skew_stream.py; its mean shares are used as the skew, "
+                        "and it must have been measured on a model with the same expert count and top-k")
+    p.add_argument("--skew-text", metavar="NAME", help="with --skew-file: which text of a file that holds several")
     weights_plan.add_fidelity_arguments(p)
     p.add_argument("--json", action="store_true", help="print JSON")
     return p
@@ -577,6 +640,10 @@ def run(args, out=None, client=None) -> int:
         _positive("--kv-gib", args.kv_gib, zero_ok=True)
         _positive("--host-margin-gib", args.host_margin_gib, zero_ok=True)
         _positive("--host-free-gib", args.host_free_gib)
+        if args.skew is not None and args.skew_file is not None:
+            raise TierPlanError("--skew and --skew-file both give the skew; use only one of them")
+        if args.skew_text is not None and args.skew_file is None:
+            raise TierPlanError("--skew-text needs --skew-file")
         skew = parse_skew(args.skew) if args.skew is not None else OLMOE_SKEW
         try:
             scores, rule = weights_plan.fidelity_inputs(args)
@@ -585,12 +652,15 @@ def run(args, out=None, client=None) -> int:
         flags = {n for n, v in (("chip_gib", args.chip_gib), ("reserve_gib", args.reserve_gib), ("kv_gib", args.kv_gib),
                                 ("host_margin_gib", args.host_margin_gib)) if v is not None}
         cfg, total, where = load(args.source, client=client, revision=args.revision)
+        skew_source = (args.skew_source or "the figures the caller gave with --skew") if args.skew is not None else None
+        if args.skew_file is not None:
+            s = shape(cfg)
+            skew, skew_source = load_skew_file(args.skew_file, experts=s.experts, top_k=s.top_k, text=args.skew_text)
         res = plan(cfg, chips_list=chips, chip_gib=args.chip_gib or defaults.CHIP_DRAM_GIB,
                    reserve_gib=defaults.CHIP_RESERVE_GIB if args.reserve_gib is None else args.reserve_gib,
                    kv_gib=defaults.KV_BUDGET_GIB if args.kv_gib is None else args.kv_gib,
                    host_margin_gib=HOST_MARGIN_GIB if args.host_margin_gib is None else args.host_margin_gib, host_free_gib=args.host_free_gib,
-                   skew=skew, skew_source=(args.skew_source or "the figures the caller gave with --skew") if args.skew is not None else None,
-                   scores=scores, rule=rule, flags=flags, index_total=total, where=where)
+                   skew=skew, skew_source=skew_source, scores=scores, rule=rule, flags=flags, index_total=total, where=where)
     except TierPlanError as exc:
         print(str(exc), file=sys.stderr)
         return 2

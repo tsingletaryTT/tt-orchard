@@ -54,7 +54,7 @@ from pathlib import Path
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, accept_rate, read_decision
-from orchard import safeio, sampling_choice, sampling_probe
+from orchard import safeio, sampling_choice, sampling_probe, spec_decision
 from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
@@ -1498,6 +1498,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         reported=facts.reported, reported_source=facts.reported_source,
         graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,
         sampling_decision=facts.sampling_decision if profile["required"] else None,
+        spec_statement=spec_decision.statement_from_run(facts.run_dir) if profile["required"] else None,
         drafter_off_by_sampling=bool(facts.sampling_decision and facts.sampling_decision.get("choice") == "drafter-off"),
         sampling_trial_chips=facts.source.chips,
         sampling_first_verdict=((facts.sampling_decision or {}).get("numbers") or {}).get("served_verdict"),
