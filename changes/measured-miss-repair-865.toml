@@ -1,3 +1,4 @@
 target = "0.9.208"
+pr = 871
 kind = "fix"
 summary = "A full-port stage 2 check that runs to the end below the agreement bar earns coder repair rounds with the numbers, the rounds stop after three that leave the agreement where it was, and the furthest port is kept for the next attempt (issue 865); `--no-measured-miss-repair` keeps the old behaviour."
