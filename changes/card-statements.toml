@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "package card: says which stage each measured row came from, what the numbers do not show, the tested firmware and tt-kmd when known, and a one-sentence summary of each known licence's restriction."
+kind = "feature"
