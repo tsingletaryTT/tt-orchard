@@ -1,3 +1,4 @@
 target = "0.9.208"
 summary = "The residency estimator files the Engram tables of a model such as Hy4-flash under the host-resident table category, so a plan no longer counts about 60 GiB of host memory on the chips (issue 844)."
+pr = 869
 kind = "fix"
