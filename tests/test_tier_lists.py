@@ -283,3 +283,14 @@ def test_the_conftest_hook_skips_a_hardware_test_unless_the_operator_opts_in(mon
     opted = StubItem("tests/test_on_a_chip.py", "test_x")
     conftest.pytest_collection_modifyitems(None, [opted])
     assert "hardware" in opted.markers and "skip" not in opted.markers
+
+
+def test_a_copy_of_conftest_run_away_from_the_tests_directory_still_works(tmp_path):
+    """tests/test_conftest_guard.py runs a copy of conftest.py in an empty directory. The tier hook must not fail collection there."""
+    import shutil
+    shutil.copy(TESTS / "conftest.py", tmp_path / "conftest.py")
+    (tmp_path / "test_inner.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)], cwd=tmp_path,
+                       env={**__import__("os").environ, "PYTHONPATH": str(REPO)}, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout + r.stderr
+

@@ -162,7 +162,10 @@ def pytest_collection_modifyitems(config, items):
     """Apply the tier markers from tests/tier_lists.py (docs/test-tiers.md): `whole_repo` for the guards, `slow` for the files measured above
     30 seconds, `hardware` for tests that need a chip (skipped unless ORCHARD_RUN_HARDWARE=1). A file in no list gets none and runs by default."""
     import os
-    import tier_lists
+    try:
+        import tier_lists
+    except ImportError:                  # a copy of this conftest.py run away from the tests directory has no lists, so no tiers
+        return
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for item in items:
         path = getattr(item, "path", None)
