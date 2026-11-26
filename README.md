@@ -1077,7 +1077,10 @@ verdict: **fits on chips** (replicated, with the experts split over the chips, o
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
-with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. A second table gives the layout of
+with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. With `--skew-file` the figures come from a measurement file instead: the JSON that
+`scripts/expert_skew.py --json` or `scripts/expert_skew_stream.py` writes (the second runs the model one layer at a time, for a model too large for host
+memory). The file is refused unless it was measured on a model with the same expert count and top-k, and the plan names the model and text that were measured.
+A file with several texts needs `--skew-text`, which names one of them. A second table gives the layout of
 the published hybrid bundles, whole layers on the chips and only the other layers' experts in host memory. `--host-free-gib` marks a row that needs more
 host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change the chip memory, the per-chip reserve and the KV cache allowance, and
 `--json` prints every number with its source (config-derived, assumed constant, estimate or the caller's flag). The command measures neither speed nor
@@ -1174,6 +1177,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--port-repair-rounds` | no | A whole number from 0 to 10, default 3. A full-port stage 2 whose port check failed on the port itself gets up to this many repair rounds in the same attempt (section 5.5e). 0 is no rounds. The ledger records the value in `run_start`, and a resume keeps it and refuses another value. `tt-orchard bringup` takes the same flag |
 | `--port-check-positions` | no | A whole number from 16 to 8192, default 64. A full-port stage 2 check scores the smaller of this cap and the length of the stage 1 reference (stage 1 decodes 32 tokens today, so a cap above 32 changes nothing until the reference is longer). The check's record has a `positions` block with the cap, the positions scored and the reference's length, the gate recomputes it, and the fidelity note says which of the two limited the count. The cap goes into `port_check_config.json` as `max_positions`. The ledger records the value in `run_start` when it is not the default, and a resume keeps it and refuses another value. `tt-orchard bringup` takes the same flag |
 | `--fidelity-tokens` | no | 0 or a whole number from 16 to 8192, default 0 (none). Stage 1 also samples that many tokens at temperature 1 from its main prompt, with the model's log-probability of each, and writes `evidence/reference/fidelity-ids.json` (the greedy 32-token reference stays as it is). The stage 2 check then makes a second teacher-forced pass over the smaller of this and `--port-check-positions` and records a report-only `sampled_fidelity` block in `port-check.json`: the fidelity score on text the reference sampled, which needs about 4,000 tokens to tell bfp8 from bfp4 (issues 731 and 789). The value is a run fact the stage 1 agent copies into `reference_config.json`; the ledger records it when it is not 0, a resume keeps it and refuses another. Stage 1 takes minutes more for a 7B model (not yet measured). |
+| `--agreement-reference` | no | Stage 1 also decodes the CPU reference of the agreement set (six fixed prompts of different kinds, 32 greedy tokens each, with the model's log-probability of each token) and writes `evidence/reference/agreement-reference.json` (issue 15). The stage 2 and 4 check uses the set only when that file exists, and scores the chip's ids against it. A run that asks for the reference fails stage 1 when the file is missing or incomplete. The 2,000-token prompt is decoded with the key-value cache and the others without it, as the main reference is. The choice is a run fact the stage 1 agent copies into `reference_config.json`; the ledger records it, a resume keeps it and refuses a resume that names it for a run that started without it. |
 | `--no-tool-dedupe` | no | Send the agent every repeat read in full. By default, within one agent step, a repeat read of a file that has not changed since the agent read it (same file, same page, same size and time, same text), and a repeat of a read-only shell command (`ls`, `cat`, `head`, `tail`, `wc`, `stat`, `sed -n`, `grep` without `-r`, `find` with `-name`, `-type` and `-maxdepth` only) that printed the same, is answered with a short note that names the turn holding the text, and three such notes among the last six tool results send the agent one nudge to write. The ledger records the choice when it is off; a resume keeps the recorded choice and refuses to turn it off for a run that started with it on. See [`docs/tool-result-dedupe.md`](docs/tool-result-dedupe.md). |
 | `--telegraph-config` | no | A TOML file with the `[telegraph]` table; `bringup` passes the config it was started with when the table is enabled. A full-port stage 2 whose first attempt failed then asks the outside helper once for a draft port at the start of the next attempt (section 5.9g, "Phone a friend"). Without it, or with the helper off, nothing is sent. A file that cannot be read refuses the start |
 | `--helper-drives-port` | no | Stage 2's repair rounds of a full-port run are driven by the outside helper (orchard/repair_help.py): each round asks it for the whole corrected port, tells it what the last round changed, places the reply and runs the supervisor's check on the chips, with no coder step, until the check passes, the helper's caps are reached (`HELPER_ROUNDS` 10 rounds, `HELPER_TOTAL` 16 asks in the stage, the configured telegraph caps) or two rounds in a row fail at the same request with the same message (the coder then repairs that round). The furthest port an attempt reached (a failure further along the request chain, or a check that ran to the end) is kept with its supporting files in `stages/2.best/<snapshot>/`, a directory named by the digest of its file list that is never replaced, and put back at the start of the next attempt. On by default when the helper is configured and the run is a rehearsal (`--full-port-rehearsal`). A check that RUNS on the chips but whose top-1 agreement with the CPU reference is below the gate's bar (`full_port.TOP1_MIN`) is a failed round too (`numerics`): the supervisor recomputes the agreement from the check's record (never from its own `top1_agreement` field), tells the helper the agreement, where the mismatches begin and a table of the first 16 mismatching positions (reference id and the id the port produced), and the best port ranks by the request reached and then by agreement. An answer counts as helped only when the agreement rises or the check passes. |
@@ -1857,10 +1861,20 @@ yourself.
 Every agent command goes through `orchard/runner.py`. It reads a small subset of shell and refuses
 the rest. It refuses publish, push and upload commands, chip resets, gozer commands that take or
 release leases, docker and tt-model commands that start or stop servers, `kill`, `ssh`, curl and
-wget requests that send data, changes to the device mask, and deletion outside the run directory.
+wget requests that send data, changes to the device mask, deletion outside the run directory, and a
+search of a whole tree (a recursive `grep`, `rg`, `ag`, `ack`, `fd`, `find`, `ls -R`, `tree`, `du`)
+that starts outside the run directory and the read-only places the run names. Those places are the
+tt-orchard checkout, the Hugging Face model cache (`<hf home>/hub`, which leaves out the token that
+sits in the Hugging Face home), the tt-model install root, the tensor-cache root, each directory the
+run names as an input, and the directories listed in `ORCHARD_AGENT_READ_ROOTS` (absolute paths
+joined with `:`). The refusal names the path and says where to search. A shell command that holds such a
+search ends after 120 seconds, or after `ORCHARD_SEARCH_TIMEOUT_S` seconds when the operator sets it
+to a positive number; the step's ledger record lists each search that was ended, with its elapsed time.
 
 It is a best-effort guard. It does **not** stop:
 
+- a single named file outside the run directory (`cat`, `head`, `grep x file`), so a credential file can
+  still be read by its path;
 - `python3 -c`, `perl -e`, or any script, which can delete files, open a device, upload or signal a
   process;
 - `mv`, `cp`, `tee`, `truncate` or `rsync --delete`, which can overwrite any file your user can
@@ -2530,6 +2544,34 @@ A summary is written for 0, 1 and 3.
 - `--tt-metal-home`: the tt-metal checkout with the Tracy tools (default `$TT_METAL_HOME`); it is passed to the profiled command as `TT_METAL_HOME`.
 - `--noc-traces`: capture NoC events too (slower; fills the DRAM-controller and congestion columns).
 - `--gozer`, `--perf-report`: the commands to run (defaults `gozer` and the `tt-perf-report` on PATH). `--who`, `--reason`: what the lease records.
+
+### 5.9eb Read a report folder through the report viewer's server (no board)
+
+```bash
+python3 -m venv ~/.cache/tt-orchard/ttnn-visualizer/venv                                  # once
+~/.cache/tt-orchard/ttnn-visualizer/venv/bin/pip install ttnn-visualizer==0.112.0         # the tested version
+tt-orchard profile-read ~/reports/run-1 --out profile-read.json                          # a bounded summary of one report folder
+tt-orchard profile-read ~/reports/run-2 --baseline ~/reports/run-1 --out change.json     # adds the change from the baseline
+```
+
+`profile-read` starts the report viewer's MCP server (`ttnn-visualizer-mcp`, newline-delimited JSON-RPC over stdio), loads the folder (`db.sqlite`
+and/or `ops_perf_results*.csv`), asks a fixed list of questions (slowest ops with kernel sources and advice, time per op and per category, memory
+profile, errors, distinct argument combinations per op, and with `--baseline` the change between the two) and writes one JSON file, cut to fixed sizes:
+96 KiB for the file and 16 KiB for one answer. The server's own list of tools that can answer for the folder decides what is asked, and the summary says
+which questions it could not answer and why. It needs no board and no lease, never imports ttnn and opens no network connection.
+
+It refuses a server version it has not been tested with (0.112.0 so far) and a server whose `agent` files differ from the tested files, unless
+`--accept-untested-version` is given; the summary then says the run was untested. The server runs with usage recording off, a private empty home and no
+secrets, and it is stopped on every exit path.
+
+Exit codes: 0 every question answered; 1 some could not be answered; 2 refused (usage, a bad folder, a missing or untested server);
+3 the server could not be run or stopped answering. A summary is written for 0, 1 and 3.
+
+- `--out`: the file to write (default `./profile-read.json`, mode 0600). `--baseline`: a second report folder; it is the "before" of the comparison.
+- `--venv`: the environment with ttnn-visualizer installed (default `~/.cache/tt-orchard/ttnn-visualizer/venv`).
+- `--wheel`: the wheel it was installed from; its sha256 is compared with the tested wheel's and recorded.
+- `--accept-untested-version`: run a version or files that were not tested.
+- `--call-timeout`: seconds one server call may take (default 60). `--total-timeout`: seconds the whole session may take (default 300).
 
 ### 5.9fa The audio reference environment and the CPU reference
 

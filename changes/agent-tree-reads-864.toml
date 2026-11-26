@@ -1,0 +1,4 @@
+target = "0.9.206"
+summary = "A recursive search from an agent step may start only in the run directory and the read-only places the run names; a search that runs long ends sooner (issue 864)."
+pr = 866
+kind = "fix"
