@@ -6120,6 +6120,11 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-24: concurrency and isolation probes (Lottolabs study, learnings 20 and 21; branch lotto-served-probes)
+
+The Lottolabs cards check that each of 16 concurrent requests equals the same request alone, that a request between other streams stays exact, that a cut stream leaves the next request exact, that speculation on equals off, that a streamed tool call never has
+`{}` arguments, and that vLLM answers 400 to min_p, logit_bias and min_tokens under speculation. `served_probes.py` sent concurrent requests only for a rate. It now has six advisory probes, each with a control (a server that does not repeat itself alone gets no verdict); `can boot` runs three of them when the can declares `max_num_seqs` above 1,
+and lists them without letting them fail the boot. The other three are library functions for a caller that knows the speculation switch or the tool schema. Run log: `docs/run-logs/2026-11-24-concurrency-isolation-probes.md`; `docs/canning.md` describes the rows. 99 new tests in `tests/test_served_probes_isolation.py`; 72 mutations each turn a test red (two more are equivalent: urllib raises for a 4xx or 5xx health answer, and the stream reader's line limit keeps a line under the JSON size bound) against a local streaming fake, 3 in `tests/test_can_served_probes_boot.py`. The first chip run is owed.
 ## 2026-11-25 Test tiers and a diff selector
 
 Prompt (operator): is every test required every time, or could they be classified? Then: build it.
