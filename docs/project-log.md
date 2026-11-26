@@ -6120,6 +6120,23 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-25 Test tiers and a diff selector
+
+Prompt (operator): is every test required every time, or could they be classified? Then: build it.
+
+Measured first: a full run of 31,826 tests takes 19 minutes with six workers; 51 files above 30 s hold 69 percent of the test time. Markers `slow`
+(those files), `whole_repo` (guards that scan the repository) and `hardware` (none today) are registered with strict checking and applied from
+`tests/tier_lists.py` by a hook in `tests/conftest.py`. The guards were found with a fault run (ten failures from eight kinds of fault) and a
+scanner check. `scripts/tests_for_diff.py` prints the pytest arguments for a diff from the import graph (syntax trees, string references,
+conftest fixtures) and always includes the guards; anything it cannot map selects the full suite and says why. Documentation: `docs/test-tiers.md`,
+measurements: `docs/run-logs/2026-11-24-test-tiers.md`. 114 new tests; 58 mutations each turned a test red. History check over 15 merged pull
+requests: the tests each pull request changed were always selected. The default selection is wide for core modules (52 to 93 percent of files), so
+`--eager` and `--direct` exist for feedback loops. The full suite on the integration state remains the merge gate. Not built: a per-test coverage
+map, which would narrow the selection further.
+
+
+
+
 ## 2026-11-24: statements for the package card (Lottolabs study, learnings 25 and 32; branch lotto-card-statements)
 
 The Lottolabs cards say where each number came from and whether it was measured on the package, what their proofs do not show, the firmware and tt-kmd they were tested with, and the licence's limit near the top. `render_card`
