@@ -6120,6 +6120,29 @@ pause replaced it. The next poll found no file, and the rescue recorded `stage-b
 (the actuator with a consumed pause and a consumed abort, the watchdog-only ordering, and a supervisor run where a poll consumes the pause and the budget
 runs out in the same helper wait). Three mutations of the new condition each turn a test red. Folded issues #636 and #653 were not touched.
 
+## 2026-11-25 Test tiers and a diff selector
+
+Prompt (operator): is every test required every time, or could they be classified? Then: build it.
+
+Measured first: a full run of 31,826 tests takes 19 minutes with six workers; 51 files above 30 s hold 69 percent of the test time. Markers `slow`
+(those files), `whole_repo` (guards that scan the repository) and `hardware` (none today) are registered with strict checking and applied from
+`tests/tier_lists.py` by a hook in `tests/conftest.py`. The guards were found with a fault run (ten failures from eight kinds of fault) and a
+scanner check. `scripts/tests_for_diff.py` prints the pytest arguments for a diff from the import graph (syntax trees, string references,
+conftest fixtures) and always includes the guards; anything it cannot map selects the full suite and says why. Documentation: `docs/test-tiers.md`,
+measurements: `docs/run-logs/2026-11-24-test-tiers.md`. 114 new tests; 58 mutations each turned a test red. History check over 15 merged pull
+requests: the tests each pull request changed were always selected. The default selection is wide for core modules (52 to 93 percent of files), so
+`--eager` and `--direct` exist for feedback loops. The full suite on the integration state remains the merge gate. Not built: a per-test coverage
+map, which would narrow the selection further.
+
+
+
+
+## 2026-11-24: statements for the package card (Lottolabs study, learnings 25 and 32; branch lotto-card-statements)
+
+The Lottolabs cards say where each number came from and whether it was measured on the package, what their proofs do not show, the firmware and tt-kmd they were tested with, and the licence's limit near the top. `render_card`
+now says, under Expected performance, which stage each measured row came from (stage 7 rows were measured on this package; stage 2 and 4 rows on the staged configuration before it was built) and that no row is copied; adds `PROOF_SCOPE` (what the rows do not show); prints
+`CardFacts.firmware` and `kmd` in Limitations when set (nothing sets them yet: a run records neither); and adds one summary sentence for MIT, CC BY 4.0 and the three non-commercial CC licences. A reproduce block was not added (see `docs/can-cards.md`).
+44 new tests in `tests/test_card_statements.py`; 33 mutations each turn a test red; the existing card tests pass unchanged.
 ## 2026-11-24: a staged kernel attempt that is cut short keeps its record (issue 478, branch staged-partial-attempt-478)
 
 `kernelstaged.run_attempt` collects the records of the shell-command sweeps in `swept_all` and the stage records as the stages finish. When `step.run()` was interrupted, or any stage crashed, the exception left the runner before an attempt was saved or `partial_attempt` was set, so the command-line run lost the structured record of the helpers the sweeps had already removed. `run_attempt` is now a wrapper around `_run_attempt`, as in `kernelprobe` (PR 431, round 4): on any exceptional exit (an interrupt or an error) `_partial_attempt` builds a record from what the inner function published in a box (the stage records so far, `swept_all`, the tt-lang facts), saves it like any attempt (`status` `interrupted`, the exception's type in `status_detail`, `passed_sim` False, a `staged` block that names the finished stages) and attaches it to the exception as `partial_attempt`. A failure to save does not hide the exception, and an unknown op keeps its own `ValueError` without a partial record. `main` already put `partial_attempt` in the report for both kinds of exit. Eight new tests in `tests/test_kernelstaged.py`; twelve mutations each turn a test red. The staged runner's own authoritative check does not yet skip when a helper may still run (issue 477 changed `kernelprobe._run_attempt` only); that is not part of this change. Nothing ran on a chip.
@@ -6249,3 +6272,44 @@ file the guard put back do not count. The nudge and both hint texts now say what
 `tests/test_shell_writes_count.py` has 27 tests. 13 mutations, each removing one guard, turned a test red and were restored. Choice: the changed
 content between the guard's two looks is the evidence for every shell command, so `sed -i`, `tee`, a redirect and `edit` are treated alike, and
 the `EDIT_RECORD` line that `edit` already printed is not used.
+
+## 2026-11-25: a first-start check for a package, from its card and manifest (branch preflight-first-start-843, issue 843)
+
+Prompt (operator, 2026-11-25): "work through more issues". The first start of `raahemnabeel/hy4-flash` took a 107 min 43 s download (440 GB), 24 min 41 s to ready, built
+about 165 GB of caches, needed 17 GB of host RAM to start and 116 GB for full speed, failed to pin its 60 GiB table at the container's 8 MiB memlock limit, and
+ran with a ready timeout of 21600 s. The card and the manifest stated most of this before the download. `check_disk` counts the download and a margin and knows nothing of the
+caches a first start builds, and no preflight row covers host RAM, pinned memory, the download time or the timeout.
+
+`orchard/first_start.py` and `tt-orchard first-start PACKAGE_DIR` (or `--card` and `--manifest`) read the card text and the manifest and print five rows in the preflight style:
+disk (the checkpoint when it is not on disk, the card's cache figure, one margin on one disk or one margin per disk, and what is left after the first start), host RAM, pinned
+memory, download time (needs `--link-mbps`) and the ready timeout (the manifest's `VLLM_ENGINE_READY_TIMEOUT_S` or `--ready-timeout-s`). It blocks only when a stated figure is
+violated, with the block reasons the blocked end state already has (`disk-full`, `model-does-not-fit`, `blocked`), and a figure the card does not state is a row that says `not stated`.
+Each figure names the card line it came from. The card is free text: a few fixed wordings are read (about N GB of disk, the N GB checkpoint plus about N GB of caches, about
+N GB of free host RAM with N GB minimum, a `--ulimit memlock=` advice, a stated first-start time) and any other wording is `not stated`. The card and the manifest are read with `safeio`
+(regular files, size caps, no links), lines and figures are bounded, and the command uses no network, no board and no lease.
+
+On the figures of Hy4-flash: 658 GB free on one disk leaves 53 GB after the first start (605 GB taken, 40 GB margin: ok); 152 GB free blocks as `disk-full` (needs 645 GB); 90 GB of RAM
+warns, 10 GB blocks (needs 17 GB to start); the card's `--ulimit memlock=-1:-1` is a warning; 440 GB at 68 MB/s is about 108 minutes; the manifest's 21600 s timeout is ok because the card states no
+first-start time (a timeout below a stated time blocks). `tests/test_first_start.py` has 70 tests against excerpts of the real card and manifest (`tests/fixtures/first-start`), and the card and the manifest readers are registered in
+`tests/hostile_fs.py` (a pipe, a link, a directory, a sparse 1 GiB file). 31 mutations, each removing or loosening one guard, were run: 30 turned a test red and were restored; the mutation that
+stayed green is equivalent (a boolean in the manifest timeout already fails the number parse). A first table counted every non-zero exit as red, and one of its runs named a test file that does not
+exist; the rerun counts only a test failure (exit code 1) and caught a missing `expect=dict` guard on the manifest, which has a test now.
+
+Not done here: the check is not a step of `tt-orchard bringup` (a run's preflight covers the model it brings up and does not cover the package a coder or helper serves), it does not measure the link
+(the rate is an argument), and it reads no card wording outside the patterns. Related: issue 702 (disk for the Qwen4 release run) and 739 (host-resident experts).
+## 2026-11-25: the Engram tables count as host memory in the residency estimate (branch fix-844-engram-host-resident, issue 844)
+
+Prompt (operator, 2026-11-25): "work through more issues". The Hy4-flash study found that `orchard/residency.py` filed the Engram tables of `tencent/Hy4-flash`
+under `norms_other`. The default policy keeps that category on the chips in bf16, so a plan built from tensor names counted about 60 GiB of host memory
+as device memory. The published bundle keeps the tables in host RAM as FP8 rows and sends the looked-up rows to the chips each step.
+
+`_is_table` now treats a tensor as a table when it sits inside an Engram module (a name part that starts with `engram`) and a part has `embed` or `table`
+in it: `engram_layer.multi_head_embedding.embedding.weight` and `engram_layer.lookup_table`, the two tensors per layer that the bundle's host half reads.
+The projections, norms and gate scales of the Engram layer keep their old category, because they run on the mesh. `_table_key` accepts any config key whose
+word starts with `engram`, so `engram_layer_ids` and `engram_layer_head_vocab_sizes` name a table as `engram_n_embed_per_ngram` already did through its
+word `ngram`. The existing printed plan and the record already show the host-resident category and the host GiB, so no new output was needed.
+
+`tests/test_residency_engram.py` uses the real tensor names of the model (`tests/fixtures/hy4-flash-tensor-names.json`, 260 names and no weights: all 164 Engram
+names and one name of every other pattern). 191 tests in the file's run. Seven mutations, each removing or loosening one guard, turned a test red and were
+restored. The branch `hy4-plan-families` (the Engram caveat in the tier plan and the hazard scan) has not landed on `main`, so this change is the residency
+classifier alone; `orchard/hazards.py` still recognises only `ngram_size` and `ngram_vocab_size_base`, and `orchard/tier_plan.py` still names `ngram_` keys in its caveat.
