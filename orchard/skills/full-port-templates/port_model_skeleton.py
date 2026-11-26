@@ -12,20 +12,43 @@ from __future__ import annotations
 
 import glob
 import os
+from collections.abc import Mapping
 
 import torch  # noqa: F401  (a port builds torch tensors from the checkpoint before it places them on the device)
 import ttnn  # noqa: F401  (the gate refuses a port whose sources do not mention ttnn)
 from safetensors import safe_open
 
 
+class _Tensors(Mapping):
+    """The checkpoint as a read-only mapping {name: torch tensor}. A tensor is read from disk only when it is asked for, and it is copied out of the
+    memory-mapped file: `get_tensor` returns a view of the mapping, and on the PyPI ttnn 0.80.0 wheel `ttnn.from_torch` of such a view never returns
+    (issue 813). Reading one tensor at a time keeps a large checkpoint from being held in host memory twice."""
+
+    def __init__(self, model_dir):
+        self._where = {}
+        for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+            with safe_open(path, framework="pt") as f:
+                for name in f.keys():
+                    self._where[name] = path
+
+    def __getitem__(self, name):
+        with safe_open(self._where[name], framework="pt") as f:
+            return f.get_tensor(name).clone()
+
+    def __contains__(self, name):
+        return name in self._where          # the mapping base class would read the tensor to answer this
+
+    def __iter__(self):
+        return iter(self._where)
+
+    def __len__(self):
+        return len(self._where)
+
+
 def read_tensors(model_dir):
-    """Every tensor of the checkpoint as {name: torch tensor}, from one file or from shards."""
-    out = {}
-    for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
-        with safe_open(path, framework="pt") as f:
-            for name in f.keys():
-                out[name] = f.get_tensor(name)
-    return out
+    """Every tensor of the checkpoint by name, from one file or from shards: `read_tensors(model_dir)[name]` or `.items()`. Each tensor is read and
+    copied when it is asked for (see `_Tensors`); keep a tensor in one dict only, as the notes say."""
+    return _Tensors(model_dir)
 
 
 def load(model_dir, mesh_device):
