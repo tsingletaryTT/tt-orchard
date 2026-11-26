@@ -6268,6 +6268,30 @@ file the guard put back do not count. The nudge and both hint texts now say what
 content between the guard's two looks is the evidence for every shell command, so `sed -i`, `tee`, a redirect and `edit` are treated alike, and
 the `EDIT_RECORD` line that `edit` already printed is not used.
 
+## 2026-11-25: a first-start check for a package, from its card and manifest (branch preflight-first-start-843, issue 843)
+
+Prompt (operator, 2026-11-25): "work through more issues". The first start of `raahemnabeel/hy4-flash` took a 107 min 43 s download (440 GB), 24 min 41 s to ready, built
+about 165 GB of caches, needed 17 GB of host RAM to start and 116 GB for full speed, failed to pin its 60 GiB table at the container's 8 MiB memlock limit, and
+ran with a ready timeout of 21600 s. The card and the manifest stated most of this before the download. `check_disk` counts the download and a margin and knows nothing of the
+caches a first start builds, and no preflight row covers host RAM, pinned memory, the download time or the timeout.
+
+`orchard/first_start.py` and `tt-orchard first-start PACKAGE_DIR` (or `--card` and `--manifest`) read the card text and the manifest and print five rows in the preflight style:
+disk (the checkpoint when it is not on disk, the card's cache figure, one margin on one disk or one margin per disk, and what is left after the first start), host RAM, pinned
+memory, download time (needs `--link-mbps`) and the ready timeout (the manifest's `VLLM_ENGINE_READY_TIMEOUT_S` or `--ready-timeout-s`). It blocks only when a stated figure is
+violated, with the block reasons the blocked end state already has (`disk-full`, `model-does-not-fit`, `blocked`), and a figure the card does not state is a row that says `not stated`.
+Each figure names the card line it came from. The card is free text: a few fixed wordings are read (about N GB of disk, the N GB checkpoint plus about N GB of caches, about
+N GB of free host RAM with N GB minimum, a `--ulimit memlock=` advice, a stated first-start time) and any other wording is `not stated`. The card and the manifest are read with `safeio`
+(regular files, size caps, no links), lines and figures are bounded, and the command uses no network, no board and no lease.
+
+On the figures of Hy4-flash: 658 GB free on one disk leaves 53 GB after the first start (605 GB taken, 40 GB margin: ok); 152 GB free blocks as `disk-full` (needs 645 GB); 90 GB of RAM
+warns, 10 GB blocks (needs 17 GB to start); the card's `--ulimit memlock=-1:-1` is a warning; 440 GB at 68 MB/s is about 108 minutes; the manifest's 21600 s timeout is ok because the card states no
+first-start time (a timeout below a stated time blocks). `tests/test_first_start.py` has 70 tests against excerpts of the real card and manifest (`tests/fixtures/first-start`), and the card and the manifest readers are registered in
+`tests/hostile_fs.py` (a pipe, a link, a directory, a sparse 1 GiB file). 31 mutations, each removing or loosening one guard, were run: 30 turned a test red and were restored; the mutation that
+stayed green is equivalent (a boolean in the manifest timeout already fails the number parse). A first table counted every non-zero exit as red, and one of its runs named a test file that does not
+exist; the rerun counts only a test failure (exit code 1) and caught a missing `expect=dict` guard on the manifest, which has a test now.
+
+Not done here: the check is not a step of `tt-orchard bringup` (a run's preflight covers the model it brings up and does not cover the package a coder or helper serves), it does not measure the link
+(the rate is an argument), and it reads no card wording outside the patterns. Related: issue 702 (disk for the Qwen4 release run) and 739 (host-resident experts).
 ## 2026-11-25: the Engram tables count as host memory in the residency estimate (branch fix-844-engram-host-resident, issue 844)
 
 Prompt (operator, 2026-11-25): "work through more issues". The Hy4-flash study found that `orchard/residency.py` filed the Engram tables of `tencent/Hy4-flash`
