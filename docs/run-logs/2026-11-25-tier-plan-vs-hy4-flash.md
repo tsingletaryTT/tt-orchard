@@ -64,6 +64,16 @@ sparse-attention indexer's group keys, which the config-only estimate leaves out
 `bfp8 + bfp4 experts` no longer fits with the experts split in the old layout (24.46 GiB a chip against a budget of 24.15 GiB) and is placed in the
 tensor-parallel layout (21.32 GiB a chip), which still fits.
 
+## Against the running container (added 2026-11-25 evening)
+
+The bundle was later brought up on four dies here. The container's own memory lines (its serve log, not a tt-orchard measurement) report the DRAM used
+per die: 29.76 GiB after the model load, 30.50 GiB after the warm-up passes and 30.79 GiB after trace capture, with 1.04 GiB free of 31.83 GiB. The plan's
+per-die figure for the closest precision row (`bfp8 + bfp4 experts`) is 24.46 GiB with the old layout and 21.32 GiB in the tensor-parallel layout, so the
+plan is 6.4 to 9.5 GiB below what the container used. The verdict "fits on chips" matched the run. The missing line items are listed in issue 845 (the
+drafter, the vision tower, the trace region, the long-prefill scratch, the indexer, the hyper-connection and Engram weights). This change does not
+calibrate the plan against that run; it fixes what the config can say (layer types, the latent expert width, the Engram size, a KV estimate).
+The Engram memory as a host-resident table in the residency categories is issue 844, and the first-start preflight is issue 843; neither is changed here.
+
 ## What is not done here
 
 - The Engram memory is named and sized. The plan does not place it, because it has no row for host-resident embedding tables.
