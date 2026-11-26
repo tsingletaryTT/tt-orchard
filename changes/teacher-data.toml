@@ -1,0 +1,2 @@
+target = "0.9.202"
+summary = "python3 -m orchard.teacher_data: send a set of prompts to a running teacher server and write the replies as messages JSONL, with the settings and the prompt set recorded (issue 97, first slice)."

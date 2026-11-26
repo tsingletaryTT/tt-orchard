@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import op_cheats
+from orchard import cheat_compiles, op_cheats
 from orchard import ttlang_hwcompile as hc
 from test_ttlang_hwcompile import PAIR, SHARED, on_116, on_pair
 
@@ -171,4 +171,4 @@ def test_the_sheet_verifies_against_the_pair_and_1_1_6_trees():
         pytest.skip("the chip packages or the tt-lang checkout are not on this machine")
     roots = {"hardware": pair, "shared": shared, "tree": CHECKOUT / "ttl", "sim": CHECKOUT / "sim"}
     indexes = {name: op_cheats.build_index(path) for name, path in roots.items()}
-    assert op_cheats.verify(sheet(), indexes) == []
+    assert op_cheats.verify(sheet(), indexes, compiles=cheat_compiles.load(), hardware_target=hc.package_identity(PAIR)) == []

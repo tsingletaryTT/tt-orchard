@@ -1,0 +1,4 @@
+target = "0.9.207"
+summary = "A port file changed by a shell command, such as the edit stage tool, counts as a write for the stage 2 watchdog, so an agent that edits its port is no longer nudged or escalated for writing nothing (issue 867)."
+pr = 868
+kind = "fix"

@@ -7,7 +7,9 @@ tt-smi resets; gozer commands that take, release or reset a lease; the tt CLI's 
 and serving verbs; docker and tt-model commands that start, stop, remove or push; kill, pkill,
 killall and systemctl stop; pip, uv pip, pipx and conda installs that are not confined to the run
 directory; ssh, scp, sftp and rsync to a host; curl and wget requests that send data; changes to the
-agent shells' device mask; and deletion outside the run directory. The check
+agent shells' device mask; deletion outside the run directory; and a search of a whole tree (a
+recursive grep, rg, find, `ls -R`, tree, du) that starts outside the run directory and the read-only
+places the run names. The check
 sits where commands execute, so a model that ignores its prompt still meets it. It stops only
 these spellings. It does not stop code that does the same thing (see WHAT THIS DOES NOT COVER).
 
@@ -67,7 +69,7 @@ refusal names the construct and says how to rewrite the command.
 
   Timing: a string is judged when it is checked, and it runs later. Another process can change
   the filesystem in between (create or remove a directory, repoint a link), and the judgement
-  does not see that.
+  does not see that. This holds for the tree-read rule too: its walk for links is a look at one moment.
 
   Directory tracking: `cd` is believed only when it is the first thing that moves the directory
   in its position: not after `&&`, `||`, `|` or `&`, not when its target is not a plain literal,
@@ -77,7 +79,25 @@ refusal names the construct and says how to rewrite the command.
   basename, so `/tmp/ls` counts as `ls`), since an earlier command could create or remove the
   directory. Otherwise the directory is unknown and relative deletes are refused. A `cd` inside a pipeline or the background does not count.
 
-WHAT THIS DOES NOT COVER. These are NOT stopped: `python3 -c` and `perl -e` code (which can open
+  Tree reads (rule "tree-read-outside-run-dir", issue 864): a command that reads a whole tree is refused when a place it
+  starts from lies outside the run directory and the read-only places the run names (`read_roots`, passed to check_string;
+  the agent's shell gets the tt-orchard checkout, the Hugging Face model cache `hub` directory, the tt-model install root,
+  the tensor-cache root, the directories the run names as inputs and those in ORCHARD_AGENT_READ_ROOTS). The commands are a
+  recursive grep (-r, -R, --recursive, -d recurse, rgrep), rg, ag, ack, fd, find, `ls -R`, tree and du, through the wrappers
+  above and `bash -c`. Start points are resolved to real paths first, so `..`, links and a sibling directory whose name
+  starts like the run directory's all count as outside. A word with `$` or a leading `~` is refused (the runner cannot tell
+  whose home it is). A glob is expanded only after its fixed prefix is known to lie inside. With no start point the search
+  starts in the current directory, which is judged the same way, and when that directory is unknown the command is refused.
+  A tool that follows links (grep -R, find -L or -follow, rg -L, ls -RL, tree -l, du -L, fd -L) also has the tree walked first,
+  without following a link or opening a file, for a link whose real target is outside; a tree beyond TREE_SCAN_MAX_ENTRIES
+  entries or TREE_SCAN_MAX_DEPTH levels is refused, and so is a glob with more than TREE_GLOB_MAX matches. Start points that
+  come from a pipe (xargs) are refused. So are the options that read start points from a file (find -files0-from, tree
+  --fromfile, du --files0-from) and that run a program on each file (rg --pre, fd -x and -X). The agent's shell also ends a
+  string that holds such a command after a shorter time than other commands (orchard.agent, SEARCH_TIMEOUT_S).
+
+WHAT THIS DOES NOT COVER. These are NOT stopped: a single named file outside the run directory (`cat`, `grep x file`, `head`:
+a credential file can still be read by its path), `locate`, `git grep --no-index`, a tree reader this module does not name,
+the options of `ag` and `ack`, which are read by position and not in full, `python3 -c` and `perl -e` code (which can open
 a device, delete files, upload or signal a process), a script that does any of that, `mv`, `cp`
 and `tee` (which can overwrite any file, the ledger included), and a direct open of
 /dev/tenstorrent/* by any program. The device mask in agent shells is a request to the runtime,
@@ -96,10 +116,12 @@ sandbox.
 """
 from __future__ import annotations
 
+import glob
+import itertools
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class Denied(Exception):
@@ -250,6 +272,9 @@ class Ctx:
     run_dir: str          # real path of the run directory
     cwd: str | None       # real directory the command runs in; None when it is unknowable
     via_xargs: bool       # the command's operands come from a pipe we cannot see
+    read_roots: tuple = ()    # read-only places the run names, besides the run directory (the tree-read rule)
+    why: str = ""             # a rule that has more to say than RULE_DETAIL leaves its text here
+    tree_read: bool = False   # the tree-read rule recognised the command as a reader of a whole tree
 
 
 @dataclass
@@ -258,6 +283,14 @@ class _State:
     made_symlink: bool = False
     deletes: bool = False
     fs_stable: bool = True    # only read-only commands have run, so the filesystem is as first seen
+    read_roots: tuple = ()    # the read-only places named for this check (see check_string)
+    tree_reads: int = 0       # how many commands in the string read a whole tree (allowed or not: refused ones end the check)
+
+
+@dataclass(frozen=True)
+class Checked:
+    """What a check that passed found out about the string, for the caller that sets a limit from it."""
+    tree_reads: int = 0
 
 
 class _Word(str):
@@ -960,6 +993,341 @@ def _package_install(name, argv, ctx):
     return not (values and all(_inside_run_dir(v, ctx) for v in values))
 
 
+# ---- readers of whole trees (issue 864) -----------------------------------------------------------------------------------------------
+#
+# A stage 2 agent once ran `grep -R "<error text>" -n <the operator's home directory>`. A recursive search reads every file under its start
+# points, and a home directory holds credential files. The rule below refuses a command that reads a whole tree when a start point, or the
+# directory the search starts in when none is named, lies outside the run directory and the read-only places the run names (`read_roots`).
+# It judges the places a tool will start from, resolved to their real paths before the check. It does not judge a single named file (`cat`,
+# `grep x file`, `head`), which is not a tree read; the module docstring says what remains.
+
+# Limits of the walk that looks for a link that leads out of the allowed places. A tool that follows links (grep -R, find -L, rg -L, ls -RL,
+# tree -l, du -L, fd -L) can leave the allowed places through a link inside them, so a tree is walked before the command may start. The walk
+# does not follow links and does not open a file. A tree beyond a limit is refused.
+TREE_SCAN_MAX_ENTRIES = 150_000
+TREE_SCAN_MAX_DEPTH = 64
+TREE_GLOB_MAX = 200          # a glob in a start point is expanded to at most this many matches before the command may start
+
+GREP_NAMES = {"grep", "egrep", "fgrep", "rgrep"}
+GREP_SHORT_VALUES = "ABCDdefm"
+GREP_LONG_FLAGS = ("--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--ignore-case", "--no-ignore-case",
+                   "--word-regexp", "--line-regexp", "--null-data", "--no-messages", "--invert-match", "--version", "--help",
+                   "--byte-offset", "--only-matching", "--quiet", "--silent", "--text", "--count", "--files-without-match",
+                   "--files-with-matches", "--with-filename", "--no-filename", "--initial-tab", "--null", "--line-buffered", "--binary",
+                   "--unix-byte-offsets", "--line-number", "--recursive", "--dereference-recursive", "--no-group-separator", "--color",
+                   "--colour")
+GREP_LONG_VALUES = ("--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context", "--binary-files", "--devices",
+                    "--directories", "--exclude", "--exclude-from", "--exclude-dir", "--include", "--label", "--group-separator")
+
+# Tools that read a whole tree whatever their options: (short options that take a value, long options that take a value). The option lists
+# only serve to tell a value from an operand; an option missing from them makes a value look like an operand, and every operand is judged.
+TREE_TOOLS = {
+    "rg": ("ABCEMTdefgjmrt", ("--glob", "--iglob", "--type", "--type-not", "--regexp", "--file", "--max-count", "--max-depth", "--maxdepth",
+                              "--max-columns", "--max-filesize", "--replace", "--context", "--after-context", "--before-context", "--threads",
+                              "--encoding", "--sort", "--sortr", "--engine", "--colors", "--path-separator", "--ignore-file", "--type-add",
+                              "--type-clear", "--context-separator", "--dfa-size-limit", "--regex-size-limit")),
+    "ag": ("ABCGgmpQ", ("--depth", "--file-search-regex", "--ignore", "--max-count", "--path-to-ignore", "--context", "--after", "--before",
+                        "--pager", "--workers")),
+    "ack": ("ABCgGm", ("--type", "--ignore-dir", "--ignore-file", "--context", "--after-context", "--before-context", "--max-count",
+                       "--output", "--pager")),
+    "fd": ("dtEejSco", ("--max-depth", "--type", "--extension", "--exclude", "--threads", "--size", "--color", "--owner",
+                        "--changed-within", "--changed-before", "--search-path", "--base-directory", "--ignore-file", "--min-depth",
+                        "--exact-depth", "--max-results")),
+    "tree": ("LPIHTo", ("--level", "--filelimit", "--charset", "--sort", "--timefmt", "--matchdirs", "--fromfile")),
+    "du": ("dBtX", ("--max-depth", "--block-size", "--threshold", "--exclude-from", "--exclude", "--time", "--time-style", "--files0-from")),
+    "ls": ("wTI", ("--block-size", "--format", "--hide", "--ignore", "--indicator-style", "--quoting-style", "--sort", "--time", "--time-style",
+                   "--tabsize", "--width")),
+}
+TREE_TOOLS["ripgrep"] = TREE_TOOLS["rg"]
+TREE_TOOLS["ack-grep"] = TREE_TOOLS["ack"]
+TREE_TOOLS["fdfind"] = TREE_TOOLS["fd"]
+
+
+class _OptionError(Exception):
+    """An option the runner cannot place (unknown or ambiguous in a table it checks strictly)."""
+
+
+def _parse_options(args, short_values, long_flags, long_values, strict=False):
+    """Split a tool's arguments into ([(option, value or None), ...], [operands]) the way GNU getopt does: a short cluster ends at the first
+    letter that takes a value (the rest of the cluster, else the next word, is its value), a long option may be a unique prefix and may carry
+    `=value`, and `--` ends the options. With `strict`, a long option that is unknown or ambiguous raises _OptionError; otherwise it counts
+    as a flag."""
+    opts, operands = [], []
+    known = tuple(long_flags) + tuple(long_values)
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            operands.extend(args[i + 1:])
+            break
+        if a.startswith("--"):
+            name, eq, value = a.partition("=")
+            hits = [k for k in known if k == name] or [k for k in known if k.startswith(name)]
+            if len(hits) != 1:
+                if strict:
+                    raise _OptionError(a)
+                opts.append((name, value if eq else None))
+                i += 1
+                continue
+            canon = hits[0]
+            if canon in long_values and not eq:
+                opts.append((canon, args[i + 1] if i + 1 < n else None))
+                i += 2
+            else:
+                opts.append((canon, value if eq else None))
+                i += 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            step = 1
+            for j, ch in enumerate(a[1:], 1):
+                if ch in short_values:
+                    rest = a[j + 1:]
+                    if rest:
+                        opts.append(("-" + ch, rest))
+                    else:
+                        opts.append(("-" + ch, args[i + 1] if i + 1 < n else None))
+                        step = 2
+                    break
+                opts.append(("-" + ch, None))
+            i += step
+            continue
+        operands.append(a)
+        i += 1
+    return opts, operands
+
+
+@dataclass
+class _TreeRead:
+    reader: str
+    starts: list              # the start points the command names
+    implicit: bool            # no start point is named: the search starts in the current directory
+    deref: bool = False       # the tool follows links it meets while walking
+
+
+def _option_names(opts):
+    return {o for o, _ in opts}
+
+
+def _tree_read(name, argv, ctx):
+    """What a tree-reading command will read, or None when the command is not one (a grep without -r, ls without -R, cat, ...). `argv` is
+    the whole command with its name first. Raises Denied for a command whose start points cannot be known (a file of them, an option that
+    runs another program on each file)."""
+    args = list(argv[1:])
+    if name in GREP_NAMES:
+        try:
+            opts, operands = _parse_options(args, GREP_SHORT_VALUES, GREP_LONG_FLAGS, GREP_LONG_VALUES, strict=True)
+        except _OptionError as exc:
+            if not any(a in ("-r", "-R") or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a))
+                       or a.startswith("--rec") or a.startswith("--dereference") for a in args):
+                return None
+            raise _unsupported(argv, f"option {exc} of {name} is not known to the runner",
+                               "drop the option, or spell it the way grep --help does") from None
+        names = _option_names(opts)
+        values = {o: v for o, v in opts}
+        recursive = (name == "rgrep" or bool(names & {"-r", "-R", "--recursive", "--dereference-recursive"})
+                     or (values.get("-d") == "recurse") or (values.get("--directories") == "recurse"))
+        if not recursive:
+            return None
+        pattern_given = bool(names & {"-e", "--regexp", "-f", "--file"})
+        starts = operands[0 if pattern_given else 1:]
+        return _TreeRead(name, starts, not starts, deref=bool(names & {"-R", "--dereference-recursive"}))
+    if name == "find":
+        return _find_read(argv, args)
+    if name in TREE_TOOLS:
+        short_values, long_values = TREE_TOOLS[name]
+        opts, operands = _parse_options(args, short_values, (), long_values)
+        names = _option_names(opts)
+        if name == "ls":
+            if not names & {"-R", "--recursive"} and not any(o.startswith("--rec") and "--recursive".startswith(o) for o in names):
+                return None
+            return _TreeRead(name, operands, not operands, deref=bool(names & {"-L", "--dereference"}))
+        if name in {"tree", "du"}:
+            for o in ("--fromfile", "--files0-from"):
+                if o in names:
+                    raise _unsupported(argv, f"{name} {o} reads its start points from a file",
+                                       "name the directories on the command line")
+            deref = bool(names & ({"-l", "--follow"} if name == "tree" else {"-L", "--dereference"}))
+            return _TreeRead(name, operands, not operands, deref=deref)
+        # rg, ag, ack, fd (and their other names): the first operand is the pattern unless a pattern option or a listing mode is given
+        if name in {"rg", "ripgrep"}:
+            if "--pre" in names:
+                raise _unsupported(argv, "rg --pre (it runs a program on every file)", "drop --pre")
+            pattern_given = bool(names & {"-e", "--regexp", "-f", "--file", "--files", "--type-list"})
+            deref = bool(names & {"-L", "--follow"})
+        elif name in {"fd", "fdfind"}:
+            if names & {"-x", "--exec", "-X", "--exec-batch"}:
+                raise _unsupported(argv, f"{name} -x/-X (it runs a program on every match)", "pipe the matches to a command you can name")
+            pattern_given = False
+            deref = bool(names & {"-L", "--follow"})
+            extra = [v for o, v in opts if o in {"--search-path", "--base-directory"} and v]
+            starts = operands[1:] + extra
+            return _TreeRead(name, starts, not starts, deref=deref)
+        else:
+            pattern_given = bool(names & {"-f"}) if name == "ack" else False
+            deref = bool(names & {"-f", "--follow"}) if name in {"ag"} else bool(names & {"--follow"})
+        starts = operands[0 if pattern_given else 1:]
+        return _TreeRead(name, starts, not starts, deref=deref)
+    return None
+
+
+def _find_read(argv, args):
+    """find: options (-H -L -P -D x -Ox), then start points, then the expression."""
+    i, deref = 0, False
+    while i < len(args):
+        a = args[i]
+        if a in ("-H", "-P"):
+            i += 1
+        elif a == "-L":
+            deref = True
+            i += 1
+        elif a == "-D":
+            i += 2
+        elif a.startswith("-O") and (a == "-O" or a[2:].isdigit()):
+            i += 1
+        else:
+            break
+    starts = []
+    while i < len(args) and not ((args[i].startswith("-") and args[i] != "-") or args[i] in ("(", ")", "!", ",")):
+        starts.append(args[i])
+        i += 1
+    expr = args[i:]
+    if "-files0-from" in expr:
+        raise _unsupported(argv, "find -files0-from (it reads its start points from a file)", "name the directories on the command line")
+    return _TreeRead("find", starts, not starts, deref=deref or "-follow" in expr)
+
+
+def _in_roots(real: str, roots) -> bool:
+    return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+
+
+def _scan_for_a_link_out(start: str, roots):
+    """Walk the tree under `start` (a real directory) without following links or opening files. Returns ("link", link path, where it leads)
+    for the first link whose real target lies outside `roots`, ("limit", text) when the tree is beyond a limit, else None. Each directory is
+    visited once (by device and inode), so a link loop or a bind mount cannot make the walk repeat."""
+    seen, entries = set(), 0
+    stack = [(start, 0)]
+    while stack:
+        here, depth = stack.pop()
+        if depth > TREE_SCAN_MAX_DEPTH:
+            return ("limit", f"{here} is more than {TREE_SCAN_MAX_DEPTH} levels down, too deep to check for links that lead out")
+        try:
+            info = os.stat(here)
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in seen:
+            continue
+        seen.add((info.st_dev, info.st_ino))
+        try:
+            with os.scandir(here) as listing:
+                for entry in listing:
+                    entries += 1
+                    if entries > TREE_SCAN_MAX_ENTRIES:
+                        return ("limit", f"the tree under {start} has more than {TREE_SCAN_MAX_ENTRIES} entries, too large to check for "
+                                         "links that lead out")
+                    try:
+                        if entry.is_symlink():
+                            target = os.path.realpath(entry.path)
+                            if not _in_roots(target, roots):
+                                return ("link", entry.path, target)
+                            if os.path.isdir(target):
+                                stack.append((target, depth + 1))
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append((entry.path, depth + 1))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return None
+
+
+def _start_points(raw: str, ctx, roots):
+    """The real paths a start point names, as (paths, None), or (None, why) when it cannot be placed inside `roots`. Nothing outside `roots`
+    is listed or opened to decide: a glob is expanded only after its fixed prefix is known to lie inside."""
+    if "$" in raw or "`" in raw:
+        return None, f"{raw!r} is built from a variable, so the runner cannot tell where it points"
+    if raw.startswith("~"):
+        return None, (f"{raw!r} starts with ~, which is the home directory of whoever runs the shell, and the runner cannot tell which "
+                      f"(the agent's own home is {os.path.join(ctx.run_dir, 'home')})")
+    path = raw
+    if not os.path.isabs(path):
+        if ctx.cwd is None:
+            return None, (f"{raw!r} is relative and the runner lost track of the current directory (after &&, ||, | or &, a command that "
+                          "may change directories, or a cd target it could not resolve)")
+        path = os.path.join(ctx.cwd, path)
+    if any(c in path for c in "*?["):
+        parts = path.split(os.sep)
+        fixed = []
+        for part in parts:
+            if any(c in part for c in "*?["):
+                break
+            fixed.append(part)
+        prefix = os.sep.join(fixed) or os.sep
+        real_prefix = os.path.realpath(prefix)
+        if not _in_roots(real_prefix, roots):
+            return None, f"the glob {raw!r} starts in {real_prefix}"
+        matches = list(itertools.islice(glob.iglob(path), TREE_GLOB_MAX + 1))
+        if len(matches) > TREE_GLOB_MAX:
+            return None, f"the glob {raw!r} matches more than {TREE_GLOB_MAX} paths, too many for the runner to check"
+        out = []
+        for m in matches:
+            real = os.path.realpath(m)
+            if not _in_roots(real, roots):
+                return None, f"the glob {raw!r} matches {m}, which leads to {real}"
+            out.append(real)
+        return out, None
+    real = os.path.realpath(path)
+    if not _in_roots(real, roots):
+        shown = real if real == path else f"{path} (which leads to {real})"
+        return None, f"{shown} is outside the allowed places"
+    return [real], None
+
+
+def _tree_read_outside_run_dir(name, argv, ctx):
+    """A command that reads a whole tree from a place outside the run directory and the read-only places the run names. The reason is left
+    in `ctx.why` for the refusal. A command that is not a tree reader, or reads a tree inside those places, is not refused."""
+    read = _tree_read(name, argv, ctx)
+    if read is None:
+        return False
+    ctx.tree_read = True
+    roots = [ctx.run_dir] + [os.path.realpath(r) for r in ctx.read_roots]
+    allowed = ", ".join(roots[:4]) + (f" and {len(roots) - 4} more" if len(roots) > 4 else "")
+    proceed = (f"To proceed: search inside the run directory, for example {os.path.join(ctx.run_dir, 'stages')}, or name the files you "
+               f"need. A search may read only {allowed}")
+
+    def refuse(reason):
+        ctx.why = f"{read.reader} would read a whole tree, and {reason}. {proceed}"
+        return True
+
+    if ctx.via_xargs:
+        return refuse("its start points come from a pipe the runner cannot see")
+    places = []
+    if read.implicit:
+        if ctx.cwd is None:
+            return refuse("it names no directory and the runner lost track of the current directory (after &&, ||, | or &, a command that "
+                          "may change directories, or a cd target it could not resolve)")
+        real = os.path.realpath(ctx.cwd)
+        if not _in_roots(real, roots):
+            return refuse(f"it names no directory, so it starts in {real}, which is outside the allowed places")
+        places.append(real)
+    for raw in read.starts:
+        found, why = _start_points(raw, ctx, roots)
+        if why:
+            return refuse(why)
+        places.extend(found)
+    if read.deref:
+        for place in places:
+            if not os.path.isdir(place):
+                continue
+            problem = _scan_for_a_link_out(place, roots)
+            if problem and problem[0] == "link":
+                return refuse(f"it follows links, and {problem[1]} leads to {problem[2]}, outside the allowed places; use a search that does "
+                              "not follow links (grep -r, find without -L), or search a place without that link")
+            if problem:
+                return refuse(f"it follows links, and {problem[1]}; use a search that does not follow links (grep -r, find without -L), "
+                              "or search a smaller directory")
+    return False
+
+
 RULES = [
     ("tt-model-push", _tt_model_push),
     ("tt-model-publish", _tt_model_publish),
@@ -982,6 +1350,7 @@ RULES = [
     ("rm-glob-in-run-root", _rm_glob_in_run_root),
     ("rm-outside-run-dir", _rm_outside_run_dir),
     ("rm-xargs", _rm_xargs),
+    ("tree-read-outside-run-dir", _tree_read_outside_run_dir),
 ]
 
 # Extra text for rules whose name alone does not say why.
@@ -1164,13 +1533,17 @@ def _check_argv_inner(argv, run_dir, cwd, st, via_xargs_in, before):
 
     ctx = Ctx(run_dir=run_real,
               cwd=os.path.realpath(eff_cwd) if eff_cwd is not None else None,
-              via_xargs=via_xargs)
+              via_xargs=via_xargs, read_roots=st.read_roots)
     for rule_name, deny in RULES:
         if deny(name, unwrapped, ctx):
             detail = RULE_DETAIL.get(rule_name, "")
             if rule_name == "rm-outside-run-dir" and _rm_has_unplaceable_relative_path(unwrapped, ctx):
                 detail = LOST_DIRECTORY_DETAIL
+            if rule_name == "tree-read-outside-run-dir":
+                detail = ctx.why
             raise Denied(rule_name, " ".join(argv), detail)
+    if ctx.tree_read:
+        st.tree_reads += 1
 
     stable_before = st.fs_stable
     if name not in BENIGN:
@@ -1231,32 +1604,48 @@ def _finish(st: _State, text: str) -> None:
                      "through the link; run them as separate commands")
 
 
-def check_argv(argv: list[str], run_dir, cwd: str | None) -> str | None:
+def check_argv(argv: list[str], run_dir, cwd: str | None, read_roots=()) -> str | None:
     """Raise Denied if the command breaks a rule. Returns the directory after the command.
 
     `cwd` is the directory the command runs in. None means it is unknowable (an earlier
     `cd $VAR`), and relative paths are then refused by the delete rules.
+
+    `read_roots` are the read-only places the run names besides the run directory (the model's snapshot, its caches). A command that reads
+    a whole tree may start in the run directory or in one of them and nowhere else.
     """
-    st = _State()
+    st = _State(read_roots=_roots(read_roots))
     result = _check_argv(argv, run_dir, cwd, st)
     _finish(st, " ".join(argv))
     return result
 
 
-def check_string(text: str, run_dir) -> None:
-    st = _State()
+def _roots(read_roots) -> tuple:
+    if isinstance(read_roots, (str, bytes, os.PathLike)):
+        read_roots = (read_roots,)
+    return tuple(os.fspath(r) for r in (read_roots or ()))
+
+
+def check_string_info(text: str, run_dir, read_roots=()) -> Checked:
+    """check_string, and what the check found out: how many commands in the string read a whole tree. A string that is refused raises
+    Denied, as in check_string."""
+    st = _State(read_roots=_roots(read_roots))
     # every command starts in the run directory
     _check_text(text, run_dir, os.path.realpath(run_dir), st)
     _finish(st, text)
+    return Checked(tree_reads=st.tree_reads)
 
 
-def run_argv(argv: list[str], run_dir, **kw) -> subprocess.CompletedProcess:
+def check_string(text: str, run_dir, read_roots=()) -> None:
+    check_string_info(text, run_dir, read_roots)
+
+
+def run_argv(argv: list[str], run_dir, read_roots=(), **kw) -> subprocess.CompletedProcess:
     """Run one command, no shell. Refused commands never start."""
-    check_argv(argv, run_dir, os.path.realpath(run_dir))
+    check_argv(argv, run_dir, os.path.realpath(run_dir), read_roots)
     return subprocess.run(argv, shell=False, cwd=run_dir, **kw)
 
 
-def run_shell(text: str, run_dir, **kw) -> subprocess.CompletedProcess:
+def run_shell(text: str, run_dir, read_roots=(), **kw) -> subprocess.CompletedProcess:
     """Run a shell string after judging every command in it. Nothing runs if any part is refused."""
-    check_string(text, run_dir)
+    check_string(text, run_dir, read_roots)
     return subprocess.run(["bash", "-c", text], cwd=run_dir, **kw)

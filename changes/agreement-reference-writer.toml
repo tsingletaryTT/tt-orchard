@@ -1,0 +1,2 @@
+target = "0.9.202"
+summary = "Stage 1 can write the agreement set's CPU reference (reference_config.json agreement_set, run option --agreement-reference), the file the stage 2 and 4 agreement check needs and nothing wrote until now (issue 15)."

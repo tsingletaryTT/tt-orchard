@@ -128,9 +128,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease, Refused
-from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
+from orchard.agent import (AgentStep, Tools, agent_env, agent_read_roots, collect_survivors, probe_model, search_timeout_from_env,
+                           spawn_checked)
 from orchard import boundedwalk
-from orchard import audio_reference_env, audio_runtime, audio_stage0, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
+from orchard import audio_reference_env, audio_runtime, audio_stage0, quantized_copy, spec_decision, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import bundle_capabilities, full_port_result, runaway, speech_models, speech_route, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
@@ -213,6 +214,7 @@ STALL_CODE = "agent-stuck"     # the block code that leaves the coder up with --
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+QUANTIZED_COPY_NOTED = "quantized copy noted"      # the ledger decision written when stage 0's evidence shows a quantized copy of the nearest model (issue 63)
 # CLASS_UNKNOWN (the fixed start of the unknown-class pause reason) lives in orchard/classes.py, so status.py can read it first without this module.
 
 
@@ -227,9 +229,15 @@ def class_unknown_reason(reasons) -> str:
     return CLASS_UNKNOWN + (f": {shown}" if shown else "") + "; a person decides whether to go on"
 
 
+def full_port_reason(copy) -> str:
+    """The full-port pause reason. For a model that stage 0 found to be a quantized copy of the nearest model (`orchard/quantized_copy.py`, issue 63) the fixed
+    text is followed by one sentence that says so; the class and the pause kind are the same."""
+    return FULL_PORT if not copy else FULL_PORT + ". " + quantized_copy.sentence(copy)
+
+
 def is_full_port_pause(reason) -> bool:
-    """Whether a pause reason is the full-port pause (the older text) or the unknown-class pause."""
-    return reason == FULL_PORT or (isinstance(reason, str) and reason.startswith(CLASS_UNKNOWN))
+    """Whether a pause reason is the full-port pause (the older text, or with the quantized-copy sentence after it) or the unknown-class pause."""
+    return (reason == FULL_PORT or (isinstance(reason, str) and (reason.startswith(CLASS_UNKNOWN) or reason.startswith(FULL_PORT + ". "))))
 
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
@@ -938,7 +946,7 @@ class Supervisor:
                  keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, agreement_reference: bool = False, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
@@ -967,6 +975,10 @@ class Supervisor:
         # `--fidelity-tokens` (issue 789): how many tokens stage 1 samples at temperature 1 for the stage 2 fidelity score; 0 asks for none. It travels as a
         # run fact (the stage 1 agent writes reference_config.json), so it is recorded in run_start only when it is not 0. `build` hands over the recorded value on a resume.
         self.fidelity_tokens = _check_fidelity_tokens(fidelity_tokens)
+        # `--agreement-reference` (issue 15): stage 1 also decodes the agreement set's CPU reference. Like the fidelity length it travels as a run fact for
+        # the stage agent, and the stage 1 gate requires the file when the run asked. Recorded in run_start only when on; `build` hands over the recorded
+        # choice on a resume.
+        self.agreement_reference = bool(agreement_reference)
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
@@ -1357,6 +1369,7 @@ class Supervisor:
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"port_check_positions": self.port_check_positions} if self.port_check_positions != full_port.DEFAULT_POSITIONS else {}),
                                **({"fidelity_tokens": self.fidelity_tokens} if self.fidelity_tokens else {}),
+                               **({"agreement_reference": True} if self.agreement_reference else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
@@ -1436,7 +1449,7 @@ class Supervisor:
                 continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 reason = (class_unknown_reason(delta_path_reasons(self.run_dir)) if run_class(self.ledger.read(), self.run_dir) == "unknown"
-                          else FULL_PORT)
+                          else full_port_reason(self._quantized_copy_note()))
                 self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
             if p.next_stage == 5 and self._full_port_stages_unbuilt():
@@ -1507,6 +1520,15 @@ class Supervisor:
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and (is_full_port_pause(e["data"].get("reason")) or e["data"].get("reason") == RESTRICTED_HEAD) for e in entries)
+
+    def _quantized_copy_note(self) -> dict | None:
+        """Issue 63: what stage 0 saw when the model is a quantized copy of the nearest model (`orchard/quantized_copy.py`), or None. It is read from stage 0's
+        own evidence and the model's config, is only a hint for the pause text, and is written to the ledger once so the operator's record shows it. A run
+        directory that cannot be read gives None, so the plain message stands."""
+        copy = quantized_copy.from_run(self.run_dir, self.inputs.get("model"))
+        if copy:
+            self.ledger.append("decision", 2, decision=QUANTIZED_COPY_NOTED, format=copy["format"], nearest=copy["nearest"], signals=copy["signals"])
+        return copy
 
     def _full_port_stages_unbuilt(self) -> bool:
         """Whether a full-port run pauses after stage 4 because the stages after it are not built. Stages 3 (the port on the configured chips),
@@ -3982,6 +4004,29 @@ class Supervisor:
                 self.ledger.append("decision", n, decision="served chat check not written", path=os.path.relpath(d / served_chat.FILE, self.run_dir),
                                    reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _spec_decision_record(self, n: int, stage_dir: Path) -> None:
+        """Issue 182. When stage 2's directory holds a measurement record (`evidence/spec-measure.json`: plain step time, verify pass time and accepted tokens per
+        pass by prompt kind on real text), decide from it (`orchard/spec_decision.py`), write `evidence/spec-decision.json` and record a ledger decision and the
+        file's evidence entry. A record that cannot be read or fails its checks is a ledger decision with the reason; it never fails a passing stage. Without a
+        record nothing is written. No measuring run exists yet, so a record appears only when one is placed there."""
+        try:
+            record = spec_decision.read_measure(stage_dir)
+            if record is None:
+                return
+            decision = spec_decision.decide(record)
+        except spec_decision.SpecRecordError as exc:
+            self.ledger.append("decision", n, decision=spec_decision.REFUSED_DECISION, reason=str(exc)[:300])
+            return
+        try:
+            _put(stage_dir / spec_decision.DECISION_FILE, spec_decision.decision_json(decision))
+            result = decision["verdict"]["result"]
+            self.ledger.append("decision", n, decision=spec_decision.LEDGER_DECISION, enable_drafter=decision["enable_drafter"], verdict=result["verdict"],
+                               ratio=round(result["ratio"], 3), kind_used=decision["verdict"]["kind_used"], greedy_only=decision["greedy_only"],
+                               path=os.path.relpath(stage_dir / spec_decision.DECISION_FILE, self.run_dir))
+            self.ledger.append("evidence", n, what="speculative decision", **evidence_record(self.run_dir, stage_dir / spec_decision.DECISION_FILE))
+        except (OSError, ValueError) as exc:        # a full disk must not end a passing stage
+            self.ledger.append("decision", n, decision=spec_decision.REFUSED_DECISION, reason=f"the decision could not be written: {type(exc).__name__}"[:300])
+
     def _decode_floor_record(self, n: int, stage_dir: Path) -> None:
         """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
         decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
@@ -4171,6 +4216,8 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             if n in (0, 2, 4):
                 self._decode_floor_record(n, stage_dir)
+            if n == 2:
+                self._spec_decision_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
             kind_rec = self._classify_kind() if n == 0 else None
@@ -4871,11 +4918,7 @@ class Supervisor:
                          top_p=tcfg.get("top_p"), top_k=tcfg.get("top_k"),
                          unstick=unstick, restart_on_caps=AGENT_RESTARTS_ON_CAPS,
                          stage_restart_after=AGENT_STAGE_CAPS_RESTART, stage_block_after=AGENT_STAGE_CAPS_BLOCK,
-                         tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
-                             **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
-                             scratch=(self.run_dir / "tt-metal-scratch"
-                                      if scratch_stage(n, run_path(entries, self.run_dir)) else None),
-                             dedupe=self.tool_dedupe),
+                         tools=self._agent_tools(n, stage_dir, entries),
                          ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
@@ -4889,6 +4932,17 @@ class Supervisor:
             # The coder's replies ran away across the stage (issue 458, item 4): the block names the replies as the cause.
             self._block(n, out.detail)
         return out, step
+
+    def _agent_tools(self, n, stage_dir: Path, entries) -> Tools:
+        """The tools of one agent step. Its shell may search a whole tree only in the run directory and the read-only places the run names
+        (the model's snapshot and caches, see orchard.agent.agent_read_roots), and a search that runs long is ended sooner than a build
+        (issue 864)."""
+        return Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
+                         **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
+                     scratch=(self.run_dir / "tt-metal-scratch"
+                              if scratch_stage(n, run_path(entries, self.run_dir)) else None),
+                     dedupe=self.tool_dedupe,
+                     read_roots=agent_read_roots(self.paths, self.inputs), search_timeout=search_timeout_from_env())
 
     def _thin_port_prepare(self, spec, stage_dir: Path, escalated: bool):
         """Stage 2 of a full port run with `--thin-port` (issue 677, arm E): the prepare step as one chat request per stub of a generated port
@@ -6856,6 +6910,11 @@ def parse(argv=None):
                         f"fidelity score (issue 789). 0 asks for none. Default 0, from {full_port.MIN_FIDELITY_TOKENS} to {full_port.POSITIONS_LIMIT}. "
                         f"Stage 2 scores the smaller of this and --port-check-positions. The ledger records the value when it is not 0 and a resume "
                         f"keeps it; a resume that names another value is refused")
+    r.add_argument("--agreement-reference", dest="agreement_reference", action="store_const", const=True, default=None,
+                   help="stage 1 also decodes the CPU reference of the agreement set (six fixed prompts, 32 greedy tokens each, issue 15) and writes "
+                        "stages/1/evidence/reference/agreement-reference.json, which the stage 2 and 4 check scores the chip against. A run that asked for "
+                        "it fails stage 1 when the file is missing. The ledger records the choice and a resume keeps it; a resume that names it for a run "
+                        "that started without it is refused")
     r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
                    help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
@@ -7114,6 +7173,13 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what stage 1 recorded)")
         fidelity_tokens = recorded_fidelity
     fidelity_tokens = 0 if fidelity_tokens is None else full_port.check_fidelity_tokens(fidelity_tokens)
+    agreement_reference = bool(getattr(args, "agreement_reference", None))
+    if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: off)
+        recorded_agreement = (progress.run_start or {}).get("agreement_reference") is True
+        if agreement_reference and not recorded_agreement:
+            raise ValueError("this run started without the agreement reference; --agreement-reference differs. Leave the option out to resume with the "
+                             "recorded choice, or move this run's directory aside and start a new run (the reference is part of what stage 1 recorded)")
+        agreement_reference = recorded_agreement
     tool_dedupe = not getattr(args, "no_tool_dedupe", False)
     if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
         recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
@@ -7186,7 +7252,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, agreement_reference=agreement_reference, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,
