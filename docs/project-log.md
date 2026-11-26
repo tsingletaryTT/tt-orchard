@@ -6244,3 +6244,20 @@ file the guard put back do not count. The nudge and both hint texts now say what
 `tests/test_shell_writes_count.py` has 27 tests. 13 mutations, each removing one guard, turned a test red and were restored. Choice: the changed
 content between the guard's two looks is the evidence for every shell command, so `sed -i`, `tee`, a redirect and `edit` are treated alike, and
 the `EDIT_RECORD` line that `edit` already printed is not used.
+
+## 2026-11-25: the Engram tables count as host memory in the residency estimate (branch fix-844-engram-host-resident, issue 844)
+
+Prompt (operator, 2026-11-25): "work through more issues". The Hy4-flash study found that `orchard/residency.py` filed the Engram tables of `tencent/Hy4-flash`
+under `norms_other`. The default policy keeps that category on the chips in bf16, so a plan built from tensor names counted about 60 GiB of host memory
+as device memory. The published bundle keeps the tables in host RAM as FP8 rows and sends the looked-up rows to the chips each step.
+
+`_is_table` now treats a tensor as a table when it sits inside an Engram module (a name part that starts with `engram`) and a part has `embed` or `table`
+in it: `engram_layer.multi_head_embedding.embedding.weight` and `engram_layer.lookup_table`, the two tensors per layer that the bundle's host half reads.
+The projections, norms and gate scales of the Engram layer keep their old category, because they run on the mesh. `_table_key` accepts any config key whose
+word starts with `engram`, so `engram_layer_ids` and `engram_layer_head_vocab_sizes` name a table as `engram_n_embed_per_ngram` already did through its
+word `ngram`. The existing printed plan and the record already show the host-resident category and the host GiB, so no new output was needed.
+
+`tests/test_residency_engram.py` uses the real tensor names of the model (`tests/fixtures/hy4-flash-tensor-names.json`, 260 names and no weights: all 164 Engram
+names and one name of every other pattern). 191 tests in the file's run. Seven mutations, each removing or loosening one guard, turned a test red and were
+restored. The branch `hy4-plan-families` (the Engram caveat in the tier plan and the hazard scan) has not landed on `main`, so this change is the residency
+classifier alone; `orchard/hazards.py` still recognises only `ngram_size` and `ngram_vocab_size_base`, and `orchard/tier_plan.py` still names `ngram_` keys in its caveat.
