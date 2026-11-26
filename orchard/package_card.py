@@ -180,6 +180,7 @@ class CardFacts:
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
     firmware: str = ""               # the board firmware the package was tested with ("" when the run did not record it)
     kmd: str = ""                    # the tt-kmd version the package was tested with ("" when the run did not record it)
+    spec_statement: str | None = None   # the drafter decision from measured numbers (orchard/spec_decision.py, issue 182), when stage 2 recorded one
 
 
 def _own_config_lines(f: CardFacts) -> list[str]:
@@ -424,6 +425,8 @@ def render_card(f: CardFacts) -> str:
                       f"checked by {seen}" + (f", {booted}." if f.verified else f". {booted}."))
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
+    if f.spec_statement:
+        limits.append(f.spec_statement)
     if f.vocab:
         limits.append(f"Token ids differ from {f.nearest_model}'s: a client that sends or reads token ids, or uses a tokenizer other than "
                       f"this model's, gets different ids. {_count(f.vocab[1] - f.vocab[0])} entries of {f.nearest_model}'s vocabulary are absent.")

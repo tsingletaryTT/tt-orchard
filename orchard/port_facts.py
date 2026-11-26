@@ -685,10 +685,12 @@ def write_deadline_hint(turns: int, *, port_is_skeleton: bool, excerpts: bool) -
     from is. Once the port has been edited, the step is a repair or a finish step, and the hint says only to write what the step asks for."""
     if not port_is_skeleton:
         return (f"{turns} model turns have passed and you have written no file. Stop reading. Make the edit this step asks for now, "
-                "or say what blocks you.")
+                "or say what blocks you. A write is a `write_file` call, or a shell command that changes a port file, such as "
+                "`stage_tools.py edit`.")
     source = (f"`stages/2/{EXCERPT_FILE}` holds the source of the reference classes, and `stages/2/{FACTS_NAME}` holds the shapes"
               if excerpts else f"`stages/2/{FACTS_NAME}` holds the shapes")
     return (f"{turns} model turns have passed and `stages/2/port/port_model.py` is still the skeleton. Write it now with the write_file tool: "
             "replace the NotImplementedError bodies of `load`, `prefill`, `decode_step` and `close`, keep `read_tensors`, and put the layer "
             f"code in helper functions above them. {source}; you have everything you need in your context. An incomplete first version is "
-            "what this step needs. Do not open another reference file before you have written it.")
+            "what this step needs. Do not open another reference file before you have written it. A write is a `write_file` call, or a shell "
+            "command that changes a port file, such as `stage_tools.py edit`.")

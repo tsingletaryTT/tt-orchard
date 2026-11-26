@@ -1077,7 +1077,10 @@ verdict: **fits on chips** (replicated, with the experts split over the chips, o
 experts as fit stay on the chips, the rest are in host memory), or **does not fit**. A host-experts row says how many experts per layer stay on the
 chips, the host memory needed with every expert pinned plus a margin (`--host-margin-gib`, default 10), and the share of expert picks that would land
 on a resident expert. That share is an estimate from the busiest-expert shares measured on OLMoE-1B-7B (issue 739); pass figures for the model itself
-with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. A second table gives the layout of
+with `--skew` (points written `FRACTION:SHARE`, comma separated, for example `0.10:0.41,0.25:0.61`) and say where they came from with `--skew-source`. With `--skew-file` the figures come from a measurement file instead: the JSON that
+`scripts/expert_skew.py --json` or `scripts/expert_skew_stream.py` writes (the second runs the model one layer at a time, for a model too large for host
+memory). The file is refused unless it was measured on a model with the same expert count and top-k, and the plan names the model and text that were measured.
+A file with several texts needs `--skew-text`, which names one of them. A second table gives the layout of
 the published hybrid bundles, whole layers on the chips and only the other layers' experts in host memory. `--host-free-gib` marks a row that needs more
 host memory than is free, `--chip-gib`, `--reserve-gib` and `--kv-gib` change the chip memory, the per-chip reserve and the KV cache allowance, and
 `--json` prints every number with its source (config-derived, assumed constant, estimate or the caller's flag). The command measures neither speed nor
@@ -1855,10 +1858,20 @@ yourself.
 Every agent command goes through `orchard/runner.py`. It reads a small subset of shell and refuses
 the rest. It refuses publish, push and upload commands, chip resets, gozer commands that take or
 release leases, docker and tt-model commands that start or stop servers, `kill`, `ssh`, curl and
-wget requests that send data, changes to the device mask, and deletion outside the run directory.
+wget requests that send data, changes to the device mask, deletion outside the run directory, and a
+search of a whole tree (a recursive `grep`, `rg`, `ag`, `ack`, `fd`, `find`, `ls -R`, `tree`, `du`)
+that starts outside the run directory and the read-only places the run names. Those places are the
+tt-orchard checkout, the Hugging Face model cache (`<hf home>/hub`, which leaves out the token that
+sits in the Hugging Face home), the tt-model install root, the tensor-cache root, each directory the
+run names as an input, and the directories listed in `ORCHARD_AGENT_READ_ROOTS` (absolute paths
+joined with `:`). The refusal names the path and says where to search. A shell command that holds such a
+search ends after 120 seconds, or after `ORCHARD_SEARCH_TIMEOUT_S` seconds when the operator sets it
+to a positive number; the step's ledger record lists each search that was ended, with its elapsed time.
 
 It is a best-effort guard. It does **not** stop:
 
+- a single named file outside the run directory (`cat`, `head`, `grep x file`), so a credential file can
+  still be read by its path;
 - `python3 -c`, `perl -e`, or any script, which can delete files, open a device, upload or signal a
   process;
 - `mv`, `cp`, `tee`, `truncate` or `rsync --delete`, which can overwrite any file your user can
@@ -2528,6 +2541,34 @@ A summary is written for 0, 1 and 3.
 - `--tt-metal-home`: the tt-metal checkout with the Tracy tools (default `$TT_METAL_HOME`); it is passed to the profiled command as `TT_METAL_HOME`.
 - `--noc-traces`: capture NoC events too (slower; fills the DRAM-controller and congestion columns).
 - `--gozer`, `--perf-report`: the commands to run (defaults `gozer` and the `tt-perf-report` on PATH). `--who`, `--reason`: what the lease records.
+
+### 5.9eb Read a report folder through the report viewer's server (no board)
+
+```bash
+python3 -m venv ~/.cache/tt-orchard/ttnn-visualizer/venv                                  # once
+~/.cache/tt-orchard/ttnn-visualizer/venv/bin/pip install ttnn-visualizer==0.112.0         # the tested version
+tt-orchard profile-read ~/reports/run-1 --out profile-read.json                          # a bounded summary of one report folder
+tt-orchard profile-read ~/reports/run-2 --baseline ~/reports/run-1 --out change.json     # adds the change from the baseline
+```
+
+`profile-read` starts the report viewer's MCP server (`ttnn-visualizer-mcp`, newline-delimited JSON-RPC over stdio), loads the folder (`db.sqlite`
+and/or `ops_perf_results*.csv`), asks a fixed list of questions (slowest ops with kernel sources and advice, time per op and per category, memory
+profile, errors, distinct argument combinations per op, and with `--baseline` the change between the two) and writes one JSON file, cut to fixed sizes:
+96 KiB for the file and 16 KiB for one answer. The server's own list of tools that can answer for the folder decides what is asked, and the summary says
+which questions it could not answer and why. It needs no board and no lease, never imports ttnn and opens no network connection.
+
+It refuses a server version it has not been tested with (0.112.0 so far) and a server whose `agent` files differ from the tested files, unless
+`--accept-untested-version` is given; the summary then says the run was untested. The server runs with usage recording off, a private empty home and no
+secrets, and it is stopped on every exit path.
+
+Exit codes: 0 every question answered; 1 some could not be answered; 2 refused (usage, a bad folder, a missing or untested server);
+3 the server could not be run or stopped answering. A summary is written for 0, 1 and 3.
+
+- `--out`: the file to write (default `./profile-read.json`, mode 0600). `--baseline`: a second report folder; it is the "before" of the comparison.
+- `--venv`: the environment with ttnn-visualizer installed (default `~/.cache/tt-orchard/ttnn-visualizer/venv`).
+- `--wheel`: the wheel it was installed from; its sha256 is compared with the tested wheel's and recorded.
+- `--accept-untested-version`: run a version or files that were not tested.
+- `--call-timeout`: seconds one server call may take (default 60). `--total-timeout`: seconds the whole session may take (default 300).
 
 ### 5.9fa The audio reference environment and the CPU reference
 

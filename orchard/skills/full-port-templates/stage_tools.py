@@ -20,6 +20,7 @@ Why fixed names. In run 18 of the tiny Qwen4 rehearsal the coder spent its repai
 was a new command for the watchdog to guess about. A tool call has a name and arguments, which the watchdog (orchard/watchdog.py `command_shape`)
 counts exactly.
 """
+import ast
 import hashlib
 import json
 import math
@@ -1116,6 +1117,42 @@ def _closest_lines(text: str, old: str) -> list:
     return [(n, body) for _, n, body in scored[:EDIT_SHOWN]]
 
 
+
+TYPED_BREAK = "\\n"                  # a backslash and an n, typed as two characters; a model that thinks `--new` reads escapes writes this for a line break
+
+
+def _parses(source: str):
+    """None when `source` is valid Python, else the SyntaxError's one-line description."""
+    try:
+        ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        return f"{exc.__class__.__name__}: {clean(str(exc), 120)}"
+    return None
+
+
+def _typed_break_guard(leaf: str, text: str, at: int, old: str, new: str):
+    """(new text to write, note lines, refusal line) for an edit of a Python file whose new text holds a backslash and an n as two characters.
+
+    The shell hands `--new 'a\\nb'` over as written, so the file gets the two characters outside any string and stops parsing (Hy4-flash trial of stage 2,
+    2026-11-25: a SyntaxError at line 37 in repair round 3). The rule: when the file parsed before and the result as given does not parse, the pairs are turned
+    into line breaks if that makes the result parse, and the call is refused if nothing does. A result that parses as given (a pair inside a string) is left
+    alone, and so is a file that did not parse before, since the edit may be one step of a repair."""
+    if not leaf.endswith(".py") or TYPED_BREAK not in new or _parses(text) is not None:
+        return new, [], None
+    as_given = text[:at] + new + text[at + len(old):]
+    failure = _parses(as_given)
+    if failure is None:
+        return new, [], None
+    pairs = new.count(TYPED_BREAK)
+    converted = new.replace(TYPED_BREAK, "\n")
+    if _parses(text[:at] + converted + text[at + len(old):]) is None:
+        word = "pair" if pairs == 1 else "pairs"
+        return converted, [f"edit: {pairs} backslash-n {word} in --new were typed as two characters outside a string, which does not parse ({failure}). "
+                           "They were turned into line breaks. Use real line breaks, or --new-file, for text over several lines."], None
+    return new, [], (f"edit: the result would not parse ({failure}), and --new holds {pairs} backslash-n {'pair' if pairs == 1 else 'pairs'} typed as two characters. "
+                     "Turning them into line breaks does not fix it either. Nothing was changed. Put the new text in a file in the run directory and give it with "
+                     "--new-file, with real line breaks; keep a backslash-n only inside a string.")
+
 def _lines_changed(old: str, new: str) -> int:
     """The lines an edit changes: the larger of the old and new text's lines once the lines they share at the start and the end are set aside."""
     a, b = old.split("\n"), new.split("\n")
@@ -1179,14 +1216,19 @@ def edit_cmd(stage: Path, argv: list):
         if not at:
             near = _closest_lines(text, old)
             hint = ("The closest lines are " + "; ".join(f"line {n}: {clean(b, 100)!r}" for n, b in near) + ". ") if near else ""
-            return 1, [f"edit: --old does not occur in {shown}. {hint}Copy the text exactly (indentation and line breaks included) from "
+            typed = (f"Your --old holds {old.count(TYPED_BREAK)} backslash-n pair(s) typed as two characters; the file has real line breaks, so for text over "
+                     "several lines put it in a file in the run directory and give it with --old-file. " if TYPED_BREAK in old and "\n" not in old.rstrip("\n") else "")
+            return 1, [f"edit: --old does not occur in {shown}. {hint}{typed}Copy the text exactly (indentation and line breaks included) from "
                        f"`show {shown} --lines A:B`, then run `edit` again. Nothing was changed."]
         if len(at) > 1:
             where = ", ".join(str(text.count("\n", 0, i) + 1) for i in at)
             count = f"{len(at)} places" if len(at) < EDIT_PLACES else f"at least {EDIT_PLACES} places"
             return 1, [f"edit: --old occurs in {count} of {shown} (lines {where}). Add more of the surrounding text to --old so that it matches one place only. "
                        "Nothing was changed."]
-        result = text[:at[0]] + new + text[at[0] + len(old):]
+        new_written, notes, refusal = _typed_break_guard(leaf, text, at[0], old, new)
+        if refusal:
+            return 2, [refusal]
+        result = text[:at[0]] + new_written + text[at[0] + len(old):]
         out = result.encode("utf-8")
         lines_after = result.count("\n") + 1
         if not result.strip():
@@ -1215,9 +1257,12 @@ def edit_cmd(stage: Path, argv: list):
             os.fsync(dfd)
         except OSError:
             pass
-        record = {"tool": "edit", "file": shown, "bytes_before": len(data), "bytes_after": len(out), "lines_changed": _lines_changed(old, new),
-                  "chars_old": len(old), "chars_new": len(new)}
-        return 0, [f"edit: changed {record['lines_changed']} line(s) of {shown} ({len(data):,} to {len(out):,} bytes).", RECORD_MARK + json.dumps(record, sort_keys=True)]
+        record = {"tool": "edit", "file": shown, "bytes_before": len(data), "bytes_after": len(out), "lines_changed": _lines_changed(old, new_written),
+                  "chars_old": len(old), "chars_new": len(new_written)}
+        if notes:
+            record["typed_breaks_converted"] = new.count(TYPED_BREAK)
+        return 0, [f"edit: changed {record['lines_changed']} line(s) of {shown} ({len(data):,} to {len(out):,} bytes).", *notes,
+                   RECORD_MARK + json.dumps(record, sort_keys=True)]
     finally:
         if tmp is not None:
             try:

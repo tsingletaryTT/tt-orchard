@@ -626,6 +626,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("profile", parents=[common, _profile.parser(add_help=False)],
                    help="run a command under the tt-metal profiler on a leased board and write a bounded profile-summary.json "
                         "(or summarise an existing profile with --from; no board needed)")
+    from orchard import profile_read as _profile_read
+    sub.add_parser("profile-read", parents=[common, _profile_read.parser(add_help=False)],
+                   help="summarise a TT-NN report folder through the report viewer's MCP server: a bounded profile-read.json "
+                        "(needs no board and no lease)")
     from orchard.defaults import KERNEL_PROBE_OPS
     kp = sub.add_parser("kernel-probe", parents=[common],
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
@@ -1327,6 +1331,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "profile":
         from orchard import profile_summary
         return profile_summary.main(args, out=out)
+    if args.cmd == "profile-read":
+        from orchard import profile_read
+        return profile_read.main(args, out=out)
     if args.cmd == "kernel-probe":
         return _kernel_probe(args, env, home, out)
     if args.cmd == "coder-speed":

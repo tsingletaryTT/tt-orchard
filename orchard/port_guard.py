@@ -67,6 +67,9 @@ class PortGuard:
         self.stage_dir = Path(stage_dir)
         self.run_dir = Path(run_dir) if run_dir is not None else self.stage_dir
         self._stamp: dict[tuple[str, ...], tuple[int, int, int, int]] = {}
+        # The files the last `judge` accepted with content that differs from what `remember` kept before the command (issue 867): the files a
+        # shell command wrote. A file the guard put back, a rewrite with the same bytes and a cache directory are not in it.
+        self.written: list[tuple[str, ...]] = []
         self._backup: dict[tuple[str, ...], bytes] = {}
         self._evicted: dict[tuple[str, ...], None] = {}            # files whose backup was evicted for space, in eviction order
         self._scan_complete = True
@@ -303,6 +306,7 @@ class PortGuard:
         and the agent is told. A file that is acceptable becomes the version a later rejection restores. Nothing outside the real port
         directory is looked at; a port directory that is a link is reported and left alone."""
         notes: list[str] = []
+        self.written = []
         try:
             pin_cm = self._pin()
             pin = pin_cm.__enter__()
@@ -326,6 +330,8 @@ class PortGuard:
                     problem = runaway.file_problem(raw.decode("utf-8", errors="replace"))
                 rel = self._display(f.parts)
                 if problem is None:
+                    if self._backup.get(f.parts) != raw:               # new, or different bytes from before the command (issue 867)
+                        self.written.append(f.parts)
                     self._set_stamp(f.parts, f.stamp)
                     self._set_backup(f.parts, raw)                     # the accepted bytes are what a later rejection puts back
                     continue
