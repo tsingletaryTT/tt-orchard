@@ -37,6 +37,7 @@ README = REPO / "README.md"
 # checked against any parser; keep the list short and name the tool.
 OTHER_TOOL_FLAGS = {
     "--cache-dir": "hf download",
+    "--ulimit": "docker run (the README names the option a package card advises: section 5.9ec)",
     "--collect-noc-traces": "python -m tracy (tt-metal's profiler front end; passed through by tt-orchard profile --noc-traces)",
     "--no-web-server":"python -m tracy (tt-metal's profiler front end; section 5.9ea shows the command tt-orchard profile builds)",
     "--delete": "rsync (named as something the command runner does not stop)",

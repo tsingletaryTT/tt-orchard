@@ -1,0 +1,22 @@
+{
+ "schema_version": "5.1",
+ "name": "hy4-flash",
+ "device_count": 4,
+ "arch": "blackhole",
+ "weights": {
+  "repo_id": "tencent/Hy4-flash",
+  "revision": "b2498eba6a1a3f9bbcab4190bc1313a3c7010c2f",
+  "allow_patterns": null,
+  "ignore_patterns": null,
+  "repo_type": "model"
+ },
+ "container": {
+  "serve": {
+   "env": {
+    "VLLM_ENGINE_READY_TIMEOUT_S": "21600",
+    "HY4_TENSOR_CACHE": "/weight-cache/hy4_tt",
+    "HY4_ENGRAM_DIR": "/weight-cache/hy4_engram"
+   }
+  }
+ }
+}
