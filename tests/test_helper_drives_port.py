@@ -122,6 +122,7 @@ def test_no_helper_drives_port_leaves_the_repair_to_the_coder_in_a_rehearsal(rig
 
 def test_without_a_helper_nothing_is_driven(rig, monkeypatch, tmp_path):
     monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: None)
+    rig.args.no_measured_miss_repair = True              # issue 865: without the helper the furthest port is kept too, unless the operator turns that off
     seen = start(rig, BROKEN, [HONEST + "# the coder's repair\n"])
     rig.run()
     assert seen and not decs(rig, rh.DRIVEN) and not decs(rig, rh.BEST)

@@ -163,7 +163,8 @@ def _decision(e: dict, d: dict) -> list[Line]:
         return [Line(o, f"port repair round {d.get('round', '?')} of {d.get('of', '?')}: the port check failed{where} ({_clip(d.get('failure', '?'), 160)}); "
                         "the coder may edit the port, then the same check runs again", True)]
     if what == "port repair rounds ended":
-        why = {"spent": "all the rounds were used", "unchanged": "the coder changed nothing in the port"}.get(d.get("reason"), str(d.get("reason", "?")))
+        why = {"spent": "all the rounds were used", "unchanged": "the coder changed nothing in the port",
+               "no improvement": "three rounds in a row left the agreement where it was"}.get(d.get("reason"), str(d.get("reason", "?")))
         return [Line(o, f"port repair rounds ended: {why}; the stage goes on as a failed test", True)]
     if what == "port repair refused":
         return [Line(o, "port repair refused: the repair step changed " + ", ".join(str(f) for f in d.get("files") or []) + ", which only the supervisor writes", True)]

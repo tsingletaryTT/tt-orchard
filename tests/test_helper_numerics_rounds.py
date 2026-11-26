@@ -315,12 +315,26 @@ def test_the_best_port_keeps_the_highest_agreement_and_records_it(rig, monkeypat
     assert hashlib.sha256(kept.encode()).hexdigest() == best[1]["port_sha256"]
 
 
-def test_the_coder_driven_rounds_do_not_read_numerics(rig, monkeypatch, tmp_path):
+def test_the_coder_driven_rounds_do_not_read_numerics_with_the_option_off(rig, monkeypatch, tmp_path):
     rig.args.helper_drives_port = False
+    rig.args.no_measured_miss_repair = True          # issue 865: a coder-driven stage 2 reads a measured miss unless the operator turns it off
     wire_helper(monkeypatch, tmp_path, [PASSES])
     start(rig, LOW, ["# c\n"])
     rig.run()
     assert not numeric_rounds(rig) and not decs(rig, rh.PROGRESS)
+
+
+def test_the_helper_driven_loop_is_not_ended_by_the_coder_driven_stall_rule(rig, monkeypatch, tmp_path):
+    """Issue 865: three rounds that leave the agreement where it was end a coder-driven attempt. The helper-driven loop keeps its own rule (two rounds
+    in a row that fail the same way hand a round back to the coder), so rounds past the third go on."""
+    monkeypatch.setattr(rh, "HELPER_ROUNDS", 6)
+    monkeypatch.setattr(rh, "HELPER_TOTAL", 99)
+    wire_helper(monkeypatch, tmp_path, [LOW + f"# helper {i}\n" for i in range(8)])
+    start(rig, LOW, [LOW + f"# coder {i}\n" for i in range(8)])
+    rig.run()
+    rounds = [r["round"] for r in numeric_rounds(rig)]
+    assert rounds and max(rounds) >= 4
+    assert not [d for d in decs(rig, port_repair.STOPPED) if d.get("reason") == "no improvement"]
 
 
 def test_the_ledger_failure_line_of_a_numerics_round_names_the_numbers_and_not_the_ports_words(rig, monkeypatch, tmp_path):
