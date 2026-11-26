@@ -278,6 +278,9 @@ AGENT_STAGE_CAPS_BLOCK = 8      # choice (issue 458, item 4): capped replies in 
 AGENT_REQUEST_TIMEOUT_S = 900.0 # choice: one non-streaming response; prefill alone measured 42 to 78 s
                                 # at 130K to 204K tokens (spec section 3), and contexts here stay short
 TOOL_TIMEOUT_S = 1800.0         # choice: one shell command run for an agent
+SEARCH_TIMEOUT_S = 120.0        # choice: a shell command that reads a whole tree (grep -R, find, rg, ls -R, tree, du). A search over a directory
+                                # the agent should not read ran the full 1800 s in a stage 2 trial (issue 864); a search of a stage directory
+                                # ends in seconds. The operator sets another limit with ORCHARD_SEARCH_TIMEOUT_S (agent.search_timeout_from_env).
 TOOL_OUTPUT_CHARS = 12000       # choice: the head and tail of a command's output that go back to the model
 CONTEXT_FILE_CHARS = 4000       # choice: how much of each earlier stage's result file a new context holds
 SKILL_CHARS = 40000             # choice: a skill longer than this is cut, and the context says so
