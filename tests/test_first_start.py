@@ -353,3 +353,11 @@ def test_a_revision_that_climbs_out_of_the_snapshots_directory_is_no_snapshot(tm
         assert fs.snapshot_present(hf, "org/name", bad) is False
     for bad_repo in ("org", "org/name/extra", "/name", "org/..", "org/.hidden", "", "org/na me"):
         assert fs.snapshot_present(hf, bad_repo, "a" * 40) is False
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", '"text"', "7", "null"])
+def test_a_manifest_that_is_json_but_not_an_object_is_a_refusal(tmp_path, body):
+    d = package(tmp_path)
+    (d / "tt_kernel_manifest.json").write_text(body)
+    code, text = run([str(d)], ROOMY)
+    assert code == fs.EXIT_REFUSED and "manifest" in text

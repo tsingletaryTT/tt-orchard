@@ -6262,9 +6262,10 @@ N GB of free host RAM with N GB minimum, a `--ulimit memlock=` advice, a stated 
 
 On the figures of Hy4-flash: 658 GB free on one disk leaves 53 GB after the first start (605 GB taken, 40 GB margin: ok); 152 GB free blocks as `disk-full` (needs 645 GB); 90 GB of RAM
 warns, 10 GB blocks (needs 17 GB to start); the card's `--ulimit memlock=-1:-1` is a warning; 440 GB at 68 MB/s is about 108 minutes; the manifest's 21600 s timeout is ok because the card states no
-first-start time (a timeout below a stated time blocks). `tests/test_first_start.py` has 66 tests against excerpts of the real card and manifest (`tests/fixtures/first-start`). 30 mutations,
-each removing or loosening one guard, turned a test red and were restored; 2 more are equivalent (a boolean in the manifest timeout already fails the number parse, and a repo id
-cannot climb out of the hub cache because the slash is replaced before the path is built; the revision check is the guard that matters and has its own mutation).
+first-start time (a timeout below a stated time blocks). `tests/test_first_start.py` has 70 tests against excerpts of the real card and manifest (`tests/fixtures/first-start`), and the card and the manifest readers are registered in
+`tests/hostile_fs.py` (a pipe, a link, a directory, a sparse 1 GiB file). 31 mutations, each removing or loosening one guard, were run: 30 turned a test red and were restored; the one that
+did not is equivalent (a boolean in the manifest timeout already fails the number parse). A first table counted every non-zero exit as red, and one of its runs named a test file that does not
+exist; the rerun counts only a test failure (exit code 1) and caught a missing `expect=dict` guard on the manifest, which has a test now.
 
 Not done here: the check is not a step of `tt-orchard bringup` (a run's preflight covers the model it brings up and does not cover the package a coder or helper serves), it does not measure the link
 (the rate is an argument), and it reads no card wording outside the patterns. Related: issue 702 (disk for the Qwen4 release run) and 739 (host-resident experts).
