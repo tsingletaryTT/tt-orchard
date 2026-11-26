@@ -303,6 +303,23 @@ def default_facts(hf_home: Path, cache_root: Path, weights) -> dict:
             "snapshot_local": bool(weights) and snapshot_present(hf_home, *weights), "mem_available_gb": None if mem is None else mem / 1e9}
 
 
+def read_package(card_path, manifest_path):
+    """(the card text, the manifest or None). The card must be there and readable; a manifest that is not there is None, and one that cannot be read safely is a
+    refusal. Raises safeio.SafeReadError with a plain reason that holds no file content."""
+    card = safeio.read_text_checked(card_path, max_bytes=CARD_MAX_BYTES, errors="replace")
+    if card.missing:
+        raise safeio.ReadFailed("the package card is not there")
+    if card.refused:
+        raise safeio.ReadFailed("the package card is not readable: " + card.reason)
+    manifest = None
+    if manifest_path is not None:
+        m = safeio.read_json_checked(manifest_path, max_bytes=MANIFEST_MAX_BYTES, expect=dict)
+        if m.refused:
+            raise safeio.ReadFailed("the manifest is not readable: " + m.reason)
+        manifest = None if m.missing else m.value
+    return card.value, manifest
+
+
 def main(args, *, out, facts=None) -> int:
     link, code = _number(args.link_mbps, "--link-mbps", out)
     if code is not None:
@@ -318,20 +335,15 @@ def main(args, *, out, facts=None) -> int:
     if card_path is None:
         return _refuse(out, "give a package directory or --card")
     manifest_path = Path(args.manifest) if args.manifest else (pkg / "tt_kernel_manifest.json" if pkg else None)
-    card = safeio.read_text_checked(card_path, max_bytes=CARD_MAX_BYTES, errors="replace")
-    if card.missing or card.refused:
-        return _refuse(out, "the package card is not readable: " + (card.reason or "there is no such file"))
-    manifest = None
-    if manifest_path is not None:
-        m = safeio.read_json_checked(manifest_path, max_bytes=MANIFEST_MAX_BYTES, expect=dict)
-        if m.refused:
-            return _refuse(out, "the manifest is not readable: " + m.reason)
-        manifest = None if m.missing else m.value
+    try:
+        card_text, manifest = read_package(card_path, manifest_path)
+    except safeio.SafeReadError as exc:
+        return _refuse(out, exc.reason)
     hf_home = Path(os.path.expanduser(args.hf_home or os.environ.get("HF_HOME") or "~/.cache/huggingface"))
     cache_root = Path(os.path.expanduser(args.cache_root or "~/.cache/tt-model"))
     weights = manifest_weights(manifest)
     machine = (facts or (lambda h, c: default_facts(h, c, weights)))(hf_home, cache_root)
-    rows = check_first_start(parse_card(card.value), manifest_figures(manifest), free_gb=machine["free_gb"], same_device=machine["same_device"],
+    rows = check_first_start(parse_card(card_text), manifest_figures(manifest), free_gb=machine["free_gb"], same_device=machine["same_device"],
                              snapshot_local=machine["snapshot_local"], mem_available_gb=machine["mem_available_gb"], link_mb_s=link, ready_timeout_s=timeout,
                              min_free_gb=TEST_DISK_GB if margin is None else margin)
     print(f"tt-orchard first-start: {pkg or card_path}", file=out)
