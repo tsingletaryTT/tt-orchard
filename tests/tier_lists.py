@@ -28,6 +28,11 @@ WHOLE_REPO: dict[str, tuple[str, ...]] = {
     "tests/test_claude_md_size.py": (),
     "tests/test_runaway.py": ("test_no_source_test_or_doc_file_of_this_repository_is_called_a_loop",),
     "tests/test_block_family_authoring_skill.py": (),
+    "tests/test_loader_copies_checkpoint_tensors.py": (
+        "test_every_get_tensor_call_under_orchard_copies_or_is_listed_as_host_only",
+        "test_the_host_only_list_names_files_that_still_exist_and_still_call_get_tensor",
+        "test_the_scan_does_see_the_three_known_readers",
+    ),
 }
 
 # Test files the scanner check flags that are not guards, with the reason.
