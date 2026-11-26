@@ -1404,6 +1404,12 @@ def _live_probes(base: str, ck: Check, spec: Spec, extra: dict, single_rate, log
     results = [served_probes.probe_code(base, model, carry, timeout=t),
                served_probes.probe_long_prefill(base, model, carry, max_model_len=spec.max_model_len, timeout=t),
                served_probes.probe_batching(base, model, carry, single_rate=single_rate, max_num_seqs=spec.max_num_seqs, timeout=t)]
+    if isinstance(spec.max_num_seqs, int) and not isinstance(spec.max_num_seqs, bool) and spec.max_num_seqs > 1:
+        # Advisory (Lottolabs study, 2026-11-24): a batched server must return for each concurrent request the reply it returns alone, keep a request
+        # between other streams exact, and stay exact after a stream is cut mid-decode. Listed in the evidence, never a failed boot.
+        results += [served_probes.probe_concurrent_equals_alone(base, model, carry, n=spec.max_num_seqs, timeout=t),
+                    served_probes.probe_aba_isolation(base, model, carry, others=spec.max_num_seqs - 1, timeout=t),
+                    served_probes.probe_cancel_mid_decode(base, model, carry, timeout=t)]
     if ck.prefix_caching:
         results.append(served_probes.probe_prefix_reuse(base, model, carry, declared=True, max_model_len=spec.max_model_len, timeout=t))
         # Advisory (issue 83, tenstorrent/skills PR 42): a warm reply on a cached prefix against a cold one. It posts /reset_prefix_cache, which the boot
