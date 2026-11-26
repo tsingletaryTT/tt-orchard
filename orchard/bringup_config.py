@@ -325,7 +325,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                     graft_trial: bool = True, resume_aborted: bool = False,
                     sampling: str | None = None, full_port: bool = False, full_port_rehearsal: bool = False,
                     model_kind: str | None = None, port_repair_rounds: int | None = None, port_check_positions: int | None = None, fidelity_tokens: int | None = None, agreement_reference: bool | None = None,
-                    telegraph_config: Path | None = None, tool_dedupe: bool = True,
+                    telegraph_config: Path | None = None, tool_dedupe: bool = True, measured_miss_repair: bool = True,
                     weights_only_rehearsal: bool = False, thin_port: bool = False) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
@@ -396,6 +396,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--model-kind", model_kind]       # only when named: stage 0 otherwise reads the card and the architecture, and a resume keeps the ledger's answer
     if resume_aborted:
         argv.append("--resume-aborted")      # only when the operator asked: an abort is terminal otherwise
+    if not measured_miss_repair:
+        argv.append("--no-measured-miss-repair")       # only when the operator asked: the supervisor's default is on, and a resume keeps the recorded choice
     if not tool_dedupe:
         argv.append("--no-tool-dedupe")       # only when the operator asked: the supervisor's default is on, and a resume keeps the recorded choice
     if accept_credentials:

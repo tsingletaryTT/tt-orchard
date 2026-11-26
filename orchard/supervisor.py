@@ -948,7 +948,7 @@ class Supervisor:
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, port_check_positions: int = full_port.DEFAULT_POSITIONS, fidelity_tokens: int = 0, agreement_reference: bool = False, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
-                    abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
+                    abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None, measured_miss_repair: bool = True):
         self.run_dir = Path(run_dir).resolve()
         # Issues 560 and 578: the wait before the one retry of a start refused as 'in use' when no container explains it (0 turns the retry
         # off), how long an abandoned boot's `tt-model stop` may run, and what reads the device holders (tests replace it).
@@ -982,6 +982,11 @@ class Supervisor:
         # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
+        # `--no-measured-miss-repair` (issue 865): by default a check that ran to the end and measured an agreement below the bar is a failure the coder
+        # repairs, with the numbers in its task, and the furthest port is kept for the next attempt, as they already were when the helper drives the
+        # rounds. Off is the earlier behaviour for a coder-driven stage 2. Recorded in run_start only when off; `build` hands over the recorded value on
+        # a resume.
+        self.measured_miss_repair = bool(measured_miss_repair)
         self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
         self._thin_handover = ""                       # the note for the agent's repair step when the thin repair's history stopped a function (issue 783)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
@@ -1371,6 +1376,7 @@ class Supervisor:
                                **({"fidelity_tokens": self.fidelity_tokens} if self.fidelity_tokens else {}),
                                **({"agreement_reference": True} if self.agreement_reference else {}),
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
+                               **({"measured_miss_repair": False} if not self.measured_miss_repair else {}),
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
@@ -2974,8 +2980,12 @@ class Supervisor:
     def _repair_text(self, n: int, k: int, limit: int, failure: dict, raw: str) -> str:
         """The supervisor's message to a repair step: which round, where the check failed, and the end of its output."""
         if failure.get("kind") == "numerics":
+            previous = None                    # the agreement the last round started from, so the report can say whether the edit moved it
+            if k > 1:
+                earlier = repair_help._round_entry(self.ledger.read(), n, k - 1)
+                previous = repair_help._data(earlier).get("agreement") if earlier else None
             return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port ran to the end on the chips but disagrees with the CPU reference.",
-                               repair_help.numeric_report(failure), "The supervisor runs the same check again after this step, on the same chips and "
+                               repair_help.numeric_report(failure, previous), "The supervisor runs the same check again after this step, on the same chips and "
                                f"with the same reference. Only your edits under stages/{n}/port/ reach it.",
                                f"Tools: `python3 stages/{n}/stage_tools.py last-check` repeats these numbers. `python3 stages/{n}/stage_tools.py layer-diff` names the first "
                                "layer that differs from the CPU reference, when port_model.py defines `layer_outputs(model, ids)` (the stage task says what it returns). "
@@ -3028,9 +3038,9 @@ class Supervisor:
                 self._repair_verdicts(n, stage_dir)
                 entries = self.ledger.read()
             failure = port_repair.read_failure(self.run_dir, stage_dir)
-            if failure is None and self._helper_drive_on():
-                # A check that ran to the end with an agreement below the gate's bar is a failure of the port too (run16: top1 0.5625). Only the
-                # helper-driven loop reads it, so a coder-driven stage 2 keeps its rounds as before.
+            if failure is None and self._numerics_repair_on():
+                # A check that ran to the end with an agreement below the gate's bar is a failure of the port too (run16: top1 0.5625). The helper-driven
+                # loop always read it; a coder-driven stage 2 reads it too unless `--no-measured-miss-repair` keeps its rounds as they were (issue 865).
                 failure = port_repair.read_numerics(self.run_dir, stage_dir)
             # A repair edit that was made and not yet tested is not read as the end of the rounds: the old record names the port from before the
             # edit, so the numbers read as None, and an early return would send the repaired port to the finish step with that stale evidence.
@@ -3059,6 +3069,15 @@ class Supervisor:
                     # rounds end (review of PR 497).
                     self._record_best(n, stage_dir, failure)
                     self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
+                    return None
+                if (failure.get("kind") == "numerics" and not self._helper_drive_on()
+                        and port_repair.stalled(entries, n, failure["agreement"])):
+                    # The last STALL_ROUNDS rounds left the measured agreement where it was (issue 865): more rounds with the same kind of edit would
+                    # spend model steps and chip tests on a number that does not move. The port stays the furthest one (recorded first) and the
+                    # stage goes on as it does after the last round.
+                    self._record_best(n, stage_dir, failure)
+                    self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="no improvement", rounds=used, of=limit, op=failure["op"],
+                                       detail=port_repair.numeric_line(failure))
                     return None
                 k = used + 1
                 sealed = {rel: self._seal(stage_dir, rel) for rel in (port_repair.MARKER, port_repair.OUTPUT)}
@@ -4283,11 +4302,12 @@ class Supervisor:
                                            cheat=getattr(self, "_cheat_ok", True) and (stage_dir / full_port.CHEAT_MD_NAME).is_file(),
                                            construction=bool(seed.get("construction")),
                                            idioms=idioms_advertised(getattr(self, "_idioms_ok", True), stage_dir))
-            if spec.number == 2 and getattr(self, "telegraph", None) is not None:
+            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or getattr(self, "measured_miss_repair", False)):
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
                 self._best_restore = (None, None)
-                friend = restored or self._phone_a_friend(spec, stage_dir)      # a restored best port makes a fresh attempt-start draft unnecessary
+                # a restored best port makes a fresh attempt-start draft unnecessary; with no helper there is no draft to ask for
+                friend = restored or (self._phone_a_friend(spec, stage_dir) if getattr(self, "telegraph", None) is not None else "")
                 if friend:
                     note = note + "\n\n" + friend
             return swap_prepare.PrepareOutcome(False, note=note)
@@ -4560,7 +4580,7 @@ class Supervisor:
         """Keep a port whose check ran to the end, which ranks above every failure. The stage's gate may still refuse it (the check's agreement
         with the reference can be below the gate's minimum), and the next attempt should start from this port and not from an earlier failure
         (review of PR 497). Only a test record the supervisor itself wrote and the ledger holds counts."""
-        if n != 2 or not self._helper_drive_on():
+        if n != 2 or not (self._helper_drive_on() or (self._best_port_on() and getattr(self, "telegraph", None) is None)):
             return
         try:
             passed, _op, readable, numbers = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
@@ -4632,8 +4652,16 @@ class Supervisor:
     def _best_port_on(self) -> bool:
         """Whether the furthest port is kept across attempts: when the helper drives stage 2's repair rounds, and also when it only helps a
         coder-driven stage 2 (the helper and the round asks are on). A helper draft is tested before the coder's step (issue 596), so a draft
-        that got further than the port it replaced is worth keeping when the coder's step then stalls."""
-        return self._helper_drive_on() or (getattr(self, "telegraph", None) is not None and bool(self.repair_help))
+        that got further than the port it replaced is worth keeping when the coder's step then stalls. A coder-driven stage 2 keeps it too
+        unless `--no-measured-miss-repair` (issue 865): the next attempt then starts from the furthest port and not from the skeleton."""
+        return (self._helper_drive_on() or (getattr(self, "telegraph", None) is not None and bool(self.repair_help))
+                or bool(getattr(self, "measured_miss_repair", False) and getattr(self, "port_repair_rounds", 0) and getattr(self, "telegraph", None) is None))
+
+    def _numerics_repair_on(self) -> bool:
+        """Whether a check that ran to the end below the bar is read as a failure that earns a repair round: when the helper drives, and for a
+        stage 2 with no helper at all (no `telegraph`) unless `--no-measured-miss-repair` (issue 865). A run with a helper that only helps keeps
+        its earlier behaviour: its attempt-start asks and its draft tests were written for it."""
+        return self._helper_drive_on() or bool(getattr(self, "measured_miss_repair", False) and getattr(self, "telegraph", None) is None)
 
     def _helper_drive_on(self) -> bool:
         """Whether stage 2's repair rounds are driven by the helper: the helper and the round asks are on, and the operator said so
@@ -5054,7 +5082,7 @@ class Supervisor:
             # else). The standing draft is used only when no best port was restored: placed first, it would turn the skeleton into an older
             # draft and the restoration would then be refused (review of PR 497, round 3). `_prepare_in_code` reads the answer from here.
             self._best_restore = (str(stage_dir), None)
-            if spec.number == 2 and getattr(self, "telegraph", None) is not None:
+            if spec.number == 2 and (getattr(self, "telegraph", None) is not None or getattr(self, "measured_miss_repair", False)):
                 restored = self._restore_best_port(spec, stage_dir)
                 self._best_restore = (str(stage_dir), restored)
                 if restored:
@@ -6920,6 +6948,12 @@ def parse(argv=None):
                         "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
                         "that holds the text (docs/tool-result-dedupe.md). The ledger records the choice when it is off; a resume keeps the recorded "
                         "choice, and a resume that turns it off for a run that started with it on is refused")
+    r.add_argument("--no-measured-miss-repair", dest="no_measured_miss_repair", action="store_true",
+                   help="end a full-port stage 2 attempt at a check that ran to the end below the agreement bar, as before issue 865. By default a run with no helper "
+                        "gives the coder repair rounds for such a miss, with the numbers in its task, the rounds stop when three in a row leave the "
+                        "agreement where it was, and the furthest port is kept so the next attempt starts from it and not from the skeleton. The "
+                        "ledger records the choice when it is off; a resume keeps the recorded choice, and a resume that turns it off for a run that "
+                        "started with it on is refused")
     r.add_argument("--telegraph-config", metavar="FILE", default=None,
                    help="a TOML file with the [telegraph] table (bringup passes the config it was started with). When it enables the helper, a "
                         "full-port stage 2 whose attempts keep failing asks it once for a draft port (orchard/phone_a_friend.py); its caps apply. "
@@ -7187,6 +7221,14 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             raise ValueError("this run started with the tool-result dedupe on; --no-tool-dedupe differs. Leave the option out to resume with the recorded "
                              "value, or move this run's directory aside and start a new run (the dedupe changes what the agent was sent)")
         tool_dedupe = recorded_dedupe
+    measured_miss_repair = not getattr(args, "no_measured_miss_repair", False)
+    if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
+        recorded_miss = (progress.run_start or {}).get("measured_miss_repair", True) is not False
+        if not measured_miss_repair and recorded_miss:
+            raise ValueError("this run started with the measured-miss repair on; --no-measured-miss-repair differs. Leave the option out to resume with "
+                             "the recorded value, or move this run's directory aside and start a new run (the repair rounds are part of what the run's "
+                             "stage 2 attempts did)")
+        measured_miss_repair = recorded_miss
     # `--no-repair-help` is recorded in run_start only when off. A resumed run keeps it off: the opt-out says the port files are not sent to the
     # outside helper, and a resume that forgot it would send them (review of PR 496, round 4).
     repair_help_off = bool(getattr(args, "no_repair_help", False))
@@ -7252,7 +7294,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, agreement_reference=agreement_reference, tool_dedupe=tool_dedupe,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, port_check_positions=check_positions, fidelity_tokens=fidelity_tokens, agreement_reference=agreement_reference, tool_dedupe=tool_dedupe, measured_miss_repair=measured_miss_repair,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
                       weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,

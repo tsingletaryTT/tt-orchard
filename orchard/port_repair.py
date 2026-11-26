@@ -35,6 +35,9 @@ from orchard.stages import MOVE_ASIDE_DECISIONS
 
 DEFAULT_ROUNDS = 3                          # `--port-repair-rounds`: repair rounds per stage attempt
 MAX_ROUNDS = 10                             # the largest value the option takes: each round is a model step and a chip test
+STALL_ROUNDS = 3                            # choice (issue 865): rounds in a row that leave a measured agreement where it was end the rounds. Three is
+#                                             the default round count: with `--port-repair-rounds 3` the rule never fires before the rounds are spent, and
+#                                             with up to ten rounds it stops an attempt whose edits do not move the number after a full default budget
 DECISION = "port repair round"              # the ledger decision written BEFORE a round's repair step starts; `round` and `of` say which
 TESTED = "port repair tested"              # the ledger decision after each hardware test: `sources` is the digest of the port directory it ran against
 RERUN = "port repair rerun started"         # the ledger decision written just BEFORE a round's hardware rerun: `round`, and `record`, the seal of the failed test's record
@@ -129,6 +132,40 @@ def rounds_used(entries: list[dict], n: int) -> int:
         elif e.get("event") == "decision" and data.get("decision") == WITHDRAWN:
             used = max(0, used - 1)                    # the round was counted and never ran: a resume takes it again (review of PR 651)
     return used
+
+
+def round_agreements(entries: list[dict], n: int) -> list:
+    """The agreement each repair round of stage `n`'s current attempt started from, in order: a number for a round whose failure was a measured
+    miss, None for a round that began on a crash. It restarts where `rounds_used` does (a new attempt, a stage directory moved aside), and a
+    round the run took back (`WITHDRAWN`) is dropped, so a resume reads the same list the first run did."""
+    found: list = []
+    for e in entries:
+        if e.get("stage") != n:
+            continue
+        data = e.get("data") or {}
+        if e.get("event") == "stage_start" and data.get("resumed") is False:
+            found = []
+        elif e.get("event") == "decision" and data.get("decision") in MOVE_ASIDE_DECISIONS:
+            found = []
+        elif e.get("event") == "decision" and data.get("decision") == DECISION:
+            a = data.get("agreement")
+            found.append(a if data.get("op") == NUMERICS_OP and isinstance(a, (int, float)) and not isinstance(a, bool) and 0 <= a <= 1 else None)
+        elif e.get("event") == "decision" and data.get("decision") == WITHDRAWN and found:
+            found.pop()
+    return found
+
+
+def stalled(entries: list[dict], n: int, agreement, window: int = STALL_ROUNDS) -> bool:
+    """Did the last `window` repair rounds of this attempt leave a measured agreement where it was? `agreement` is the agreement the port has now
+    (the check that followed the last round). The agreements the rounds started from, then this one, make a list; the rule needs `window + 1`
+    numbers in a row at its end (a crash among them breaks the run, since a crash says nothing about the agreement), and it holds when none of the
+    last `window` is higher than the one before them. A rise anywhere in the window is progress, and the next window starts after it."""
+    values = round_agreements(entries, n) + [agreement]
+    tail = values[-(window + 1):]
+    ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 1
+    if window < 1 or len(tail) < window + 1 or not all(ok(v) for v in tail):
+        return False
+    return not any(v > tail[0] + 1e-9 for v in tail[1:])
 
 
 def stopped_noted(entries: list[dict], n: int) -> bool:

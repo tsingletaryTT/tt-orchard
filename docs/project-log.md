@@ -6284,6 +6284,28 @@ file the guard put back do not count. The nudge and both hint texts now say what
 content between the guard's two looks is the evidence for every shell command, so `sed -i`, `tee`, a redirect and `edit` are treated alike, and
 the `EDIT_RECORD` line that `edit` already printed is not used.
 
+## 2026-11-25: a measured miss earns coder repair rounds, and the furthest port is kept without the helper (branch fix-865-measured-miss-repair, issue 865)
+
+In a stage 2 trial of the tiny Qwen4 rehearsal with a hosted model as the only coder, a port reached the point where the check ran every request and
+wrote `top1_agreement 0.25`, below the 0.85 bar. The check exits 0 for that, so the coder-driven repair loop saw no failure: the stage ended with up to
+ten rounds still allowed, and the next attempt started from the skeleton and discarded that port. The helper-driven loop already read such a miss
+(`port_repair.read_numerics`) and kept the furthest port (`repair_help.save_best`, `_restore_best_port`); both were tied to the helper.
+
+Both now run for a stage 2 with no helper at all (no enabled `[telegraph]` table; a run with a helper that only helps keeps its earlier behaviour, because its attempt-start asks and draft tests were written for it, and the first full suite of this change failed 30 of those tests before the scope was narrowed), unless the operator passes `--no-measured-miss-repair` (recorded in `run_start` only when off, kept by a
+resume, refused when a resume turns it off for a run that started with it on; a run that began before the option has it on). The coder's repair task
+for a measured miss was already written (`_repair_text`, numerics branch); it now also carries the agreement the last round started from, so the
+report says whether the edit moved the number. `_repair_pending` reads a measured miss too, so a resume with rounds left continues them. The best
+port is recorded after every round and when the rounds end, a port that ran to the end ranks above one that crashed and a higher agreement above a
+lower one, and the start of the next attempt, or a resume that begins a fresh attempt, restores it when the port is still the skeleton and the
+snapshot still matches the hash the ledger holds (otherwise the ledger says `best port not restored` and the attempt starts from the skeleton).
+
+Bound: `port_repair.stalled` ends the rounds with reason `no improvement` when the last three rounds of an attempt (`STALL_ROUNDS`) left the
+measured agreement where it was. Three is the default round count, so the rule only matters with more rounds, up to ten. A crash among the last
+rounds breaks the run of numbers, a rise anywhere in the window is progress, and the helper-driven loop keeps its own rule (two rounds in a row with
+the same failure). The round limit is unchanged.
+
+Not done: the first-write deadline (12 turns), the turn limit (60) and the request timeout (900 s) are still constants, and the trial's extra numbers
+(logit gap, which functions compute only in torch) are not in the task text; the report holds what the check's record holds.
 ## 2026-11-25: a first-start check for a package, from its card and manifest (branch preflight-first-start-843, issue 843)
 
 Prompt (operator, 2026-11-25): "work through more issues". The first start of `raahemnabeel/hy4-flash` took a 107 min 43 s download (440 GB), 24 min 41 s to ready, built
