@@ -1,0 +1,2 @@
+target = "0.9.202"
+summary = "A generated port and the stage 2 skeleton copy each checkpoint tensor out of the memory-mapped file before it can reach ttnn.from_torch, which never returns on the PyPI ttnn 0.80.0 wheel for a mapped tensor (issue 813)."

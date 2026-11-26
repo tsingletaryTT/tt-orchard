@@ -55,11 +55,12 @@ SPARSE_ATTENTION_KEYS = frozenset({"index_topk", "index_n_heads", "index_head_di
 HYPER_CONNECTION_KEYS = frozenset({"hc_mult", "hc_eps", "hc_count", "hc_lowrank"})
 QWEN4_TYPES = ("qwen4_exp", "qwen4_exp_text")       # transformers' model types for the Qwen4 preview (and a dense variant, if one appears)
 NGRAM_EMBEDDING_KEYS = frozenset({"ngram_size", "ngram_vocab_size_base"})
+NGRAM_EMBEDDING_PREFIXES = ("engram_",)      # Hy4-flash: engram_layer_ids, engram_max_ngram_size, engram_n_embed_per_ngram, ...
 MIXER_RULES = {
     "multi_latent_attention": "the config has kv_lora_rank",
     "sparse_attention": "the config has an attention indexer key (index_topk, index_n_heads, index_head_dim, indexer_budget, indexer_n_heads or indexer_head_dim)",
     "hyper_connections": "the config has a hyper-connection key (hc_mult, hc_eps, hc_count, hc_lowrank or a key starting with hyper_connection)",
-    "ngram_embedding": "the config has an n-gram embedding key (ngram_size or ngram_vocab_size_base)",
+    "ngram_embedding": "the config has an n-gram embedding key (ngram_size, ngram_vocab_size_base or a key starting with engram_)",
     "looped_layers": "the config has a loop_config that runs a block of layers more than once for each token",
 }
 
@@ -291,6 +292,14 @@ class Hazard:
                 "stage2_check": self.stage2_check, "also_on_nearest": self.also_on_nearest}
 
 
+# A published bundle that serves a model the table flags: the flagged rows describe the stock ttnn ops, and the bundle's own kernels may not hit them.
+# The scan cannot tell, so its notes say what the bundle's card claims and that nobody here has measured it. model_type -> (rows, bundle, the claim).
+PUBLISHED_BUNDLE_NOTES = {
+    "hy_v4_flash": (("routed_experts_above_256", "mla_flash_decode_needs_core_grid"), "raahemnabeel/hy4-flash",
+                    "serves the model on four dies with its own gather kernels for the 512 experts and its own latent attention"),
+}
+
+
 @dataclass(frozen=True)
 class HazardScan:
     hazards: tuple
@@ -313,14 +322,14 @@ def _dims(config, what: str) -> mc.ModelDims:
 
 def _mixers(d: mc.ModelDims) -> list[str]:
     """The mixer kinds a model uses, sorted. Full and sliding-window attention are both `attention`."""
-    kinds = {"attention" if t in ("full_attention", "sliding_attention", "attention") else t for t in d.layer_types}
+    kinds = {"attention" if t in ("full_attention", "sliding_attention", "attention", "deepseek_sparse_attention") else t for t in d.layer_types}
     if d.mla:
         kinds.add("multi_latent_attention")
     if d.keys & SPARSE_ATTENTION_KEYS:
         kinds.add("sparse_attention")
     if d.keys & HYPER_CONNECTION_KEYS or any(k.startswith("hyper_connection") for k in d.keys):
         kinds.add("hyper_connections")
-    if d.keys & NGRAM_EMBEDDING_KEYS:
+    if d.keys & NGRAM_EMBEDDING_KEYS or any(k.startswith(NGRAM_EMBEDDING_PREFIXES) for k in d.keys):
         kinds.add("ngram_embedding")
     if any(n > 1 for n in d.loop_passes):
         kinds.add("looped_layers")
@@ -495,6 +504,11 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
         notes.append(f"the model kind is {kind}" + (" with a bare backbone" if has_output_head is False and kind == "generative" else "")
                      + f": {why}, and the vocabulary hazards ({', '.join(FULL_HEAD_HAZARDS)}) were not applied"
                      + (f" (they would have hit: {', '.join(skipped)})" if skipped else ""))
+    bundle = PUBLISHED_BUNDLE_NOTES.get(xm["model_type"])
+    if bundle and any(row in mine for row in bundle[0]):
+        flagged = [row for row in bundle[0] if row in mine]
+        notes.append(f"{' and '.join(flagged)} describe the stock ttnn ops. The published bundle {bundle[1]} {bundle[2]} (a claim from its card; "
+                     "nobody here has measured it), so the scan cannot tell whether these rows bite that bundle. They stay in the list")
     if xm["hc_count"] and xm["hc_lowrank"] is None:
         notes.append("the config has hc_count but no hc_lowrank; the scan does not assume one (a full-size reading is 640, a TP2 shard 320)")
     if xm["hc_lowrank"] and xm["hc_count"] is None:

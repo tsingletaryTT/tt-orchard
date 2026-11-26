@@ -1,0 +1,3 @@
+target = "0.9.198"
+summary = "served probes: concurrent requests equal the same request alone, A-B-A isolation, cancel mid-decode, speculation on equals off, streamed tool calls, and sampling options under speculation; can boot lists three of them."
+kind = "feature"
